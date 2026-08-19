@@ -31,6 +31,18 @@ class SheetsClient:
         self.gc = gspread.authorize(creds)
         self.sheet = self.gc.open_by_key(config.GOOGLE_SHEET_ID)
 
+
+# Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
+# (proses autentikasi itu yang bikin lambat kalau diulang terus).
+_cached_client = None
+
+
+def get_sheets_client() -> "SheetsClient":
+    global _cached_client
+    if _cached_client is None:
+        _cached_client = SheetsClient()
+    return _cached_client
+
     # ---------- ORDERS ----------
 
     def add_order_rows(self, order: dict, minggu_po: str):
@@ -42,11 +54,16 @@ class SheetsClient:
         }
         Satu order bisa berisi banyak item -> tiap item jadi 1 baris,
         biar gampang di-rekap per rasa.
+
+        Return: list of dict record item yang baru disimpan (dipakai langsung
+        buat generate invoice/surat jalan tanpa perlu baca ulang ke Sheets,
+        karena baca-langsung-setelah-tulis kadang belum "settle" di Google Sheets).
         """
         ws = self.sheet.worksheet(config.SHEET_ORDERS)
         price_map = self.get_price_map()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         rows = []
+        order_records = []
         for item in order["items"]:
             harga = price_map.get((item["kategori"], item["rasa"]), 0)
             subtotal = harga * item["qty"]
@@ -65,7 +82,18 @@ class SheetsClient:
                 order.get("ongkir", 0),
                 "Pending",
             ])
+            order_records.append({
+                "Kategori": item["kategori"],
+                "Rasa": item["rasa"],
+                "Qty": item["qty"],
+                "Harga_Satuan": harga,
+                "Metode": order["metode"],
+                "No_HP": order["no_hp"],
+                "Alamat": order["alamat"],
+                "Ongkir": order.get("ongkir", 0),
+            })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
+        return order_records
 
     def get_all_orders(self):
         ws = self.sheet.worksheet(config.SHEET_ORDERS)
