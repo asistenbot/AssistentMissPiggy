@@ -98,6 +98,32 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
         grand_total += subtotal_kategori
 
     lines.append(f"\n*Total semua produk: {grand_total} pcs*")
+
+    # ---- Bagian tambahan: pembagian per customer, Kirim vs Ambil ----
+    per_customer = {}
+    for o in orders:
+        nama = o.get("Nama_Customer", "-")
+        metode = o.get("Metode", "-")
+        per_customer.setdefault((metode, nama), []).append(o)
+
+    lines.append("\n" + "─" * 24)
+    lines.append("*PEMBAGIAN KIRIM / AMBIL*")
+
+    kirim_entries = {k: v for k, v in per_customer.items() if k[0] == "Kirim"}
+    if kirim_entries:
+        lines.append("\n🛵 *Dikirim Kurir:*")
+        for (metode, nama), items in kirim_entries.items():
+            item_text = ", ".join(f"{it['Rasa']} x{int(it['Qty'])}" for it in items)
+            alamat = items[0].get("Alamat", "-")
+            lines.append(f"  • {nama} — {alamat}\n    {item_text}")
+
+    ambil_entries = {k: v for k, v in per_customer.items() if k[0] == "Ambil"}
+    if ambil_entries:
+        lines.append("\n🏠 *Diambil Sendiri:*")
+        for (metode, nama), items in ambil_entries.items():
+            item_text = ", ".join(f"{it['Rasa']} x{int(it['Qty'])}" for it in items)
+            lines.append(f"  • {nama}: {item_text}")
+
     return "\n".join(lines)
 
 
