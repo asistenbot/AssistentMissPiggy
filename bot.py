@@ -16,7 +16,7 @@ from telegram.ext import (
 import config
 import date_helpers
 import documents
-from sheets_client import SheetsClient
+from sheets_client import get_sheets_client
 from ai_parser import parse_customer_chat
 from scheduler_jobs import setup_scheduler
 
@@ -53,7 +53,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def pricelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sheets = SheetsClient()
+    sheets = get_sheets_client()
     text = sheets.get_pricelist_text()
     await update.message.reply_text(f"*PRICE LIST — {config.BUSINESS_NAME}*\n{text}",
                                      parse_mode="Markdown")
@@ -61,7 +61,7 @@ async def pricelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sheets = SheetsClient()
+    sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_orders_by_week(minggu_po)
     text = documents.build_production_recap(minggu_po, orders)
@@ -74,7 +74,7 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not nama:
         await update.message.reply_text("Format: /invoice Nama Customer")
         return
-    sheets = SheetsClient()
+    sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
     text = documents.build_invoice(nama, minggu_po, orders)
@@ -87,7 +87,7 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not nama:
         await update.message.reply_text("Format: /suratjalan Nama Customer")
         return
-    sheets = SheetsClient()
+    sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
     text = documents.build_surat_jalan(nama, minggu_po, orders)
@@ -96,7 +96,7 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sheets = SheetsClient()
+    sheets = get_sheets_client()
     if context.args:
         try:
             year, month = map(int, context.args[0].split("-"))
@@ -190,11 +190,10 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ongkir": 0,
     }
 
-    sheets = SheetsClient()
+    sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    sheets.add_order_rows(order, minggu_po)
+    orders = sheets.add_order_rows(order, minggu_po)
 
-    orders = sheets.get_orders_by_customer_week(order["nama"], minggu_po)
     invoice_text = documents.build_invoice(order["nama"], minggu_po, orders)
     surat_jalan_text = documents.build_surat_jalan(order["nama"], minggu_po, orders)
 
