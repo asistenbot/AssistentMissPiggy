@@ -172,12 +172,20 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Dibatalin ya.")
         return
 
+    # Cegah klik dobel: begitu diproses, langsung matiin tombol & kasih flag,
+    # biar klik kedua (atau nyasar) nggak nyimpen data yang sama 2x.
+    if context.user_data.get("saving_in_progress"):
+        return
+    context.user_data["saving_in_progress"] = True
+
     parsed = context.user_data.get("pending_order")
     if not parsed or not parsed.get("items"):
         await query.edit_message_text("Nggak ada data order yang tersimpan. Kirim ulang chat-nya ya.")
+        context.user_data["saving_in_progress"] = False
         return
 
-    # Ongkir ditanya manual dulu -> untuk versi awal, set default 0 lalu owner bisa edit di Sheets
+    await query.edit_message_text("Menyimpan...")
+
     order = {
         "nama": parsed.get("nama") or "Tanpa Nama",
         "no_hp": parsed.get("no_hp") or "-",
@@ -192,16 +200,32 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.add_order_rows(order, minggu_po)
+
+    try:
+        orders = await asyncio.wait_for(
+            asyncio.to_thread(sheets.add_order_rows, order, minggu_po), timeout=30
+        )
+    except asyncio.TimeoutError:
+        await query.message.reply_text(
+            "Timeout — gagal simpan ke Sheets (lebih dari 30 detik). "
+            "Cek koneksi Google Sheets, lalu kirim ulang chat order-nya."
+        )
+        context.user_data["saving_in_progress"] = False
+        return
+    except Exception as e:
+        await query.message.reply_text(f"Gagal simpan ke Sheets: {e}\nKirim ulang chat-nya ya.")
+        context.user_data["saving_in_progress"] = False
+        return
 
     invoice_text = documents.build_invoice(order["nama"], minggu_po, orders)
     surat_jalan_text = documents.build_surat_jalan(order["nama"], minggu_po, orders)
 
-    await query.edit_message_text("Tersimpan! Ini invoice & surat jalannya:")
+    await query.message.reply_text("Tersimpan! Ini invoice & surat jalannya:")
     await query.message.reply_text(invoice_text, parse_mode="Markdown")
     await query.message.reply_text(surat_jalan_text, parse_mode="Markdown")
 
     context.user_data.pop("pending_order", None)
+    context.user_data["saving_in_progress"] = False
 
 
 async def on_startup(app: Application):
