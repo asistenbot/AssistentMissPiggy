@@ -39,14 +39,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Halo! Ini asisten admin PO {config.BUSINESS_NAME}.\n\n"
         "Cara pakai:\n"
-        "- Paste/forward chat customer ke sini, gua bakal parse otomatis jadi order.\n"
+        "- Paste/forward chat customer ke sini, akan diparse otomatis jadi order.\n"
         "- /pricelist — lihat daftar harga\n"
         "- /rekap — rekap produksi minggu berjalan\n"
         "- /invoice Nama Customer — bikin ulang invoice\n"
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n\n"
-        "Auto-recap produksi bakal gua kirim tiap Rabu jam 15:00, 16:00, dan 19:00 WIB."
+        "Auto-recap produksi akan dikirim tiap Rabu jam 15:00, 16:00, dan 19:00 WIB."
     )
 
 
@@ -117,7 +117,7 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = update.message.text
-    await update.message.reply_text("Lagi gua parse ya...")
+    await update.message.reply_text("Sedang diproses...")
 
     parsed = parse_customer_chat(raw_text)
     context.user_data["pending_order"] = parsed
@@ -197,14 +197,6 @@ async def on_startup(app: Application):
 
 
 def main():
-    # --- DEBUG SEMENTARA: cek apakah token beneran kebaca ---
-    token = config.TELEGRAM_BOT_TOKEN
-    if token:
-        logger.info(f"DEBUG token OK, panjang={len(token)}, awalan={token[:6]}...")
-    else:
-        logger.info("DEBUG token KOSONG / None - environment variable nggak kebaca!")
-    # --- akhir debug ---
-
     app = (
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
