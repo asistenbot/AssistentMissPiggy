@@ -17,6 +17,7 @@ import config
 import date_helpers
 import documents
 import receipt
+import invoice_image
 from sheets_client import get_sheets_client
 from ai_parser import parse_customer_chat
 from scheduler_jobs import setup_scheduler
@@ -80,6 +81,10 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
     text = documents.build_invoice(nama, minggu_po, orders)
     await update.message.reply_text(text, parse_mode="Markdown")
+
+    if orders:
+        img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
+        await update.message.reply_photo(photo=img, caption="Invoice (siap kirim ke customer)")
 
 
 @owner_only
@@ -229,6 +234,10 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text("Tersimpan! Ini invoice & surat jalannya:")
     await query.message.reply_text(invoice_text, parse_mode="Markdown")
+
+    invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders)
+    await query.message.reply_photo(photo=invoice_img, caption="Invoice (siap kirim ke customer)")
+
     await query.message.reply_text(surat_jalan_text, parse_mode="Markdown")
 
     # Surat jalan versi gambar struk, siap di-share ke app printer Bluetooth
