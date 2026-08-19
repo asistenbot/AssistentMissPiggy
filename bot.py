@@ -3,6 +3,7 @@ Bot utama Miss Piggy PO Assistant.
 Jalankan: python bot.py
 """
 
+import asyncio
 import logging
 import datetime
 
@@ -119,7 +120,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = update.message.text
     await update.message.reply_text("Sedang diproses...")
 
-    parsed = parse_customer_chat(raw_text)
+    try:
+        # Jalanin pemanggilan AI di thread terpisah (bukan blocking event loop bot),
+        # dan kasih batas waktu maksimal 40 detik biar nggak nge-gantung selamanya.
+        parsed = await asyncio.wait_for(
+            asyncio.to_thread(parse_customer_chat, raw_text), timeout=40
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Timeout — proses parsing kelamaan (lebih dari 40 detik). "
+            "Coba kirim ulang pesannya."
+        )
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ada error pas parsing: {e}\nCoba kirim ulang.")
+        return
+
     context.user_data["pending_order"] = parsed
 
     items_text = "\n".join(
