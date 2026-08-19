@@ -7,7 +7,7 @@ import anthropic
 
 import config
 
-client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=30.0)
 
 PARSE_SYSTEM_PROMPT = """Kamu adalah asisten admin toko roti "Miss Piggy".
 Tugasmu HANYA satu: ubah chat customer (yang sering berantakan, tidak lengkap,
@@ -38,12 +38,20 @@ apa yang kurang di field "catatan".
 
 
 def parse_customer_chat(raw_text: str) -> dict:
-    response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=1000,
-        system=PARSE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": raw_text}],
-    )
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=1000,
+            system=PARSE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": raw_text}],
+        )
+    except Exception as e:
+        return {
+            "nama": None, "no_hp": None, "alamat": None, "metode": None,
+            "items": [], "catatan": f"Gagal hubungi AI: {e}. Coba kirim ulang.",
+            "kelengkapan": "kurang_lengkap",
+        }
+
     text = response.content[0].text.strip()
     # Jaga-jaga kalau model tetap kasih code fence
     text = text.replace("```json", "").replace("```", "").strip()
