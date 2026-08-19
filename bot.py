@@ -19,7 +19,7 @@ import documents
 import receipt
 import invoice_image
 from sheets_client import get_sheets_client
-from ai_parser import parse_customer_chat
+from ai_parser import parse_customer_chat, parse_order_edit
 from scheduler_jobs import setup_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -47,6 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /rekap — rekap produksi minggu berjalan\n"
         "- /invoice Nama Customer — bikin ulang invoice\n"
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
+        "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n\n"
         "Auto-recap produksi akan dikirim tiap Rabu jam 15:00, 16:00, dan 19:00 WIB."
@@ -125,10 +126,51 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+@owner_only
+async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nama = " ".join(context.args)
+    if not nama:
+        await update.message.reply_text("Format: /edit Nama Customer")
+        return
+
+    sheets = get_sheets_client()
+    minggu_po = date_helpers.current_po_week_thursday()
+    orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+
+    if not orders:
+        await update.message.reply_text(f"Nggak ada order atas nama {nama} untuk minggu ini.")
+        return
+
+    item_list_text = "\n".join(f"  - {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}" for o in orders)
+
+    context.user_data["editing_order"] = {
+        "nama": orders[0].get("Nama_Customer", nama),
+        "no_hp": orders[0].get("No_HP", "-"),
+        "alamat": orders[0].get("Alamat", "-"),
+        "metode": orders[0].get("Metode", "Ambil"),
+        "existing_items": [
+            {"kategori": o["Kategori"], "rasa": o["Rasa"], "qty": int(o["Qty"])} for o in orders
+        ],
+        "minggu_po": minggu_po,
+    }
+
+    await update.message.reply_text(
+        f"*Order {nama} saat ini:*\n{item_list_text}\n\n"
+        f"Ketik perubahannya (bebas, misal: 'tambah donat gula 5, ham cheese jadi 20 pcs').",
+        parse_mode="Markdown",
+    )
+
+
 # ---------------- FREE-TEXT ORDER PARSING ----------------
 
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Kalau lagi dalam mode edit order (habis /edit Nama Customer), teks ini
+    # adalah instruksi perubahan, BUKAN order baru -- routing beda.
+    if context.user_data.get("editing_order"):
+        await handle_edit_instruction(update, context)
+        return
+
     raw_text = update.message.text
     await update.message.reply_text("Sedang diproses...")
 
@@ -250,6 +292,135 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["saving_in_progress"] = False
 
 
+# ---------------- EDIT ORDER ----------------
+
+async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    editing = context.user_data["editing_order"]
+    instruction = update.message.text
+    await update.message.reply_text("Menghitung ulang order...")
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(parse_order_edit, editing["existing_items"], instruction),
+            timeout=40,
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Timeout — proses ngitung ulang kelamaan. Coba kirim ulang instruksinya."
+        )
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ada error: {e}\nCoba kirim ulang instruksinya.")
+        return
+
+    new_items = result.get("items", [])
+    catatan = result.get("catatan", "-")
+
+    old_text = "\n".join(
+        f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
+    ) or "  (kosong)"
+    new_text = "\n".join(
+        f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in new_items
+    ) or "  (kosong)"
+
+    preview = (
+        f"*Order Lama:*\n{old_text}\n\n"
+        f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
+        f"Catatan: {catatan}\n\n"
+        f"⚠️ Kalau dikonfirmasi, order lama bakal DIHAPUS total dan diganti yang baru ini."
+    )
+
+    context.user_data["pending_edit"] = {
+        "nama": editing["nama"],
+        "no_hp": editing["no_hp"],
+        "alamat": editing["alamat"],
+        "metode": editing["metode"],
+        "items": new_items,
+        "minggu_po": editing["minggu_po"],
+    }
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Konfirmasi Edit", callback_data="confirm_edit"),
+        InlineKeyboardButton("❌ Batal", callback_data="cancel_edit"),
+    ]])
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel_edit":
+        context.user_data.pop("editing_order", None)
+        context.user_data.pop("pending_edit", None)
+        await query.edit_message_text("Edit dibatalin, order lama nggak berubah.")
+        return
+
+    if context.user_data.get("saving_in_progress"):
+        return
+    context.user_data["saving_in_progress"] = True
+
+    pending = context.user_data.get("pending_edit")
+    if not pending:
+        await query.edit_message_text("Data edit nggak ketemu, coba /edit lagi.")
+        context.user_data["saving_in_progress"] = False
+        return
+
+    await query.edit_message_text("Menyimpan perubahan...")
+
+    sheets = get_sheets_client()
+
+    def _hapus_lalu_tulis_ulang():
+        sheets.delete_customer_week_rows(pending["nama"], pending["minggu_po"])
+        order = {
+            "nama": pending["nama"],
+            "no_hp": pending["no_hp"],
+            "alamat": pending["alamat"],
+            "metode": pending["metode"],
+            "items": pending["items"],
+            "ongkir": 0,
+        }
+        return sheets.add_order_rows(order, pending["minggu_po"])
+
+    try:
+        orders = await asyncio.wait_for(asyncio.to_thread(_hapus_lalu_tulis_ulang), timeout=30)
+    except asyncio.TimeoutError:
+        await query.message.reply_text(
+            "Timeout pas nyimpen perubahan. PENTING: cek manual di Google Sheets, "
+            "soalnya order lama mungkin udah kehapus tapi yang baru belum sempet ditulis. "
+            "Kalau perlu, input ulang manual dulu."
+        )
+        context.user_data["saving_in_progress"] = False
+        return
+    except Exception as e:
+        await query.message.reply_text(f"Gagal simpan perubahan: {e}\nCek manual di Sheets ya.")
+        context.user_data["saving_in_progress"] = False
+        return
+
+    minggu_po = pending["minggu_po"]
+    nama = pending["nama"]
+
+    invoice_text = documents.build_invoice(nama, minggu_po, orders)
+    surat_jalan_text = documents.build_surat_jalan(nama, minggu_po, orders)
+
+    await query.message.reply_text("Order berhasil diupdate! Ini invoice & surat jalan terbaru:")
+    await query.message.reply_text(invoice_text, parse_mode="Markdown")
+
+    invoice_img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
+    await query.message.reply_photo(photo=invoice_img, caption="Invoice terbaru (siap kirim ke customer)")
+
+    await query.message.reply_text(surat_jalan_text, parse_mode="Markdown")
+
+    img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
+    await query.message.reply_photo(
+        photo=img, caption="Surat jalan terbaru (siap print) — tap gambar → Share → app printer"
+    )
+
+    context.user_data.pop("editing_order", None)
+    context.user_data.pop("pending_edit", None)
+    context.user_data["saving_in_progress"] = False
+
+
 async def on_startup(app: Application):
     # Start scheduler di dalam event loop yang sudah jalan (lebih stabil
     # daripada start sebelum run_polling dipanggil).
@@ -271,7 +442,9 @@ def main():
     app.add_handler(CommandHandler("invoice", invoice_cmd))
     app.add_handler(CommandHandler("suratjalan", suratjalan_cmd))
     app.add_handler(CommandHandler("laporanbulanan", laporanbulanan_cmd))
+    app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order)$"))
+    app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot jalan...")
