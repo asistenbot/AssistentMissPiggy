@@ -13,7 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 import config
 import date_helpers
 import documents
-from sheets_client import SheetsClient
+from sheets_client import get_sheets_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def setup_scheduler(bot):
 
 async def send_auto_recap(bot):
     try:
-        sheets = SheetsClient()
+        sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
         orders = sheets.get_orders_by_week(minggu_po)
         text = documents.build_production_recap(minggu_po, orders)
@@ -55,7 +55,7 @@ async def send_auto_recap(bot):
 
 async def send_auto_monthly_report(bot):
     try:
-        sheets = SheetsClient()
+        sheets = get_sheets_client()
         tz = date_helpers.get_timezone()
         now = datetime.datetime.now(tz)
         year, month = date_helpers.previous_month(now.year, now.month)
