@@ -31,18 +31,6 @@ class SheetsClient:
         self.gc = gspread.authorize(creds)
         self.sheet = self.gc.open_by_key(config.GOOGLE_SHEET_ID)
 
-
-# Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
-# (proses autentikasi itu yang bikin lambat kalau diulang terus).
-_cached_client = None
-
-
-def get_sheets_client() -> "SheetsClient":
-    global _cached_client
-    if _cached_client is None:
-        _cached_client = SheetsClient()
-    return _cached_client
-
     # ---------- ORDERS ----------
 
     def add_order_rows(self, order: dict, minggu_po: str):
@@ -151,3 +139,15 @@ def get_sheets_client() -> "SheetsClient":
         ws = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
         records = ws.get_all_records()
         return {r["Kategori"].strip(): int(r["Harga_Dough_Per_Unit"]) for r in records}
+
+
+# Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
+# (proses autentikasi itu yang bikin lambat kalau diulang terus).
+_cached_client = None
+
+
+def get_sheets_client() -> "SheetsClient":
+    global _cached_client
+    if _cached_client is None:
+        _cached_client = SheetsClient()
+    return _cached_client
