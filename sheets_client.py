@@ -128,21 +128,58 @@ class SheetsClient:
         return self._normalize_records(ws)
 
     def get_orders_by_week(self, minggu_po: str):
-        def cocok(nilai_di_sheet):
-            teks = str(nilai_di_sheet).strip()
-            if teks == minggu_po:
-                return True
-            # Coba beberapa format lain, jaga-jaga Google Sheets ubah formatnya sendiri
-            for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"):
-                try:
-                    d = datetime.datetime.strptime(teks, fmt)
-                    if d.strftime("%Y-%m-%d") == minggu_po:
-                        return True
-                except ValueError:
-                    continue
-            return False
+        return [o for o in self.get_all_orders() if self._minggu_po_cocok(o.get("Minggu_PO"), minggu_po)]
 
-        return [o for o in self.get_all_orders() if cocok(o.get("Minggu_PO"))]
+    def _minggu_po_cocok(self, nilai_di_sheet, minggu_po):
+        teks = str(nilai_di_sheet).strip()
+        if teks == minggu_po:
+            return True
+        # Coba beberapa format lain, jaga-jaga Google Sheets ubah formatnya sendiri
+        for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                d = datetime.datetime.strptime(teks, fmt)
+                if d.strftime("%Y-%m-%d") == minggu_po:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    def delete_customer_week_rows(self, nama_customer: str, minggu_po: str) -> int:
+        """
+        Hapus SEMUA baris order milik nama_customer untuk minggu_po tertentu.
+        Dipakai buat fitur edit order: hapus yang lama dulu, baru ditulis ulang
+        yang baru -- biar nggak dobel keitung di rekap produksi.
+
+        Return: jumlah baris yang dihapus.
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_minggu = header.index("Minggu_PO")
+            idx_nama = header.index("Nama_Customer")
+        except ValueError:
+            # Kolom nggak ketemu sama sekali -- jangan hapus apa-apa, lebih aman diem
+            return 0
+
+        nama_target = nama_customer.strip().lower()
+        rows_to_delete = []
+        for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header, gspread 1-indexed
+            if len(row) <= max(idx_minggu, idx_nama):
+                continue
+            row_nama = row[idx_nama].strip().lower()
+            row_minggu = row[idx_minggu]
+            if row_nama == nama_target and self._minggu_po_cocok(row_minggu, minggu_po):
+                rows_to_delete.append(i)
+
+        # Hapus dari baris PALING BAWAH dulu, biar nomor baris di atasnya nggak geser
+        for row_idx in sorted(rows_to_delete, reverse=True):
+            ws.delete_rows(row_idx)
+
+        return len(rows_to_delete)
 
     def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
         return [
@@ -154,12 +191,16 @@ class SheetsClient:
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""
         result = []
         for o in self.get_all_orders():
-            try:
-                d = datetime.datetime.strptime(str(o.get("Minggu_PO")), "%Y-%m-%d")
-                if d.year == year and d.month == month:
-                    result.append(o)
-            except (ValueError, TypeError):
-                continue
+            teks = str(o.get("Minggu_PO")).strip()
+            d = None
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+                try:
+                    d = datetime.datetime.strptime(teks, fmt)
+                    break
+                except ValueError:
+                    continue
+            if d and d.year == year and d.month == month:
+                result.append(o)
         return result
 
     # ---------- PRICE LIST ----------
