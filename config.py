@@ -58,12 +58,12 @@ MONTHLY_REPORT_HOUR = 9
 MONTHLY_REPORT_MINUTE = 0
 
 # ==== INFO PEMBAYARAN (buat invoice customer) ====
-BANK_NAME = "GANTI_NAMA_BANK"          # contoh: "BCA"
-BANK_ACCOUNT_NUMBER = "GANTI_NOMOR_REKENING"
-BANK_ACCOUNT_NAME = "GANTI_ATAS_NAMA"
+BANK_NAME = "BCA"          # contoh: "BCA"
+BANK_ACCOUNT_NUMBER = "3791233052"
+BANK_ACCOUNT_NAME = "Merina"
 
 # ==== LOKASI PICKUP ====
-PICKUP_ADDRESS = "GANTI_ALAMAT_MISS_PIGGY"
+PICKUP_ADDRESS = "Babakan Jeruk IIIB no 25 ( akan di info bisa di ambil jam brp )"
 
 # ==== KATEGORI PRODUK ====
 # Dipakai buat validasi & buat laporan bulanan ke supplier.
