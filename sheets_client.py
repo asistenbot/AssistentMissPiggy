@@ -79,7 +79,8 @@ class SheetsClient:
             subtotal = harga * item["qty"]
             rows.append([
                 timestamp,
-                minggu_po,
+                f"'{minggu_po}",  # apostrof di depan = paksa Sheets simpen sebagai teks,
+                                   # biar nggak otomatis diubah jadi format Date sendiri
                 order["nama"],
                 order["no_hp"],
                 order["alamat"],
@@ -110,7 +111,21 @@ class SheetsClient:
         return ws.get_all_records()
 
     def get_orders_by_week(self, minggu_po: str):
-        return [o for o in self.get_all_orders() if str(o.get("Minggu_PO")) == minggu_po]
+        def cocok(nilai_di_sheet):
+            teks = str(nilai_di_sheet).strip()
+            if teks == minggu_po:
+                return True
+            # Coba beberapa format lain, jaga-jaga Google Sheets ubah formatnya sendiri
+            for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"):
+                try:
+                    d = datetime.datetime.strptime(teks, fmt)
+                    if d.strftime("%Y-%m-%d") == minggu_po:
+                        return True
+                except ValueError:
+                    continue
+            return False
+
+        return [o for o in self.get_all_orders() if cocok(o.get("Minggu_PO"))]
 
     def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
         return [
