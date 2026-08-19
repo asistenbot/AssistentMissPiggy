@@ -16,6 +16,7 @@ from telegram.ext import (
 import config
 import date_helpers
 import documents
+import receipt
 from sheets_client import get_sheets_client
 from ai_parser import parse_customer_chat
 from scheduler_jobs import setup_scheduler
@@ -92,6 +93,12 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
     text = documents.build_surat_jalan(nama, minggu_po, orders)
     await update.message.reply_text(text, parse_mode="Markdown")
+
+    if orders:
+        img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
+        await update.message.reply_photo(
+            photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
+        )
 
 
 @owner_only
@@ -223,6 +230,12 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("Tersimpan! Ini invoice & surat jalannya:")
     await query.message.reply_text(invoice_text, parse_mode="Markdown")
     await query.message.reply_text(surat_jalan_text, parse_mode="Markdown")
+
+    # Surat jalan versi gambar struk, siap di-share ke app printer Bluetooth
+    img = receipt.generate_surat_jalan_image(order["nama"], minggu_po, orders)
+    await query.message.reply_photo(
+        photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
+    )
 
     context.user_data.pop("pending_order", None)
     context.user_data["saving_in_progress"] = False
