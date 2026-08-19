@@ -197,6 +197,14 @@ async def on_startup(app: Application):
 
 
 def main():
+    # --- DEBUG SEMENTARA: cek apakah token beneran kebaca ---
+    token = config.TELEGRAM_BOT_TOKEN
+    if token:
+        logger.info(f"DEBUG token OK, panjang={len(token)}, awalan={token[:6]}...")
+    else:
+        logger.info("DEBUG token KOSONG / None - environment variable nggak kebaca!")
+    # --- akhir debug ---
+
     app = (
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
