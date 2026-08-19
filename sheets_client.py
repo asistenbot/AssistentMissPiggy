@@ -34,6 +34,23 @@ class SheetsClient:
 
     # ---------- ORDERS ----------
 
+    def _normalize_records(self, ws):
+        """
+        Ambil semua baris dari sebuah worksheet, tapi "normalisasi" nama
+        kolomnya dulu (spasi jadi underscore, dll) -- biar nggak masalah
+        walau header di Sheets ditulis 'Minggu PO' atau 'Minggu_PO', dua-duanya
+        tetap kebaca sebagai field yang sama oleh kode ini.
+        """
+        records = ws.get_all_records()
+        normalized = []
+        for r in records:
+            new_r = {}
+            for k, v in r.items():
+                key_norm = k.strip().replace(" ", "_")
+                new_r[key_norm] = v
+            normalized.append(new_r)
+        return normalized
+
     def _find_price(self, price_map, kategori, rasa):
         """
         Cari harga untuk (kategori, rasa). Kalau nama rasa-nya nggak persis sama
@@ -108,7 +125,7 @@ class SheetsClient:
 
     def get_all_orders(self):
         ws = self.sheet.worksheet(config.SHEET_ORDERS)
-        return ws.get_all_records()
+        return self._normalize_records(ws)
 
     def get_orders_by_week(self, minggu_po: str):
         def cocok(nilai_di_sheet):
@@ -150,7 +167,7 @@ class SheetsClient:
     def get_price_map(self):
         """Return dict {(kategori, rasa): harga}"""
         ws = self.sheet.worksheet(config.SHEET_PRICELIST)
-        records = ws.get_all_records()
+        records = self._normalize_records(ws)
         return {
             (r["Kategori"].strip(), r["Rasa"].strip()): int(r["Harga"])
             for r in records
@@ -158,7 +175,7 @@ class SheetsClient:
 
     def get_pricelist_text(self):
         ws = self.sheet.worksheet(config.SHEET_PRICELIST)
-        records = ws.get_all_records()
+        records = self._normalize_records(ws)
         by_category = {}
         for r in records:
             by_category.setdefault(r["Kategori"], []).append((r["Rasa"], r["Harga"]))
@@ -174,7 +191,7 @@ class SheetsClient:
     def get_dough_price_map(self):
         """Return dict {kategori: harga_dough_per_unit}"""
         ws = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
-        records = ws.get_all_records()
+        records = self._normalize_records(ws)
         return {r["Kategori"].strip(): int(r["Harga_Dough_Per_Unit"]) for r in records}
 
 
