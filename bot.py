@@ -19,7 +19,7 @@ import documents
 import receipt
 import invoice_image
 from sheets_client import get_sheets_client
-from ai_parser import parse_customer_chat, parse_order_edit
+from ai_parser import parse_customer_chat, parse_order_edit, classify_intent
 from scheduler_jobs import setup_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -41,7 +41,12 @@ def owner_only(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Halo! Ini asisten admin PO {config.BUSINESS_NAME}.\n\n"
-        "Cara pakai:\n"
+        "Bisa pake bahasa natural, nggak wajib '/'. Contoh:\n"
+        "- 'tolong minta rekap produksi'\n"
+        "- 'mau liat laporan bulanan dong'\n"
+        "- 'yang atas nama Audry, tambah roti bakso 5'\n"
+        "- atau paste langsung chat customer buat order baru\n\n"
+        "Command '/' juga tetap bisa dipakai:\n"
         "- Paste/forward chat customer ke sini, akan diparse otomatis jadi order.\n"
         "- /pricelist — lihat daftar harga\n"
         "- /rekap — rekap produksi minggu berjalan\n"
@@ -80,12 +85,13 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
-    text = documents.build_invoice(nama, minggu_po, orders)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    if not orders:
+        text = documents.build_invoice(nama, minggu_po, orders)
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
 
-    if orders:
-        img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
-        await update.message.reply_photo(photo=img, caption="Invoice (siap kirim ke customer)")
+    img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
+    await update.message.reply_photo(photo=img, caption="Invoice (siap kirim ke customer)")
 
 
 @owner_only
@@ -97,14 +103,15 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
-    text = documents.build_surat_jalan(nama, minggu_po, orders)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    if not orders:
+        text = documents.build_surat_jalan(nama, minggu_po, orders)
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
 
-    if orders:
-        img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
-        await update.message.reply_photo(
-            photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
-        )
+    img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
+    await update.message.reply_photo(
+        photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
+    )
 
 
 @owner_only
@@ -151,6 +158,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "existing_items": [
             {"kategori": o["Kategori"], "rasa": o["Rasa"], "qty": int(o["Qty"])} for o in orders
         ],
+        "ongkir": int(orders[0].get("Ongkir", 0) or 0),
         "minggu_po": minggu_po,
     }
 
@@ -165,13 +173,76 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Kalau lagi dalam mode edit order (habis /edit Nama Customer), teks ini
-    # adalah instruksi perubahan, BUKAN order baru -- routing beda.
+    # Kalau lagi dalam mode edit order (habis /edit Nama Customer atau baru
+    # ke-detect mau edit), teks ini instruksi perubahan, BUKAN order baru.
     if context.user_data.get("editing_order"):
         await handle_edit_instruction(update, context)
         return
 
     raw_text = update.message.text
+
+    # Coba tebak dulu maksud admin (bahasa natural, nggak wajib pakai '/')
+    try:
+        intent_result = await asyncio.wait_for(
+            asyncio.to_thread(classify_intent, raw_text), timeout=20
+        )
+    except Exception:
+        intent_result = {"intent": "order_baru", "nama_customer": None, "bulan": None, "instruksi_edit": None}
+
+    intent = intent_result.get("intent", "order_baru")
+
+    if intent == "rekap_produksi":
+        await rekap(update, context)
+        return
+
+    if intent == "laporan_bulanan":
+        bulan = intent_result.get("bulan")
+        context.args = [bulan] if bulan else []
+        await laporanbulanan_cmd(update, context)
+        return
+
+    if intent == "pricelist":
+        await pricelist(update, context)
+        return
+
+    if intent == "invoice" and intent_result.get("nama_customer"):
+        context.args = intent_result["nama_customer"].split()
+        await invoice_cmd(update, context)
+        return
+
+    if intent == "surat_jalan" and intent_result.get("nama_customer"):
+        context.args = intent_result["nama_customer"].split()
+        await suratjalan_cmd(update, context)
+        return
+
+    if intent == "edit_order" and intent_result.get("nama_customer"):
+        nama = intent_result["nama_customer"]
+        instruksi = intent_result.get("instruksi_edit") or raw_text
+
+        sheets = get_sheets_client()
+        minggu_po = date_helpers.current_po_week_thursday()
+        orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+
+        if not orders:
+            await update.message.reply_text(f"Nggak ada order atas nama {nama} untuk minggu ini.")
+            return
+
+        context.user_data["editing_order"] = {
+            "nama": orders[0].get("Nama_Customer", nama),
+            "no_hp": orders[0].get("No_HP", "-"),
+            "alamat": orders[0].get("Alamat", "-"),
+            "metode": orders[0].get("Metode", "Ambil"),
+            "existing_items": [
+                {"kategori": o["Kategori"], "rasa": o["Rasa"], "qty": int(o["Qty"])} for o in orders
+            ],
+            "ongkir": int(orders[0].get("Ongkir", 0) or 0),
+            "minggu_po": minggu_po,
+        }
+        # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
+        await handle_edit_instruction(update, context, instruction_override=instruksi)
+        return
+
+    # Default: anggap order baru (perilaku sama seperti sebelumnya)
     await update.message.reply_text("Sedang diproses...")
 
     try:
@@ -204,6 +275,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
         f"Items:\n{items_text}\n"
+        f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
         f"Catatan: {parsed.get('catatan') or '-'}\n\n"
     )
 
@@ -249,7 +321,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"kategori": i["kategori"], "rasa": i["rasa"], "qty": int(i["qty"])}
             for i in parsed["items"]
         ],
-        "ongkir": 0,
+        "ongkir": int(parsed.get("ongkir") or 0),
     }
 
     sheets = get_sheets_client()
@@ -271,18 +343,11 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["saving_in_progress"] = False
         return
 
-    invoice_text = documents.build_invoice(order["nama"], minggu_po, orders)
-    surat_jalan_text = documents.build_surat_jalan(order["nama"], minggu_po, orders)
-
-    await query.message.reply_text("Tersimpan! Ini invoice & surat jalannya:")
-    await query.message.reply_text(invoice_text, parse_mode="Markdown")
+    await query.message.reply_text("Tersimpan!")
 
     invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders)
     await query.message.reply_photo(photo=invoice_img, caption="Invoice (siap kirim ke customer)")
 
-    await query.message.reply_text(surat_jalan_text, parse_mode="Markdown")
-
-    # Surat jalan versi gambar struk, siap di-share ke app printer Bluetooth
     img = receipt.generate_surat_jalan_image(order["nama"], minggu_po, orders)
     await query.message.reply_photo(
         photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
@@ -294,9 +359,10 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- EDIT ORDER ----------------
 
-async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                    instruction_override: str = None):
     editing = context.user_data["editing_order"]
-    instruction = update.message.text
+    instruction = instruction_override or update.message.text
     await update.message.reply_text("Menghitung ulang order...")
 
     try:
@@ -315,6 +381,10 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
 
     new_items = result.get("items", [])
     catatan = result.get("catatan", "-")
+    # Kalau admin sebut ongkir baru di instruksinya, pakai itu. Kalau nggak
+    # disebut sama sekali, PERTAHANKAN ongkir lama (jangan direset ke 0).
+    ongkir_final = result.get("ongkir")
+    ongkir_final = int(ongkir_final) if ongkir_final is not None else editing["ongkir"]
 
     old_text = "\n".join(
         f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
@@ -323,9 +393,12 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in new_items
     ) or "  (kosong)"
 
+    ongkir_rupiah = "Rp" + format(ongkir_final, ",").replace(",", ".")
+
     preview = (
         f"*Order Lama:*\n{old_text}\n\n"
         f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
+        f"Ongkir: {ongkir_rupiah}\n"
         f"Catatan: {catatan}\n\n"
         f"⚠️ Kalau dikonfirmasi, order lama bakal DIHAPUS total dan diganti yang baru ini."
     )
@@ -336,6 +409,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         "alamat": editing["alamat"],
         "metode": editing["metode"],
         "items": new_items,
+        "ongkir": ongkir_final,
         "minggu_po": editing["minggu_po"],
     }
 
@@ -378,7 +452,7 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
             "alamat": pending["alamat"],
             "metode": pending["metode"],
             "items": pending["items"],
-            "ongkir": 0,
+            "ongkir": pending.get("ongkir", 0),
         }
         return sheets.add_order_rows(order, pending["minggu_po"])
 
@@ -400,16 +474,10 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     minggu_po = pending["minggu_po"]
     nama = pending["nama"]
 
-    invoice_text = documents.build_invoice(nama, minggu_po, orders)
-    surat_jalan_text = documents.build_surat_jalan(nama, minggu_po, orders)
-
-    await query.message.reply_text("Order berhasil diupdate! Ini invoice & surat jalan terbaru:")
-    await query.message.reply_text(invoice_text, parse_mode="Markdown")
+    await query.message.reply_text("Order berhasil diupdate!")
 
     invoice_img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
     await query.message.reply_photo(photo=invoice_img, caption="Invoice terbaru (siap kirim ke customer)")
-
-    await query.message.reply_text(surat_jalan_text, parse_mode="Markdown")
 
     img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
     await query.message.reply_photo(

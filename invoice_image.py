@@ -10,31 +10,45 @@ from PIL import Image, ImageDraw, ImageFont
 import config
 
 WIDTH = 520
-PADDING = 28
-HEADER_HEIGHT = 100
-ROW_HEIGHT = 28
+PADDING = 30
+HEADER_HEIGHT = 130
+ROW_HEIGHT = 30
+LOGO_ICON_PATH = "assets/logo_icon.png"
+LOGO_WORDMARK_PATH = "assets/logo_wordmark_light.png"
 
-COLOR_BG = (253, 247, 238)        # krem lembut
-COLOR_HEADER = (120, 74, 46)      # coklat tua
-COLOR_HEADER_SUB = (232, 210, 190)
-COLOR_TEXT = (45, 32, 24)
-COLOR_MUTED = (130, 110, 95)
-COLOR_LINE = (216, 196, 175)
-COLOR_ACCENT = (196, 106, 41)     # oranye
-COLOR_TOTAL_BG = (243, 224, 200)
+# Palet warna bakery yang lebih hangat & "niat"
+COLOR_BG = (250, 244, 233)          # krem lembut
+COLOR_HEADER = (68, 40, 24)         # coklat tua elegan
+COLOR_HEADER_TEXT_SUB = (216, 186, 140)
+COLOR_GOLD = (191, 143, 63)         # aksen emas hangat
+COLOR_TEXT = (52, 36, 26)
+COLOR_MUTED = (140, 118, 98)
+COLOR_LINE = (222, 202, 176)
+COLOR_ROW_ALT = (243, 232, 211)     # selang-seling baris tabel
+COLOR_TOTAL_BG = (191, 143, 63)     # kotak total emas
+COLOR_TOTAL_TEXT = (54, 34, 12)
 
 FONT_DIR = "/usr/share/fonts/truetype/dejavu/"
-F_TITLE = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 28)
-F_SUB = ImageFont.truetype(FONT_DIR + "DejaVuSans.ttf", 15)
+F_TITLE = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 27)
+F_SUB = ImageFont.truetype(FONT_DIR + "DejaVuSans.ttf", 14)
 F_BODY = ImageFont.truetype(FONT_DIR + "DejaVuSans.ttf", 16)
 F_BODY_BOLD = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 16)
 F_SMALL = ImageFont.truetype(FONT_DIR + "DejaVuSans.ttf", 13)
 F_TOTAL_LABEL = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 18)
-F_TOTAL_VALUE = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 22)
+F_TOTAL_VALUE = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 23)
+F_MONOGRAM = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 20)
 
 
 def rupiah(n):
     return "Rp" + f"{int(n):,}".replace(",", ".")
+
+
+def _dashed_line(draw, x1, y, x2, color, dash=5, gap=4, width=1):
+    x = x1
+    while x < x2:
+        x_end = min(x + dash, x2)
+        draw.line([x, y, x_end, y], fill=color, width=width)
+        x += dash + gap
 
 
 def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> BytesIO:
@@ -43,20 +57,19 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     col_qty = x_left + 230
     col_harga = x_right - 100
 
-    # ---- Hitung total tinggi gambar dulu (nggak usah gambar beneran) ----
+    # ---- Hitung total tinggi gambar dulu ----
     y = HEADER_HEIGHT + PADDING
-    y += 24 + 22 + 22 + 20  # kepada, tanggal, metode, spasi
-    y += 6  # garis
-    y += ROW_HEIGHT  # header tabel
+    y += 24 + 22 + 22 + 20
+    y += 6
+    y += ROW_HEIGHT
     y += len(orders) * ROW_HEIGHT
-    y += 10  # garis
-    y += 22 + 22 + 16  # subtotal, ongkir, spasi
-    total_box_top = y
-    y += 46  # kotak total
-    y += 16  # garis + spasi
-    y += 20 + 22 + 22  # label pembayaran, bank, atas nama
-    y += 20  # garis
-    y += 30  # footer
+    y += 10
+    y += 22 + 22 + 16
+    y += 50  # kotak total
+    y += 16
+    y += 20 + 22 + 22
+    y += 20
+    y += 34
     total_height = y + PADDING
 
     img = Image.new("RGB", (WIDTH, total_height), COLOR_BG)
@@ -64,10 +77,40 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
 
     # ---- Header banner ----
     draw.rectangle([0, 0, WIDTH, HEADER_HEIGHT], fill=COLOR_HEADER)
-    draw.text((WIDTH / 2, HEADER_HEIGHT / 2 - 14), config.BUSINESS_NAME,
-              font=F_TITLE, fill="white", anchor="mm")
-    draw.text((WIDTH / 2, HEADER_HEIGHT / 2 + 18), "I N V O I C E",
-              font=F_SUB, fill=COLOR_HEADER_SUB, anchor="mm")
+    draw.rectangle([0, HEADER_HEIGHT, WIDTH, HEADER_HEIGHT + 5], fill=COLOR_GOLD)
+
+    lockup_cy = HEADER_HEIGHT * 0.42  # sedikit di atas tengah, sisain ruang buat subtitle di bawah
+
+    try:
+        icon = Image.open(LOGO_ICON_PATH).convert("RGBA")
+        icon_h = 54
+        icon.thumbnail((icon_h * 3, icon_h), Image.LANCZOS)
+        # thumbnail jaga rasio, hitung ulang biar tingginya pas icon_h
+        scale = icon_h / icon.height
+        icon = icon.resize((int(icon.width * scale), icon_h), Image.LANCZOS)
+
+        wordmark = Image.open(LOGO_WORDMARK_PATH).convert("RGBA")
+        wm_h = 46
+        scale_wm = wm_h / wordmark.height
+        wordmark = wordmark.resize((int(wordmark.width * scale_wm), wm_h), Image.LANCZOS)
+
+        gap = 14
+        total_w = icon.width + gap + wordmark.width
+        start_x = int((WIDTH - total_w) / 2)
+
+        icon_y = int(lockup_cy - icon.height / 2)
+        img.paste(icon, (start_x, icon_y), icon)
+
+        wm_x = start_x + icon.width + gap
+        wm_y = int(lockup_cy - wordmark.height / 2)
+        img.paste(wordmark, (wm_x, wm_y), wordmark)
+
+    except FileNotFoundError:
+        # Fallback kalau file logo nggak ketemu di server: pakai teks biasa
+        draw.text((WIDTH / 2, lockup_cy), config.BUSINESS_NAME, font=F_TITLE, fill="white", anchor="mm")
+
+    draw.text((WIDTH / 2, HEADER_HEIGHT * 0.8), "I N V O I C E",
+              font=F_SUB, fill=COLOR_HEADER_TEXT_SUB, anchor="mm")
 
     y = HEADER_HEIGHT + PADDING
     draw.text((x_left, y), f"Kepada: {nama_customer}", font=F_BODY_BOLD, fill=COLOR_TEXT)
@@ -78,7 +121,7 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     draw.text((x_left, y), f"Metode: {metode}", font=F_BODY, fill=COLOR_MUTED)
     y += 20
 
-    draw.line([x_left, y, x_right, y], fill=COLOR_LINE, width=1)
+    _dashed_line(draw, x_left, y, x_right, COLOR_GOLD)
     y += 6
 
     # ---- Header tabel ----
@@ -87,21 +130,25 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     draw.text((col_harga, y), "Harga", font=F_BODY_BOLD, fill=COLOR_TEXT, anchor="ra")
     draw.text((x_right, y), "Subtotal", font=F_BODY_BOLD, fill=COLOR_TEXT, anchor="ra")
     y += ROW_HEIGHT
-    draw.line([x_left, y - 6, x_right, y - 6], fill=COLOR_LINE, width=1)
+    draw.line([x_left, y - 8, x_right, y - 8], fill=COLOR_HEADER, width=1)
 
     total = 0
-    for o in orders:
+    for i, o in enumerate(orders):
         qty = int(o["Qty"])
         harga = int(o["Harga_Satuan"])
         subtotal = qty * harga
         total += subtotal
+
+        if i % 2 == 1:
+            draw.rectangle([x_left - 8, y - 6, x_right + 8, y + ROW_HEIGHT - 8], fill=COLOR_ROW_ALT)
+
         draw.text((x_left, y), str(o["Rasa"])[:18], font=F_BODY, fill=COLOR_TEXT)
         draw.text((col_qty, y), f"x{qty}", font=F_BODY, fill=COLOR_TEXT)
         draw.text((col_harga, y), rupiah(harga), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
         draw.text((x_right, y), rupiah(subtotal), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
         y += ROW_HEIGHT
 
-    draw.line([x_left, y, x_right, y], fill=COLOR_LINE, width=1)
+    _dashed_line(draw, x_left, y, x_right, COLOR_LINE)
     y += 14
 
     ongkir = int(orders[0].get("Ongkir", 0) or 0) if orders else 0
@@ -112,17 +159,17 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     y += 22
     draw.text((x_left, y), "Ongkir", font=F_BODY, fill=COLOR_MUTED)
     draw.text((x_right, y), rupiah(ongkir), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
-    y += 24
+    y += 26
 
-    # ---- Kotak Total ----
-    draw.rectangle([x_left - 6, y, x_right + 6, y + 40], fill=COLOR_TOTAL_BG)
-    draw.text((x_left, y + 20), "TOTAL", font=F_TOTAL_LABEL, fill=COLOR_ACCENT, anchor="lm")
-    draw.text((x_right, y + 20), rupiah(grand_total), font=F_TOTAL_VALUE, fill=COLOR_ACCENT, anchor="rm")
-    y += 56
+    # ---- Kotak Total (rounded, emas) ----
+    draw.rounded_rectangle([x_left - 8, y, x_right + 8, y + 46], radius=10, fill=COLOR_TOTAL_BG)
+    draw.text((x_left + 4, y + 23), "TOTAL", font=F_TOTAL_LABEL, fill=COLOR_TOTAL_TEXT, anchor="lm")
+    draw.text((x_right - 4, y + 23), rupiah(grand_total), font=F_TOTAL_VALUE, fill=COLOR_TOTAL_TEXT, anchor="rm")
+    y += 62
 
     # ---- Info Pembayaran ----
-    draw.line([x_left, y, x_right, y], fill=COLOR_LINE, width=1)
-    y += 14
+    _dashed_line(draw, x_left, y, x_right, COLOR_GOLD)
+    y += 16
     draw.text((x_left, y), "Pembayaran transfer ke:", font=F_SMALL, fill=COLOR_MUTED)
     y += 20
     draw.text((x_left, y), f"{config.BANK_NAME} — {config.BANK_ACCOUNT_NUMBER}",
@@ -131,7 +178,7 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     draw.text((x_left, y), f"a.n. {config.BANK_ACCOUNT_NAME}", font=F_BODY, fill=COLOR_MUTED)
     y += 20
 
-    draw.line([x_left, y, x_right, y], fill=COLOR_LINE, width=1)
+    _dashed_line(draw, x_left, y, x_right, COLOR_LINE)
     y += 18
     draw.text((WIDTH / 2, y), f"Terima kasih sudah pesan di {config.BUSINESS_NAME}",
               font=F_SMALL, fill=COLOR_MUTED, anchor="mm")
