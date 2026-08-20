@@ -73,6 +73,7 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
 
 
 def build_production_recap(minggu_po: str, orders: list) -> str:
+    """Total produksi per rasa aja (buat baking), tanpa pembagian kirim/ambil."""
     if not orders:
         return f"Belum ada order masuk untuk minggu PO {minggu_po}."
 
@@ -98,32 +99,45 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
         grand_total += subtotal_kategori
 
     lines.append(f"\n*Total semua produk: {grand_total} pcs*")
+    return "\n".join(lines)
 
-    # ---- Bagian tambahan: pembagian per customer, Kirim vs Ambil ----
+
+def _group_per_customer(orders: list) -> dict:
     per_customer = {}
     for o in orders:
         nama = o.get("Nama_Customer", "-")
         metode = o.get("Metode", "-")
         per_customer.setdefault((metode, nama), []).append(o)
+    return per_customer
 
-    lines.append("\n" + "─" * 24)
-    lines.append("*PEMBAGIAN KIRIM / AMBIL*")
 
+def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
+    """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
+    ke bagian gudang/kurir tanpa perlu crop screenshot."""
+    per_customer = _group_per_customer(orders)
     kirim_entries = {k: v for k, v in per_customer.items() if k[0] == "Kirim"}
-    if kirim_entries:
-        lines.append("\n🛵 *Dikirim Kurir:*")
-        for (metode, nama), items in kirim_entries.items():
-            no_hp = items[0].get("No_HP", "-")
-            alamat = items[0].get("Alamat", "-")
-            lines.append(f"  • {nama} — {alamat} — {no_hp}")
+    if not kirim_entries:
+        return None
 
+    lines = [f"🛵 *DIKIRIM KURIR — Minggu PO {minggu_po}*\n"]
+    for (metode, nama), items in kirim_entries.items():
+        no_hp = items[0].get("No_HP", "-")
+        alamat = items[0].get("Alamat", "-")
+        lines.append(f"• {nama} — {alamat} — {no_hp}")
+    return "\n".join(lines)
+
+
+def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
+    """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
+    per_customer = _group_per_customer(orders)
     ambil_entries = {k: v for k, v in per_customer.items() if k[0] == "Ambil"}
-    if ambil_entries:
-        lines.append("\n🏠 *Diambil Sendiri:*")
-        for (metode, nama), items in ambil_entries.items():
-            no_hp = items[0].get("No_HP", "-")
-            lines.append(f"  • {nama} — {no_hp}")
+    if not ambil_entries:
+        return None
 
+    lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
+    for (metode, nama), items in ambil_entries.items():
+        no_hp = items[0].get("No_HP", "-")
+        lines.append(f"• {nama} — {no_hp}")
     return "\n".join(lines)
 
 
