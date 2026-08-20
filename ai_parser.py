@@ -58,7 +58,25 @@ ATURAN PENTING soal mencocokkan item pesanan ke daftar di atas:
    di daftar dan apa kemungkinan yang dimaksud.
 4. Field "kategori" dan "rasa" di output HARUS ditulis PERSIS sama seperti di
    daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas.
-"""
+{alias_text}"""
+
+
+def _build_alias_text():
+    aliases = getattr(config, "PRODUCT_ALIASES", None)
+    if not aliases:
+        return ""
+    lines = [
+        "\nATURAN TETAP (PRIORITAS PALING TINGGI, bukan kasus ambigu -- JANGAN "
+        "tandai kurang_lengkap atau minta konfirmasi buat kasus-kasus di bawah "
+        "ini, langsung terapkan):"
+    ]
+    for alias in aliases:
+        lines.append(
+            f'- Kalau customer bilang "{alias["sebutan"]}", itu PASTI maksudnya '
+            f'kategori "{alias["kategori"]}" rasa "{alias["rasa"]}". Langsung '
+            f'pakai ini tanpa ragu.'
+        )
+    return "\n".join(lines)
 
 PARSE_SYSTEM_PROMPT = PARSE_SYSTEM_PROMPT_BASE
 
@@ -125,7 +143,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
             by_kategori.setdefault(kategori, []).append(rasa)
         catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
         catalog_text = "\n".join(catalog_lines)
-        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text)
+        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
 
     try:
         response = client.messages.create(
@@ -175,7 +193,7 @@ def parse_order_edit(existing_items: list, instruction: str, catalog: list = Non
             by_kategori.setdefault(kategori, []).append(rasa)
         catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
         catalog_text = "\n".join(catalog_lines)
-        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text)
+        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
 
     try:
         response = client.messages.create(
