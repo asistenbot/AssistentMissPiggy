@@ -58,12 +58,12 @@ MONTHLY_REPORT_HOUR = 9
 MONTHLY_REPORT_MINUTE = 0
 
 # ==== INFO PEMBAYARAN (buat invoice customer) ====
-BANK_NAME = "BCA"          # contoh: "BCA"
+BANK_NAME = "BCA"
 BANK_ACCOUNT_NUMBER = "3791233052"
 BANK_ACCOUNT_NAME = "Merina"
 
 # ==== LOKASI PICKUP ====
-PICKUP_ADDRESS = "Babakan Jeruk IIIB no 25 ( akan di info bisa di ambil jam brp )"
+PICKUP_ADDRESS = "Babakan Jeruk IIIB No. 25 (akan diinfo jika sudah bisa diambil, biasanya jam 14.00-15.00)"
 
 # ==== KATEGORI PRODUK ====
 # Dipakai buat validasi & buat laporan bulanan ke supplier.
@@ -79,3 +79,20 @@ CATEGORIES = [
 ]
 
 BUSINESS_NAME = "Miss Piggy"
+
+# ==== ALIAS / SINONIM PRODUK YANG PASTI ====
+# Kalau customer nyebut nama di 'sebutan', itu SELALU dianggap SAMA DENGAN
+# kategori+rasa yang ditentukan, TANPA perlu konfirmasi ke admin lagi.
+# Beda dari kasus yang beneran ambigu (misal "Ham Cheese" bisa Roti atau Roti
+# Gandum) yang emang harus ditanya dulu -- alias ini untuk kasus yang UDAH PASTI
+# menurut bisnis lo, cuma istilahnya beda dari nama resmi di PriceList.
+#
+# Tambahin baris baru di sini kapan aja kalau nemu kasus serupa, format:
+# {"sebutan": "penjelasan kapan alias ini berlaku", "kategori": "...", "rasa": "..."}
+PRODUCT_ALIASES = [
+    {
+        "sebutan": "Donat Coklat (disebut tanpa kata lain seperti 'celup')",
+        "kategori": "Donat",
+        "rasa": "Meises",
+    },
+]
