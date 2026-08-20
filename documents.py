@@ -3,7 +3,6 @@ Generate teks Invoice, Surat Jalan, Rekap Produksi, dan Laporan Bulanan.
 Semua dalam format teks rapi (Markdown Telegram) biar gampang di-forward/copas.
 """
 
-import calendar
 import datetime
 
 import config
@@ -141,19 +140,37 @@ def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     return "\n".join(lines)
 
 
-def build_monthly_supplier_report(year: int, month: int, orders: list, dough_price_map: dict) -> str:
-    month_name = calendar.month_name[month]
-    if not orders:
-        return f"Nggak ada data order untuk bulan {month_name} {year}."
+_NAMA_BULAN_ID = {
+    1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
+    7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember",
+}
 
+
+def format_periode_label(year_start: int, month_start: int, year_end: int, month_end: int) -> str:
+    """Bikin label periode yang enak dibaca, entah cuma 1 bulan atau rentang
+    beberapa bulan. Contoh: 'Juli 2026' atau 'Juli - Agustus 2026' atau
+    'Desember 2026 - Januari 2027'."""
+    nama_mulai = _NAMA_BULAN_ID[month_start]
+    nama_akhir = _NAMA_BULAN_ID[month_end]
+
+    if year_start == year_end and month_start == month_end:
+        return f"{nama_mulai} {year_start}"
+    if year_start == year_end:
+        return f"{nama_mulai} - {nama_akhir} {year_start}"
+    return f"{nama_mulai} {year_start} - {nama_akhir} {year_end}"
+
+
+def aggregate_dough(orders: list, dough_price_map: dict):
+    """Hitung total qty & total bayar per kategori dari daftar order.
+    Return: (rows, grand_total_qty, grand_total_bayar)
+    rows = list of (kategori, qty, harga_dough, subtotal), cuma kategori yang qty>0.
+    Dipakai bareng buat versi teks (Telegram) dan versi PDF (print A4)."""
     qty_per_category = {}
     for o in orders:
         kategori = o["Kategori"]
         qty_per_category[kategori] = qty_per_category.get(kategori, 0) + int(o["Qty"])
 
-    lines = [f"*LAPORAN BULANAN SUPPLIER — {month_name} {year}*"]
-    lines.append(f"({config.BUSINESS_NAME})\n")
-
+    rows = []
     grand_total_qty = 0
     grand_total_bayar = 0
     for kategori in config.CATEGORIES:
@@ -164,11 +181,95 @@ def build_monthly_supplier_report(year: int, month: int, orders: list, dough_pri
         bayar = qty * harga_dough
         grand_total_qty += qty
         grand_total_bayar += bayar
-        lines.append(
-            f"{kategori}: {qty} pcs x {rupiah(harga_dough)} = {rupiah(bayar)}"
-        )
+        rows.append((kategori, qty, harga_dough, bayar))
 
-    lines.append(f"\nTotal Qty: {grand_total_qty} pcs")
-    lines.append(f"*Total Bayar ke Supplier: {rupiah(grand_total_bayar)}*")
+    return rows, grand_total_qty, grand_total_bayar
+
+
+def aggregate_dough_by_month(orders: list, dough_price_map: dict):
+    """Kelompokin orders per BULAN dulu (berdasarkan Minggu_PO), baru hitung
+    aggregate_dough masing-masing bulan secara terpisah. Dipakai buat laporan
+    yang rentangnya lebih dari 1 bulan, biar breakdown-nya jelas per bulan,
+    bukan digabung jadi satu angka doang.
+
+    Return: (month_results, grand_total_qty, grand_total_bayar)
+    month_results = list of (bulan_label, rows, bulan_qty, bulan_bayar),
+    urut dari bulan paling awal ke paling akhir.
+    """
+    by_month = {}
+    for o in orders:
+        teks = str(o.get("Minggu_PO")).strip()
+        d = None
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+            try:
+                d = datetime.datetime.strptime(teks, fmt)
+                break
+            except ValueError:
+                continue
+        if not d:
+            continue
+        by_month.setdefault((d.year, d.month), []).append(o)
+
+    month_results = []
+    grand_total_qty = 0
+    grand_total_bayar = 0
+    for (year, month) in sorted(by_month.keys()):
+        rows, qty, bayar = aggregate_dough(by_month[(year, month)], dough_price_map)
+        bulan_label = f"{_NAMA_BULAN_ID[month]} {year}"
+        month_results.append((bulan_label, rows, qty, bayar))
+        grand_total_qty += qty
+        grand_total_bayar += bayar
+
+    return month_results, grand_total_qty, grand_total_bayar
+
+
+def _grand_total_by_category(month_results):
+    """Gabungin semua bulan jadi total per KATEGORI aja (Roti semua bulan,
+    Donat semua bulan, dst) -- dipakai buat breakdown di bagian akhir laporan
+    yang rentangnya lebih dari 1 bulan.
+    Return: list of (kategori, total_qty, total_bayar), urut sesuai config.CATEGORIES."""
+    totals = {}
+    for bulan_label, rows, bulan_qty, bulan_bayar in month_results:
+        for kategori, qty, harga_dough, subtotal in rows:
+            if kategori not in totals:
+                totals[kategori] = [0, 0]
+            totals[kategori][0] += qty
+            totals[kategori][1] += subtotal
+
+    result = []
+    for kategori in config.CATEGORIES:
+        if kategori in totals:
+            qty, bayar = totals[kategori]
+            result.append((kategori, qty, bayar))
+    return result
+
+
+def build_monthly_supplier_report(periode_label: str, orders: list, dough_price_map: dict) -> str:
+    if not orders:
+        return f"Nggak ada data order untuk periode {periode_label}."
+
+    month_results, grand_total_qty, grand_total_bayar = aggregate_dough_by_month(orders, dough_price_map)
+
+    lines = [f"*LAPORAN BULANAN SUPPLIER — {periode_label}*"]
+    lines.append(f"({config.BUSINESS_NAME})")
+
+    for bulan_label, rows, bulan_qty, bulan_bayar in month_results:
+        lines.append(f"\n*{bulan_label}*")
+        for kategori, qty, harga_dough, bayar in rows:
+            lines.append(f"  {kategori}: {qty} pcs x {rupiah(harga_dough)} = {rupiah(bayar)}")
+        lines.append(f"  → Subtotal {bulan_label}: {rupiah(bulan_bayar)}")
+
+    # Kalau lebih dari 1 bulan, kasih breakdown total per kategori juga
+    # (Roti semua bulan, Donat semua bulan, dst) sebelum total akhir.
+    if len(month_results) > 1:
+        kategori_totals = _grand_total_by_category(month_results)
+        lines.append("\n" + "─" * 24)
+        lines.append("*TOTAL PER KATEGORI (SEMUA BULAN)*")
+        for kategori, qty, bayar in kategori_totals:
+            lines.append(f"  {kategori}: {qty} pcs = {rupiah(bayar)}")
+
+    lines.append("\n" + "─" * 24)
+    lines.append(f"Total Qty semua bulan: {grand_total_qty} pcs")
+    lines.append(f"*TOTAL BAYAR SEMUA BULAN: {rupiah(grand_total_bayar)}*")
 
     return "\n".join(lines)
