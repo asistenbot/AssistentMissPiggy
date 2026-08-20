@@ -18,6 +18,7 @@ import date_helpers
 import documents
 import receipt
 import invoice_image
+import monthly_report_pdf
 from sheets_client import get_sheets_client
 from ai_parser import parse_customer_chat, parse_order_edit, classify_intent
 from scheduler_jobs import setup_scheduler
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != config.OWNER_TELEGRAM_ID:
+        if update.effective_user.id not in config.OWNER_TELEGRAM_IDS:
             await update.message.reply_text("Bot ini khusus admin Miss Piggy.")
             return
         return await func(update, context)
@@ -54,7 +55,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
         "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
-        "- /laporanbulanan 2026-07 — laporan bulan tertentu\n\n"
+        "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
+        "- /laporanbulanan 2026-07:2026-08 — laporan rentang beberapa bulan\n\n"
         "Auto-recap produksi akan dikirim tiap Rabu jam 15:00, 16:00, dan 19:00 WIB."
     )
 
@@ -139,19 +141,38 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets = get_sheets_client()
+
+    # Format argumen yang didukung:
+    #   (kosong)              -> bulan berjalan
+    #   2026-07                -> 1 bulan tertentu
+    #   2026-07:2026-08         -> rentang beberapa bulan
     if context.args:
+        arg = context.args[0]
         try:
-            year, month = map(int, context.args[0].split("-"))
+            if ":" in arg:
+                start_str, end_str = arg.split(":", 1)
+                year_start, month_start = map(int, start_str.split("-"))
+                year_end, month_end = map(int, end_str.split("-"))
+            else:
+                year_start, month_start = map(int, arg.split("-"))
+                year_end, month_end = year_start, month_start
         except ValueError:
-            await update.message.reply_text("Format: /laporanbulanan 2026-07")
+            await update.message.reply_text(
+                "Format: /laporanbulanan 2026-07 (1 bulan) atau "
+                "/laporanbulanan 2026-07:2026-08 (rentang beberapa bulan)"
+            )
             return
     else:
         now = datetime.datetime.now(date_helpers.get_timezone())
-        year, month = now.year, now.month
+        year_start = year_end = now.year
+        month_start = month_end = now.month
+
+    periode_label = documents.format_periode_label(year_start, month_start, year_end, month_end)
 
     try:
         orders = await asyncio.wait_for(
-            asyncio.to_thread(sheets.get_orders_by_month, year, month), timeout=20
+            asyncio.to_thread(sheets.get_orders_by_month_range, year_start, month_start, year_end, month_end),
+            timeout=20,
         )
         dough_price_map = await asyncio.wait_for(
             asyncio.to_thread(sheets.get_dough_price_map), timeout=20
@@ -167,8 +188,18 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    text = documents.build_monthly_supplier_report(year, month, orders, dough_price_map)
+    text = documents.build_monthly_supplier_report(periode_label, orders, dough_price_map)
     await update.message.reply_text(text, parse_mode="Markdown")
+
+    month_results, grand_total_qty, grand_total_bayar = documents.aggregate_dough_by_month(orders, dough_price_map)
+    if month_results:
+        pdf_buf = monthly_report_pdf.generate_monthly_report_pdf(
+            periode_label, month_results, grand_total_qty, grand_total_bayar
+        )
+        filename = f"Laporan_Bulanan_{year_start}{month_start:02d}-{year_end}{month_end:02d}.pdf"
+        await update.message.reply_document(
+            document=pdf_buf, filename=filename, caption="Versi PDF (siap print A4)"
+        )
 
 
 @owner_only
@@ -225,7 +256,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.to_thread(classify_intent, raw_text), timeout=20
         )
     except Exception:
-        intent_result = {"intent": "order_baru", "nama_customer": None, "bulan": None, "instruksi_edit": None}
+        intent_result = {"intent": "order_baru", "nama_customer": None, "bulan_mulai": None, "bulan_akhir": None, "instruksi_edit": None}
 
     intent = intent_result.get("intent", "order_baru")
 
@@ -234,8 +265,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if intent == "laporan_bulanan":
-        bulan = intent_result.get("bulan")
-        context.args = [bulan] if bulan else []
+        bulan_mulai = intent_result.get("bulan_mulai")
+        bulan_akhir = intent_result.get("bulan_akhir")
+        if bulan_mulai and bulan_akhir and bulan_mulai != bulan_akhir:
+            context.args = [f"{bulan_mulai}:{bulan_akhir}"]
+        elif bulan_mulai:
+            context.args = [bulan_mulai]
+        else:
+            context.args = []
         await laporanbulanan_cmd(update, context)
         return
 
