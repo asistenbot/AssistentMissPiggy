@@ -10,7 +10,11 @@ load_dotenv()
 
 # ==== TELEGRAM ====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
+# Bisa lebih dari 1 admin -- isi OWNER_TELEGRAM_IDS di .env dipisah koma,
+# misal: OWNER_TELEGRAM_IDS=123456789,987654321
+# (OWNER_TELEGRAM_ID lama masih didukung buat yang cuma 1 admin)
+_owner_ids_raw = os.getenv("OWNER_TELEGRAM_IDS") or os.getenv("OWNER_TELEGRAM_ID", "0")
+OWNER_TELEGRAM_IDS = [int(x.strip()) for x in _owner_ids_raw.split(",") if x.strip()]
 
 # ==== ANTHROPIC ====
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
