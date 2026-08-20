@@ -6,6 +6,7 @@ Pakai gspread + service account.
 import json
 import datetime
 import difflib
+import re
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -50,6 +51,22 @@ class SheetsClient:
                 new_r[key_norm] = v
             normalized.append(new_r)
         return normalized
+
+    @staticmethod
+    def _loose_key(s):
+        """Ubah nama kolom jadi bentuk paling polos buat dibandingin
+        (buang semua spasi/underscore, huruf kecil semua). Biar 'Harga Dough
+        per Unit', 'Harga_Dough_Per_Unit', 'harga dough perunit' dianggap sama."""
+        return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+    def _get_field(self, record, target_name, default=None):
+        """Cari value dari dict record berdasarkan nama kolom yang PALING MIRIP
+        sama target_name (toleran beda kapitalisasi/spasi/underscore)."""
+        target_loose = self._loose_key(target_name)
+        for k, v in record.items():
+            if self._loose_key(k) == target_loose:
+                return v
+        return default
 
     def _find_price(self, price_map, kategori, rasa):
         """
@@ -209,10 +226,18 @@ class SheetsClient:
         """Return dict {(kategori, rasa): harga}"""
         ws = self.sheet.worksheet(config.SHEET_PRICELIST)
         records = self._normalize_records(ws)
-        return {
-            (r["Kategori"].strip(), r["Rasa"].strip()): int(r["Harga"])
-            for r in records
-        }
+        result = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            rasa = self._get_field(r, "Rasa")
+            harga = self._get_field(r, "Harga")
+            if kategori is None or rasa is None or harga in (None, ""):
+                continue
+            try:
+                result[(str(kategori).strip(), str(rasa).strip())] = int(harga)
+            except (ValueError, TypeError):
+                continue
+        return result
 
     def get_catalog_list(self):
         """Return list of (kategori, rasa) yang BENERAN ada di PriceList.
@@ -225,7 +250,12 @@ class SheetsClient:
         records = self._normalize_records(ws)
         by_category = {}
         for r in records:
-            by_category.setdefault(r["Kategori"], []).append((r["Rasa"], r["Harga"]))
+            kategori = self._get_field(r, "Kategori")
+            rasa = self._get_field(r, "Rasa")
+            harga = self._get_field(r, "Harga")
+            if kategori is None or rasa is None or harga in (None, ""):
+                continue
+            by_category.setdefault(kategori, []).append((rasa, harga))
         lines = []
         for kategori, items in by_category.items():
             lines.append(f"\n*{kategori}*")
@@ -239,7 +269,17 @@ class SheetsClient:
         """Return dict {kategori: harga_dough_per_unit}"""
         ws = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
         records = self._normalize_records(ws)
-        return {r["Kategori"].strip(): int(r["Harga_Dough_Per_Unit"]) for r in records}
+        result = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            harga = self._get_field(r, "Harga_Dough_Per_Unit")
+            if kategori is None or harga in (None, ""):
+                continue
+            try:
+                result[str(kategori).strip()] = int(harga)
+            except (ValueError, TypeError):
+                continue
+        return result
 
 
 # Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
