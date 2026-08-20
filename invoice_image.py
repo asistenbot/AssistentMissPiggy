@@ -56,13 +56,31 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     x_right = WIDTH - PADDING
     col_qty = x_left + 230
     col_harga = x_right - 100
+    CATEGORY_ROW_HEIGHT = 28
+
+    # Kelompokin item per kategori, Donat selalu di paling atas, sisanya
+    # ikutin urutan config.CATEGORIES.
+    kategori_order = ["Donat"] + [c for c in config.CATEGORIES if c != "Donat"]
+
+    def kategori_rank(k):
+        try:
+            return kategori_order.index(k)
+        except ValueError:
+            return len(kategori_order)
+
+    grouped = {}
+    for o in orders:
+        grouped.setdefault(o["Kategori"], []).append(o)
+    kategori_list = sorted(grouped.keys(), key=kategori_rank)
 
     # ---- Hitung total tinggi gambar dulu ----
     y = HEADER_HEIGHT + PADDING
     y += 24 + 22 + 22 + 20
     y += 6
     y += ROW_HEIGHT
-    y += len(orders) * ROW_HEIGHT
+    for kategori in kategori_list:
+        y += CATEGORY_ROW_HEIGHT
+        y += len(grouped[kategori]) * ROW_HEIGHT
     y += 10
     y += 22 + 22 + 16
     y += 50  # kotak total
@@ -133,20 +151,29 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     draw.line([x_left, y - 8, x_right, y - 8], fill=COLOR_HEADER, width=1)
 
     total = 0
-    for i, o in enumerate(orders):
-        qty = int(o["Qty"])
-        harga = int(o["Harga_Satuan"])
-        subtotal = qty * harga
-        total += subtotal
+    row_i = 0
+    for kategori in kategori_list:
+        # Label kategori (background gelap, teks emas)
+        draw.rectangle([x_left - 8, y - 4, x_right + 8, y + CATEGORY_ROW_HEIGHT - 8], fill=COLOR_HEADER)
+        draw.text((x_left, y + (CATEGORY_ROW_HEIGHT - 8) / 2), kategori.upper(),
+                  font=F_BODY_BOLD, fill=COLOR_GOLD, anchor="lm")
+        y += CATEGORY_ROW_HEIGHT
 
-        if i % 2 == 1:
-            draw.rectangle([x_left - 8, y - 6, x_right + 8, y + ROW_HEIGHT - 8], fill=COLOR_ROW_ALT)
+        for o in grouped[kategori]:
+            qty = int(o["Qty"])
+            harga = int(o["Harga_Satuan"])
+            subtotal = qty * harga
+            total += subtotal
 
-        draw.text((x_left, y), str(o["Rasa"])[:18], font=F_BODY, fill=COLOR_TEXT)
-        draw.text((col_qty, y), f"x{qty}", font=F_BODY, fill=COLOR_TEXT)
-        draw.text((col_harga, y), rupiah(harga), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
-        draw.text((x_right, y), rupiah(subtotal), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
-        y += ROW_HEIGHT
+            if row_i % 2 == 1:
+                draw.rectangle([x_left - 8, y - 6, x_right + 8, y + ROW_HEIGHT - 8], fill=COLOR_ROW_ALT)
+            row_i += 1
+
+            draw.text((x_left, y), str(o["Rasa"])[:18], font=F_BODY, fill=COLOR_TEXT)
+            draw.text((col_qty, y), f"x{qty}", font=F_BODY, fill=COLOR_TEXT)
+            draw.text((col_harga, y), rupiah(harga), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
+            draw.text((x_right, y), rupiah(subtotal), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
+            y += ROW_HEIGHT
 
     _dashed_line(draw, x_left, y, x_right, COLOR_LINE)
     y += 14
