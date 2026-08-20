@@ -69,11 +69,33 @@ async def pricelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sheets = get_sheets_client()
-    minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.get_orders_by_week(minggu_po)
-    text = documents.build_production_recap(minggu_po, orders)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    try:
+        sheets = get_sheets_client()
+        minggu_po = date_helpers.current_po_week_thursday()
+        orders = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_orders_by_week, minggu_po), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout ambil data dari Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal ambil data rekap: {e}")
+        return
+
+    # Kirim sebagai pesan TERPISAH biar gampang di-forward tanpa crop:
+    # 1) total produksi per rasa (buat baking)
+    # 2) daftar yang dikirim kurir
+    # 3) daftar yang diambil sendiri
+    text_produksi = documents.build_production_recap(minggu_po, orders)
+    await update.message.reply_text(text_produksi, parse_mode="Markdown")
+
+    text_kirim = documents.build_delivery_kirim(minggu_po, orders)
+    if text_kirim:
+        await update.message.reply_text(text_kirim, parse_mode="Markdown")
+
+    text_ambil = documents.build_delivery_ambil(minggu_po, orders)
+    if text_ambil:
+        await update.message.reply_text(text_ambil, parse_mode="Markdown")
 
 
 @owner_only
@@ -127,8 +149,24 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         now = datetime.datetime.now(date_helpers.get_timezone())
         year, month = now.year, now.month
 
-    orders = sheets.get_orders_by_month(year, month)
-    dough_price_map = sheets.get_dough_price_map()
+    try:
+        orders = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_orders_by_month, year, month), timeout=20
+        )
+        dough_price_map = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_dough_price_map), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout ambil data dari Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(
+            f"Gagal bikin laporan bulanan: {e}\n"
+            "Kemungkinan tab 'SupplierDough' di Sheets belum keisi lengkap, atau ada "
+            "format yang salah di situ. Cek manual ya."
+        )
+        return
+
     text = documents.build_monthly_supplier_report(year, month, orders, dough_price_map)
     await update.message.reply_text(text, parse_mode="Markdown")
 
