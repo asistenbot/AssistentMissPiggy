@@ -214,6 +214,12 @@ class SheetsClient:
             for r in records
         }
 
+    def get_catalog_list(self):
+        """Return list of (kategori, rasa) yang BENERAN ada di PriceList.
+        Dipakai buat dikasih ke AI parsing biar dia cocokin item pesanan
+        ke produk asli, bukan asal nebak kategori."""
+        return sorted(self.get_price_map().keys())
+
     def get_pricelist_text(self):
         ws = self.sheet.worksheet(config.SHEET_PRICELIST)
         records = self._normalize_records(ws)

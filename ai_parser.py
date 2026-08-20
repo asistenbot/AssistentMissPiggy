@@ -11,13 +11,9 @@ import date_helpers
 
 client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=30.0)
 
-PARSE_SYSTEM_PROMPT = """Kamu adalah asisten admin toko roti "Miss Piggy".
+PARSE_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
 Tugasmu HANYA satu: ubah chat customer (yang sering berantakan, tidak lengkap,
 atau dicampur basa-basi) menjadi data order terstruktur dalam format JSON.
-
-Kategori produk yang valid: Roti, Roti Gandum, Donat, Roti Tawar, Bun Polos, Roti Tawar Loaf.
-Kalau customer sebut nama rasa tanpa kategori jelas, tebak kategori paling masuk akal
-(misal "coklat" / "keju" biasanya kategori Roti, kecuali disebut donat/gandum/tawar).
 
 Balas HANYA dengan JSON valid, tanpa teks lain, tanpa markdown code fence, dengan struktur:
 
@@ -40,11 +36,35 @@ apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalan
 "kelengkapan" jadi "lengkap" -- ongkir boleh diisi belakangan.
 """
 
-EDIT_SYSTEM_PROMPT = """Kamu adalah asisten admin toko roti "Miss Piggy".
+PARSE_CATALOG_INSTRUCTION = """
+
+Ini daftar produk yang BENERAN ADA di toko (format Kategori: daftar rasa):
+{catalog_text}
+
+ATURAN PENTING soal mencocokkan item pesanan ke daftar di atas:
+1. Cocokkan nama yang disebut customer ke rasa yang PERSIS ada di daftar (boleh
+   toleransi typo/ejaan kecil, misal "meses" cocok ke "Meises").
+2. Kalau nama yang disebut customer BISA COCOK ke lebih dari satu produk di
+   kategori BERBEDA (misal "coklat" ada sebagai rasa di kategori Roti DAN Roti
+   Gandum yang harganya beda, atau "meses" mirip "Mocha Meises" di Roti TAPI
+   juga mirip "Meises" di Donat) -- JANGAN ASAL TEBAK. Tetap masukkan ke items
+   dengan tebakan yang paling masuk akal dari konteks, TAPI set "kelengkapan"
+   jadi "kurang_lengkap" dan di "catatan" sebutkan jelas: item mana yang ambigu
+   dan pilihan-pilihan kategorinya apa aja, biar admin bisa konfirmasi ulang.
+3. Kalau nama yang disebut customer TIDAK ADA sama sekali di daftar produk
+   (misal nyebut "Donat Coklat" padahal yang ada cuma "Donat Coklat Celup"),
+   tetap masukkan tebakan yang paling mendekati, TAPI set "kelengkapan" jadi
+   "kurang_lengkap" dan jelaskan di "catatan" bahwa nama itu tidak ada persis
+   di daftar dan apa kemungkinan yang dimaksud.
+4. Field "kategori" dan "rasa" di output HARUS ditulis PERSIS sama seperti di
+   daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas.
+"""
+
+PARSE_SYSTEM_PROMPT = PARSE_SYSTEM_PROMPT_BASE
+
+EDIT_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
 Customer punya order yang SUDAH ADA, dan sekarang admin mau UBAH order itu
 (nambah item, ngurangin qty, hapus item, ganti item, atau ubah ongkir).
-
-Kategori produk yang valid: Roti, Roti Gandum, Donat, Roti Tawar, Bun Polos, Roti Tawar Loaf.
 
 Tugasmu: hitung ulang dan hasilkan DAFTAR ITEM FINAL (versi lengkap SETELAH
 perubahan diterapkan) -- bukan cuma daftar perubahannya doang.
@@ -54,13 +74,15 @@ Balas HANYA dengan JSON valid, tanpa teks lain, tanpa markdown code fence:
 {
   "items": [{"kategori": "...", "rasa": "...", "qty": 0}],
   "ongkir": angka ongkir baru dalam rupiah KALAU admin menyebutkan mau ubah ongkir, atau null kalau ongkir tidak disinggung sama sekali (biar dipertahankan nilai lama),
-  "catatan": "ringkasan perubahan yang dilakukan, singkat dan jelas"
+  "catatan": "ringkasan perubahan yang dilakukan, singkat dan jelas -- kalau ada item yang namanya ambigu (cocok ke lebih dari satu produk beda kategori/harga), sebutkan jelas pilihannya di sini"
 }
 
 Kalau instruksinya "hapus X" atau qty item di-set jadi 0, JANGAN masukkan item itu
 ke daftar final. Item yang tidak disebut sama sekali dalam instruksi TETAP dipertahankan
 qty aslinya (jangan dihapus kalau tidak diminta).
 """
+
+EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT_BASE
 
 INTENT_SYSTEM_PROMPT = """Kamu adalah router perintah untuk bot admin toko roti "Miss Piggy".
 Hari ini tanggal: {today}.
@@ -90,12 +112,26 @@ Panduan milih intent:
 """
 
 
-def parse_customer_chat(raw_text: str) -> dict:
+def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
+    """
+    catalog = list of (kategori, rasa) yang beneran ada di PriceList, opsional.
+    Kalau dikasih, AI bakal cocokin item pesanan ke produk asli & nandain
+    kalau ada yang ambigu -- jauh lebih akurat daripada nebak generik.
+    """
+    system_prompt = PARSE_SYSTEM_PROMPT_BASE
+    if catalog:
+        by_kategori = {}
+        for kategori, rasa in catalog:
+            by_kategori.setdefault(kategori, []).append(rasa)
+        catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
+        catalog_text = "\n".join(catalog_lines)
+        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text)
+
     try:
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=1000,
-            system=PARSE_SYSTEM_PROMPT,
+            max_tokens=1200,
+            system=system_prompt,
             messages=[{"role": "user", "content": raw_text}],
         )
     except Exception as e:
@@ -118,10 +154,11 @@ def parse_customer_chat(raw_text: str) -> dict:
         }
 
 
-def parse_order_edit(existing_items: list, instruction: str) -> dict:
+def parse_order_edit(existing_items: list, instruction: str, catalog: list = None) -> dict:
     """
     existing_items = [{"kategori": str, "rasa": str, "qty": int}, ...]
     instruction = teks bebas dari admin, misal "tambah donat gula 5, ham cheese jadi 20"
+    catalog = list of (kategori, rasa) yang beneran ada di PriceList, opsional.
 
     Return: {"items": [...daftar final...], "catatan": "ringkasan perubahan"}
     """
@@ -131,11 +168,20 @@ def parse_order_edit(existing_items: list, instruction: str) -> dict:
 
     user_message = f"Order yang sudah ada:\n{existing_text}\n\nInstruksi perubahan:\n{instruction}"
 
+    system_prompt = EDIT_SYSTEM_PROMPT_BASE
+    if catalog:
+        by_kategori = {}
+        for kategori, rasa in catalog:
+            by_kategori.setdefault(kategori, []).append(rasa)
+        catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
+        catalog_text = "\n".join(catalog_lines)
+        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text)
+
     try:
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=1000,
-            system=EDIT_SYSTEM_PROMPT,
+            max_tokens=1200,
+            system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
     except Exception as e:

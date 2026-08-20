@@ -245,11 +245,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Default: anggap order baru (perilaku sama seperti sebelumnya)
     await update.message.reply_text("Sedang diproses...")
 
+    # Ambil daftar produk asli dari PriceList dulu, biar AI cocokin ke situ
+    # (bukan asal nebak kategori) -- ini yang bikin "Meses" nggak salah masuk
+    # ke kategori yang nggak ada produknya.
+    sheets = get_sheets_client()
+    try:
+        catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
+    except Exception:
+        catalog = None  # kalau gagal ambil, tetep lanjut tanpa catalog (fallback)
+
     try:
         # Jalanin pemanggilan AI di thread terpisah (bukan blocking event loop bot),
         # dan kasih batas waktu maksimal 40 detik biar nggak nge-gantung selamanya.
         parsed = await asyncio.wait_for(
-            asyncio.to_thread(parse_customer_chat, raw_text), timeout=40
+            asyncio.to_thread(parse_customer_chat, raw_text, catalog), timeout=40
         )
     except asyncio.TimeoutError:
         await update.message.reply_text(
@@ -280,7 +289,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if parsed.get("kelengkapan") == "kurang_lengkap":
-        preview += "⚠️ Data masih kurang lengkap, cek/edit dulu sebelum disimpan.\n\n"
+        preview += "⚠️ ADA YANG PERLU DICEK (lihat Catatan di atas) sebelum disimpan!\n\n"
 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
@@ -345,6 +354,16 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text("Tersimpan!")
 
+    harga_kosong = sorted(set(
+        o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0
+    ))
+    if harga_kosong:
+        await query.message.reply_text(
+            "⚠️ PERHATIAN: harga Rp0 untuk " + ", ".join(harga_kosong) + ". "
+            "Kemungkinan nama rasa/kategori itu nggak ketemu persis di PriceList. "
+            "Cek & benerin manual di Google Sheets ya."
+        )
+
     invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders)
     await query.message.reply_photo(photo=invoice_img, caption="Invoice (siap kirim ke customer)")
 
@@ -365,9 +384,15 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
     instruction = instruction_override or update.message.text
     await update.message.reply_text("Menghitung ulang order...")
 
+    sheets = get_sheets_client()
+    try:
+        catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
+    except Exception:
+        catalog = None
+
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(parse_order_edit, editing["existing_items"], instruction),
+            asyncio.to_thread(parse_order_edit, editing["existing_items"], instruction, catalog),
             timeout=40,
         )
     except asyncio.TimeoutError:
@@ -475,6 +500,16 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     nama = pending["nama"]
 
     await query.message.reply_text("Order berhasil diupdate!")
+
+    harga_kosong = sorted(set(
+        o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0
+    ))
+    if harga_kosong:
+        await query.message.reply_text(
+            "⚠️ PERHATIAN: harga Rp0 untuk " + ", ".join(harga_kosong) + ". "
+            "Kemungkinan nama rasa/kategori itu nggak ketemu persis di PriceList. "
+            "Cek & benerin manual di Google Sheets ya."
+        )
 
     invoice_img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
     await query.message.reply_photo(photo=invoice_img, caption="Invoice terbaru (siap kirim ke customer)")
