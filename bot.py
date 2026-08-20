@@ -56,8 +56,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
-        "- /laporanbulanan 2026-07:2026-08 — laporan rentang beberapa bulan\n\n"
+        "- /laporanbulanan 2026-07:2026-08 — laporan rentang beberapa bulan\n"
+        "- /groupid — lihat ID chat ini (buat setup grup admin)\n\n"
         "Auto-recap produksi akan dikirim tiap Rabu jam 15:00, 16:00, dan 19:00 WIB."
+    )
+
+
+@owner_only
+async def groupid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    await update.message.reply_text(
+        f"ID chat ini: `{chat.id}`\n"
+        f"Tipe: {chat.type}\n\n"
+        "Kalau ini grup dan mau dipakai buat terima auto-recap, "
+        "copy ID di atas (termasuk tanda minus kalau ada) ke GROUP_CHAT_ID di Railway.",
+        parse_mode="Markdown",
     )
 
 
@@ -615,6 +628,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("groupid", groupid_cmd))
     app.add_handler(CommandHandler("pricelist", pricelist))
     app.add_handler(CommandHandler("rekap", rekap))
     app.add_handler(CommandHandler("invoice", invoice_cmd))

@@ -42,13 +42,22 @@ def setup_scheduler(bot):
     return scheduler
 
 
+def _target_chat_ids():
+    """Kalau GROUP_CHAT_ID di-setting, kirim ke situ aja (1x, semua admin
+    liat bareng). Kalau nggak, fallback ke kirim ke tiap admin satu-satu."""
+    if config.GROUP_CHAT_ID:
+        return [config.GROUP_CHAT_ID]
+    return config.OWNER_TELEGRAM_IDS
+
+
 async def send_auto_recap(bot):
     try:
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
         orders = sheets.get_orders_by_week(minggu_po)
         text = documents.build_production_recap(minggu_po, orders)
-        await bot.send_message(chat_id=config.OWNER_TELEGRAM_ID, text=text, parse_mode="Markdown")
+        for chat_id in _target_chat_ids():
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
     except Exception:
         logger.exception("Gagal kirim auto recap")
 
@@ -61,7 +70,9 @@ async def send_auto_monthly_report(bot):
         year, month = date_helpers.previous_month(now.year, now.month)
         orders = sheets.get_orders_by_month(year, month)
         dough_price_map = sheets.get_dough_price_map()
-        text = documents.build_monthly_supplier_report(year, month, orders, dough_price_map)
-        await bot.send_message(chat_id=config.OWNER_TELEGRAM_ID, text=text, parse_mode="Markdown")
+        periode_label = documents.format_periode_label(year, month, year, month)
+        text = documents.build_monthly_supplier_report(periode_label, orders, dough_price_map)
+        for chat_id in _target_chat_ids():
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
     except Exception:
         logger.exception("Gagal kirim auto laporan bulanan")

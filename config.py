@@ -16,6 +16,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 _owner_ids_raw = os.getenv("OWNER_TELEGRAM_IDS") or os.getenv("OWNER_TELEGRAM_ID", "0")
 OWNER_TELEGRAM_IDS = [int(x.strip()) for x in _owner_ids_raw.split(",") if x.strip()]
 
+# Opsional: kalau diisi, auto-recap Rabu & laporan bulanan dikirim ke GRUP ini
+# (1x doang, semua admin di grup itu liat bareng), bukan ke tiap admin
+# terpisah. ID grup Telegram biasanya angka NEGATIF, contoh: -1001234567890
+# Cara ambil ID grup: tambahin bot ke grup, ketik /groupid di grup itu.
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID") or None
+
 # ==== ANTHROPIC ====
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = "claude-sonnet-4-6"
