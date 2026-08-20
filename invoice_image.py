@@ -13,8 +13,8 @@ WIDTH = 520
 PADDING = 30
 HEADER_HEIGHT = 130
 ROW_HEIGHT = 30
-LOGO_ICON_PATH = "assets/logo_icon.png"
-LOGO_WORDMARK_PATH = "assets/logo_wordmark_light.png"
+LOGO_ICON_PATH = "logo_icon.png"
+LOGO_WORDMARK_PATH = "logo_wordmark_light.png"
 
 # Palet warna bakery yang lebih hangat & "niat"
 COLOR_BG = (250, 244, 233)          # krem lembut
