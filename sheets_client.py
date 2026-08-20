@@ -206,6 +206,14 @@ class SheetsClient:
 
     def get_orders_by_month(self, year: int, month: int):
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""
+        return self.get_orders_by_month_range(year, month, year, month)
+
+    def get_orders_by_month_range(self, year_start: int, month_start: int, year_end: int, month_end: int):
+        """Filter berdasarkan Minggu_PO yang jatuh di rentang bulan year_start-month_start
+        sampai year_end-month_end (inklusif). Buat laporan bulanan yang minta
+        beberapa bulan sekaligus, misal '2 bulan ke belakang' atau 'Juli-Agustus'."""
+        start_key = year_start * 100 + month_start
+        end_key = year_end * 100 + month_end
         result = []
         for o in self.get_all_orders():
             teks = str(o.get("Minggu_PO")).strip()
@@ -216,8 +224,10 @@ class SheetsClient:
                     break
                 except ValueError:
                     continue
-            if d and d.year == year and d.month == month:
-                result.append(o)
+            if d:
+                key = d.year * 100 + d.month
+                if start_key <= key <= end_key:
+                    result.append(o)
         return result
 
     # ---------- PRICE LIST ----------
