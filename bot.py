@@ -49,6 +49,37 @@ def build_confirm_keyboard(parsed):
     return InlineKeyboardMarkup(rows)
 
 
+def _get_pending_order(context):
+    """Ambil pending_order dari 2 kemungkinan tempat:
+    - user_data: order dari alur paste-chat manual (cuma keliatan sama admin
+      yang lagi ngobrol itu -- perilaku ASLI, nggak diubah).
+    - bot_data: order dari WEB (Netlify). Ini sengaja disimpen di bot_data
+      (bukan user_data per-admin) karena bot_data itu SATU tempat yang sama
+      buat SEMUA admin/HP -- jadi siapa pun yang lebih dulu buka Telegram-nya
+      bisa langsung proses, nggak peduli akun/HP mana (sesuai permintaan
+      'tetep di grup, bisa dihandle pake 2 hp').
+    Return (parsed_atau_None, dari_bot_data_bool)."""
+    parsed = context.user_data.get("pending_order")
+    if parsed:
+        return parsed, False
+    parsed = context.bot_data.get("pending_order")
+    if parsed:
+        return parsed, True
+    return None, False
+
+
+def _save_pending_order(context, parsed, from_bot_data):
+    if from_bot_data:
+        context.bot_data["pending_order"] = parsed
+    else:
+        context.user_data["pending_order"] = parsed
+
+
+def _clear_pending_order(context):
+    context.user_data.pop("pending_order", None)
+    context.bot_data.pop("pending_order", None)
+
+
 # ---------------- COMMANDS ----------------
 
 @owner_only
@@ -407,7 +438,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "cancel_order":
-        context.user_data.pop("pending_order", None)
+        _clear_pending_order(context)
         await query.edit_message_text("Dibatalin ya.")
         return
 
@@ -417,7 +448,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data["saving_in_progress"] = True
 
-    parsed = context.user_data.get("pending_order")
+    parsed, _ = _get_pending_order(context)
     if not parsed or not parsed.get("items"):
         await query.edit_message_text("Nggak ada data order yang tersimpan. Kirim ulang chat-nya ya.")
         context.user_data["saving_in_progress"] = False
@@ -476,7 +507,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
     )
 
-    context.user_data.pop("pending_order", None)
+    _clear_pending_order(context)
     context.user_data["saving_in_progress"] = False
 
 
@@ -487,7 +518,8 @@ async def handle_set_ongkir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if not context.user_data.get("pending_order"):
+    parsed, _ = _get_pending_order(context)
+    if not parsed:
         await query.message.reply_text("Nggak ada order yang lagi diproses.")
         return
 
@@ -512,7 +544,7 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["awaiting_ongkir"] = False
 
-    parsed = context.user_data.get("pending_order")
+    parsed, from_bot_data = _get_pending_order(context)
     if not parsed:
         await update.message.reply_text(
             "Order-nya udah nggak ada / expired. Minta customer kirim ulang, atau paste ulang chat-nya."
@@ -520,7 +552,7 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     parsed["ongkir"] = int(digits)
-    context.user_data["pending_order"] = parsed
+    _save_pending_order(context, parsed, from_bot_data)
 
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
