@@ -436,6 +436,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ada error pas parsing: {e}\nCoba kirim ulang.")
         return
 
+    # AI parser (ai_parser.py) fokusnya nge-parse ITEM pesanan, bukan selalu
+    # nangkep tanggal kirim custom kayak "besok"/"lusa" yang nyempil di
+    # kalimat chat customer (mis. "mau buat besok, ..."). Jadi kalau AI-nya
+    # nggak ngisi tanggal_kirim sendiri, coba deteksi juga pake parser
+    # deterministik yang sama kayak yang dipakai buat koreksi -- biar tanggal
+    # kirim custom kedetect dari pesan PERTAMA, nggak perlu dikoreksi manual.
+    if not parsed.get("tanggal_kirim"):
+        tanggal_dari_teks = _parse_tanggal_kirim(raw_text)
+        if tanggal_dari_teks:
+            parsed["tanggal_kirim"] = tanggal_dari_teks
+
     context.user_data["pending_order"] = parsed
 
     items_text = "\n".join(
