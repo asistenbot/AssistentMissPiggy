@@ -36,6 +36,19 @@ def owner_only(func):
     return wrapper
 
 
+def build_confirm_keyboard(parsed):
+    """Tombol Simpan/Batal standar, ditambah tombol 'Isi/Ubah Ongkir' KHUSUS
+    kalau metode-nya 'Diantar' -- biar admin bisa isi ongkir dulu SEBELUM
+    invoice & surat jalan ke-generate (jadi nggak perlu /edit belakangan)."""
+    rows = [[
+        InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
+        InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
+    ]]
+    if (parsed.get("metode") or "").strip().lower() == "diantar":
+        rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data="set_ongkir")])
+    return InlineKeyboardMarkup(rows)
+
+
 # ---------------- COMMANDS ----------------
 
 @owner_only
@@ -255,6 +268,12 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Lagi nunggu admin ngetik nominal ongkir (abis klik "Isi/Ubah Ongkir")?
+    # Ini dicek PALING atas, sebelum kemungkinan lain.
+    if context.user_data.get("awaiting_ongkir"):
+        await handle_ongkir_input(update, context)
+        return
+
     # Kalau lagi dalam mode edit order (habis /edit Nama Customer atau baru
     # ke-detect mau edit), teks ini instruksi perubahan, BUKAN order baru.
     if context.user_data.get("editing_order"):
@@ -379,10 +398,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if parsed.get("kelengkapan") == "kurang_lengkap":
         preview += "⚠️ ADA YANG PERLU DICEK (lihat Catatan di atas) sebelum disimpan!\n\n"
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
-        InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
-    ]])
+    keyboard = build_confirm_keyboard(parsed)
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
 
@@ -462,6 +478,69 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("pending_order", None)
     context.user_data["saving_in_progress"] = False
+
+
+async def handle_set_ongkir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dipicu tombol '✏️ Isi/Ubah Ongkir' di preview order (khusus metode
+    Diantar). Copot tombol di pesan lama (biar nggak kepencet Confirm yang
+    ongkirnya masih 0), lalu minta admin ketik nominalnya."""
+    query = update.callback_query
+    await query.answer()
+
+    if not context.user_data.get("pending_order"):
+        await query.message.reply_text("Nggak ada order yang lagi diproses.")
+        return
+
+    context.user_data["awaiting_ongkir"] = True
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await query.message.reply_text("Ketik nominal ongkirnya ya (angka aja, contoh: 15000).")
+
+
+async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nerima balasan admin abis klik 'Isi/Ubah Ongkir', update pending_order
+    yang ada, lalu kirim ulang preview + tombol Simpan/Batal (Confirm/Cancel
+    yang sebenernya, handle_confirm() nggak diubah sama sekali)."""
+    raw = update.message.text.strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+
+    if not digits:
+        await update.message.reply_text("Formatnya angka aja ya, contoh: 15000. Coba ketik lagi.")
+        return
+
+    context.user_data["awaiting_ongkir"] = False
+
+    parsed = context.user_data.get("pending_order")
+    if not parsed:
+        await update.message.reply_text(
+            "Order-nya udah nggak ada / expired. Minta customer kirim ulang, atau paste ulang chat-nya."
+        )
+        return
+
+    parsed["ongkir"] = int(digits)
+    context.user_data["pending_order"] = parsed
+
+    items_text = "\n".join(
+        f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
+        for i in parsed.get("items", [])
+    ) or "  (belum ada item terdeteksi)"
+    ongkir_rupiah = "Rp" + format(parsed["ongkir"], ",").replace(",", ".")
+
+    preview = (
+        f"*Order (ongkir sudah diisi):*\n"
+        f"Nama: {parsed.get('nama') or '-'}\n"
+        f"No HP: {parsed.get('no_hp') or '-'}\n"
+        f"Alamat: {parsed.get('alamat') or '-'}\n"
+        f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Items:\n{items_text}\n"
+        f"Ongkir: {ongkir_rupiah}\n"
+        f"Catatan: {parsed.get('catatan') or '-'}\n"
+    )
+
+    keyboard = build_confirm_keyboard(parsed)
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
 
 # ---------------- EDIT ORDER ----------------
@@ -643,6 +722,7 @@ def main():
     app.add_handler(CommandHandler("laporanbulanan", laporanbulanan_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order)$"))
+    app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir$"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
