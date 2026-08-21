@@ -106,6 +106,11 @@ class SheetsClient:
         ws = self.sheet.worksheet(config.SHEET_ORDERS)
         price_map = self.get_price_map()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Tanggal_Kirim itu OPSIONAL -- kalau admin nggak nentuin tanggal
+        # custom (misal 'besok'), defaultnya sama kayak minggu_po (Kamis PO
+        # minggu berjalan), jadi perilaku lama nggak berubah kalau fitur ini
+        # nggak dipakai sama sekali.
+        tanggal_kirim = order.get("tanggal_kirim") or minggu_po
         rows = []
         order_records = []
         for item in order["items"]:
@@ -126,6 +131,8 @@ class SheetsClient:
                 subtotal,
                 order.get("ongkir", 0),
                 "Pending",
+                f"'{tanggal_kirim}",  # kolom BARU, sengaja PALING BELAKANG biar
+                                       # nggak nggeser kolom lama yang udah ada
             ])
             order_records.append({
                 "Kategori": item["kategori"],
@@ -136,6 +143,7 @@ class SheetsClient:
                 "No_HP": order["no_hp"],
                 "Alamat": order["alamat"],
                 "Ongkir": order.get("ongkir", 0),
+                "Tanggal_Kirim": tanggal_kirim,
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
