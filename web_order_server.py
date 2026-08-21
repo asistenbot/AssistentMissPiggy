@@ -53,11 +53,19 @@ def _build_preview_text(parsed):
     )
 
 
-def _build_confirm_keyboard():
-    return InlineKeyboardMarkup([[
+def _build_confirm_keyboard(parsed):
+    # Order dari web nggak pernah ada input ongkir dari customer (mereka
+    # cuma pilih "Diantar" doang), jadi khusus metode itu kita kasih tombol
+    # buat admin isi ongkir DULU sebelum invoice & surat jalan ke-generate.
+    # (handle_set_ongkir / handle_ongkir_input ada di bot.py, dipakai bareng
+    # sama alur paste-chat manual juga.)
+    rows = [[
         InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
         InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
-    ]])
+    ]]
+    if (parsed.get("metode") or "").strip().lower() == "diantar":
+        rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data="set_ongkir")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _parse_items(items_raw):
@@ -108,7 +116,7 @@ def create_web_order_app(application):
         }
 
         preview = _build_preview_text(parsed)
-        keyboard = _build_confirm_keyboard()
+        keyboard = _build_confirm_keyboard(parsed)
 
         owner_ids = config.OWNER_TELEGRAM_IDS or []
         if not owner_ids:
