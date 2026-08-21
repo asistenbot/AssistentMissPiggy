@@ -58,6 +58,12 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     col_harga = x_right - 100
     CATEGORY_ROW_HEIGHT = 28
 
+    # Tanggal_Kirim itu kolom OPSIONAL di Sheets -- kalau admin nggak nentuin
+    # tanggal custom (misal 'besok'), balik ke default lama: minggu_po
+    # (Kamis PO minggu berjalan), jadi invoice yang udah ada nggak berubah
+    # kalau fitur ini nggak dipakai sama sekali.
+    tanggal_kirim = (orders[0].get("Tanggal_Kirim") if orders else None) or minggu_po
+
     # Kelompokin item per kategori, Donat selalu di paling atas, sisanya
     # ikutin urutan config.CATEGORIES.
     kategori_order = ["Donat"] + [c for c in config.CATEGORIES if c != "Donat"]
@@ -133,7 +139,7 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> 
     y = HEADER_HEIGHT + PADDING
     draw.text((x_left, y), f"Kepada: {nama_customer}", font=F_BODY_BOLD, fill=COLOR_TEXT)
     y += 24
-    draw.text((x_left, y), f"Tanggal Kirim/Ambil: {minggu_po}", font=F_BODY, fill=COLOR_MUTED)
+    draw.text((x_left, y), f"Tanggal Kirim/Ambil: {tanggal_kirim}", font=F_BODY, fill=COLOR_MUTED)
     y += 22
     metode = orders[0].get("Metode", "-") if orders else "-"
     draw.text((x_left, y), f"Metode: {metode}", font=F_BODY, fill=COLOR_MUTED)
