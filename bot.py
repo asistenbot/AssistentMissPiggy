@@ -618,6 +618,13 @@ async def on_startup(app: Application):
     setup_scheduler(app.bot)
     logger.info("Scheduler auto-recap & laporan bulanan aktif.")
 
+    # Server kecil buat nerima order dari halaman web (Netlify) dan
+    # nerusinnya ke alur konfirmasi Telegram yang udah ada (handle_confirm
+    # di bawah, nggak diubah sama sekali).
+    from web_order_server import start_web_order_server
+    app.create_task(start_web_order_server(app))
+    logger.info("Web order server dijadwalkan buat start.")
+
 
 def main():
     app = (
