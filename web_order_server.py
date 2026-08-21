@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 WEB_ORDER_SECRET = os.getenv("WEB_ORDER_SECRET", "")
 
 
+def _is_delivery_metode(metode):
+    """True kalau metode-nya berarti 'dikirim'. Order dari web selalu literal
+    'Diantar', tapi helper ini disamain sama versi di bot.py/receipt.py (yang
+    juga nerima 'Kirim' dari AI parser chat manual) biar konsisten kalau
+    suatu saat vocab web ikut berubah juga."""
+    m = (metode or "").strip().lower()
+    return "antar" in m or "kirim" in m
+
+
 def _build_preview_text(parsed):
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -64,7 +73,7 @@ def _build_confirm_keyboard(parsed):
         InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
         InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
     ]]
-    if (parsed.get("metode") or "").strip().lower() == "diantar":
+    if _is_delivery_metode(parsed.get("metode")):
         rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data="set_ongkir")])
     return InlineKeyboardMarkup(rows)
 
