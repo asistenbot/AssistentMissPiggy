@@ -311,6 +311,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_edit_instruction(update, context)
         return
 
+    # Kalau masih ada preview order yang nunggu Konfirmasi/Batal (belum
+    # disimpen ke Sheets sama sekali), anggap chat berikutnya itu KOREKSI ke
+    # preview itu -- misal "yang apple salah, tolong hapus" -- bukan order
+    # baru. Kalau admin emang mau mulai order lain, klik dulu tombol Batal
+    # di preview yang lagi jalan.
+    pending_parsed, pending_from_bot_data = _get_pending_order(context)
+    if pending_parsed:
+        await handle_pending_correction(update, context, pending_parsed, pending_from_bot_data)
+        return
+
     raw_text = update.message.text
 
     # Coba tebak dulu maksud admin (bahasa natural, nggak wajib pakai '/')
@@ -575,6 +585,66 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
 
+async def handle_pending_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                     parsed: dict, from_bot_data: bool):
+    """Order masih di tahap preview (belum diklik Konfirmasi/Batal). Admin
+    ngetik koreksi bebas -- misal 'yang apple salah, tolong hapus' atau
+    'harusnya charsiu bukan cranberry' -- dan kita pakai ULANG mesin AI edit
+    yang sama kayak /edit (parse_order_edit), cuma target-nya items yang ada
+    di PREVIEW ini, bukan yang udah kesimpen di Sheets."""
+    instruction = update.message.text
+    await update.message.reply_text("Oke, ngitung ulang preview-nya...")
+
+    sheets = get_sheets_client()
+    try:
+        catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
+    except Exception:
+        catalog = None
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(parse_order_edit, parsed.get("items", []), instruction, catalog),
+            timeout=40,
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Timeout — proses ngitung ulang kelamaan. Coba kirim ulang koreksinya."
+        )
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ada error: {e}\nCoba kirim ulang koreksinya.")
+        return
+
+    parsed["items"] = result.get("items", [])
+    if result.get("ongkir") is not None:
+        parsed["ongkir"] = int(result.get("ongkir"))
+    catatan_baru = result.get("catatan")
+    if catatan_baru and catatan_baru != "-":
+        parsed["catatan"] = catatan_baru
+
+    _save_pending_order(context, parsed, from_bot_data)
+
+    items_text = "\n".join(
+        f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
+        for i in parsed.get("items", [])
+    ) or "  (kosong -- semua item kehapus)"
+    ongkir_val = int(parsed.get("ongkir") or 0)
+    ongkir_text = ("Rp" + format(ongkir_val, ",").replace(",", ".")) if ongkir_val else "belum diisi (Rp0)"
+
+    preview = (
+        f"*Preview (sudah dikoreksi):*\n"
+        f"Nama: {parsed.get('nama') or '-'}\n"
+        f"No HP: {parsed.get('no_hp') or '-'}\n"
+        f"Alamat: {parsed.get('alamat') or '-'}\n"
+        f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Items:\n{items_text}\n"
+        f"Ongkir: {ongkir_text}\n"
+        f"Catatan: {parsed.get('catatan') or '-'}\n"
+    )
+    keyboard = build_confirm_keyboard(parsed)
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+
+
 # ---------------- EDIT ORDER ----------------
 
 async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -619,12 +689,22 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
 
     ongkir_rupiah = "Rp" + format(ongkir_final, ",").replace(",", ".")
 
+    # Item KOSONG artinya customer batal total (semua item dihapus lewat
+    # instruksi, misal "batalin aja semua"), bukan sekadar edit biasa. Kasih
+    # peringatan & label tombol yang beda biar jelas ini pembatalan.
+    is_cancel = len(new_items) == 0
+
     preview = (
         f"*Order Lama:*\n{old_text}\n\n"
         f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
         f"Ongkir: {ongkir_rupiah}\n"
         f"Catatan: {catatan}\n\n"
-        f"⚠️ Kalau dikonfirmasi, order lama bakal DIHAPUS total dan diganti yang baru ini."
+        + (
+            "⚠️ Item KOSONG — kalau dikonfirmasi, order ini bakal DIBATALIN TOTAL "
+            "(dihapus dari Sheets, TANPA invoice/surat jalan baru)."
+            if is_cancel else
+            "⚠️ Kalau dikonfirmasi, order lama bakal DIHAPUS total dan diganti yang baru ini."
+        )
     )
 
     context.user_data["pending_edit"] = {
@@ -638,7 +718,10 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
     }
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Konfirmasi Edit", callback_data="confirm_edit"),
+        InlineKeyboardButton(
+            "✅ Ya, batalin order" if is_cancel else "✅ Konfirmasi Edit",
+            callback_data="confirm_edit",
+        ),
         InlineKeyboardButton("❌ Batal", callback_data="cancel_edit"),
     ]])
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
@@ -667,6 +750,36 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text("Menyimpan perubahan...")
 
     sheets = get_sheets_client()
+    nama = pending["nama"]
+    minggu_po = pending["minggu_po"]
+
+    if not pending["items"]:
+        # Semua item dihapus lewat instruksi -> ini PEMBATALAN TOTAL, bukan
+        # edit biasa. Cukup hapus baris di Sheets, JANGAN ditulis ulang
+        # (kosong) dan JANGAN generate invoice/surat jalan (nggak ada apa-apa
+        # buat dikirim ke customer yang udah batal).
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(sheets.delete_customer_week_rows, nama, minggu_po), timeout=30
+            )
+        except asyncio.TimeoutError:
+            await query.message.reply_text(
+                "Timeout pas ngehapus order. Cek manual di Google Sheets ya."
+            )
+            context.user_data["saving_in_progress"] = False
+            return
+        except Exception as e:
+            await query.message.reply_text(f"Gagal batalin order: {e}\nCek manual di Sheets ya.")
+            context.user_data["saving_in_progress"] = False
+            return
+
+        await query.message.reply_text(
+            f"Order {nama} berhasil DIBATALIN & dihapus dari Sheets minggu ini."
+        )
+        context.user_data.pop("editing_order", None)
+        context.user_data.pop("pending_edit", None)
+        context.user_data["saving_in_progress"] = False
+        return
 
     def _hapus_lalu_tulis_ulang():
         sheets.delete_customer_week_rows(pending["nama"], pending["minggu_po"])
@@ -694,9 +807,6 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text(f"Gagal simpan perubahan: {e}\nCek manual di Sheets ya.")
         context.user_data["saving_in_progress"] = False
         return
-
-    minggu_po = pending["minggu_po"]
-    nama = pending["nama"]
 
     await query.message.reply_text("Order berhasil diupdate!")
 
