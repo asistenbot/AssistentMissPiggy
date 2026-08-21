@@ -6,6 +6,7 @@ Jalankan: python bot.py
 import asyncio
 import logging
 import datetime
+import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -286,11 +287,17 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         "ongkir": int(orders[0].get("Ongkir", 0) or 0),
         "minggu_po": minggu_po,
+        "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
     }
 
     await update.message.reply_text(
         f"*Order {nama} saat ini:*\n{item_list_text}\n\n"
-        f"Ketik perubahannya (bebas, misal: 'tambah donat gula 5, ham cheese jadi 20 pcs').",
+        f"Ketik perubahannya (bebas), contoh:\n"
+        f"- Item: 'tambah donat gula 5, ham cheese jadi 20 pcs'\n"
+        f"- No HP: 'no hp nya salah, benerin jadi 081234567890'\n"
+        f"- Alamat/Nama/Metode: 'alamat ganti jadi ...', 'nama ganti jadi ...', 'metode jadi diantar'\n"
+        f"- Tanggal kirim: 'tanggal kirim jadi besok', 'tanggal kirim jadi 25 agustus'\n"
+        f"- Batal total: 'batalin aja semua'",
         parse_mode="Markdown",
     )
 
@@ -385,6 +392,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             "ongkir": int(orders[0].get("Ongkir", 0) or 0),
             "minggu_po": minggu_po,
+            "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
         }
         # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
         await handle_edit_instruction(update, context, instruction_override=instruksi)
@@ -431,6 +439,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini, ketik tanggal kirim jadi ... buat ubah)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
         f"Catatan: {parsed.get('catatan') or '-'}\n\n"
@@ -476,6 +485,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i in parsed["items"]
         ],
         "ongkir": int(parsed.get("ongkir") or 0),
+        "tanggal_kirim": parsed.get("tanggal_kirim"),
     }
 
     sheets = get_sheets_client()
@@ -576,6 +586,7 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_rupiah}\n"
         f"Catatan: {parsed.get('catatan') or '-'}\n"
@@ -593,6 +604,42 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     yang sama kayak /edit (parse_order_edit), cuma target-nya items yang ada
     di PREVIEW ini, bukan yang udah kesimpen di Sheets."""
     instruction = update.message.text
+
+    # Cek dulu apa ini koreksi DATA (No HP/Nama/Alamat/Metode/Tanggal Kirim)
+    # -- kalau iya, apply langsung tanpa manggil AI item-parser sama sekali.
+    field_correction = _try_parse_field_correction(instruction)
+    if field_correction:
+        field, new_value = field_correction
+        parsed[field] = new_value
+        _save_pending_order(context, parsed, from_bot_data)
+
+        field_label = {
+            "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
+            "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
+        }[field]
+        items_text = "\n".join(
+            f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
+            for i in parsed.get("items", [])
+        ) or "  (belum ada item terdeteksi)"
+        ongkir_val = int(parsed.get("ongkir") or 0)
+        ongkir_text = ("Rp" + format(ongkir_val, ",").replace(",", ".")) if ongkir_val else "belum diisi (Rp0)"
+        tanggal_kirim_text = parsed.get("tanggal_kirim") or "(default: Kamis PO minggu ini)"
+
+        preview = (
+            f"*{field_label} diganti jadi:* {new_value}\n\n"
+            f"Nama: {parsed.get('nama') or '-'}\n"
+            f"No HP: {parsed.get('no_hp') or '-'}\n"
+            f"Alamat: {parsed.get('alamat') or '-'}\n"
+            f"Metode: {parsed.get('metode') or '-'}\n"
+            f"Tanggal Kirim: {tanggal_kirim_text}\n"
+            f"Items:\n{items_text}\n"
+            f"Ongkir: {ongkir_text}\n"
+            f"Catatan: {parsed.get('catatan') or '-'}\n"
+        )
+        keyboard = build_confirm_keyboard(parsed)
+        await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+        return
+
     await update.message.reply_text("Oke, ngitung ulang preview-nya...")
 
     sheets = get_sheets_client()
@@ -637,6 +684,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
         f"Catatan: {parsed.get('catatan') or '-'}\n"
@@ -647,10 +695,170 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
 
 # ---------------- EDIT ORDER ----------------
 
+def _extract_after_splitter(lower_text, original_text):
+    """Ambil teks SETELAH kata sambung kayak 'jadi'/'ganti ke', dari akhir
+    kalimat -- biar 'nama nya salah, ganti jadi Budi Santoso' ngambil
+    'Budi Santoso' doang."""
+    for splitter in (" jadi ", " ganti ke ", " menjadi ", " ke "):
+        idx = lower_text.rfind(splitter)
+        if idx != -1:
+            val = original_text[idx + len(splitter):].strip(" .,!")
+            if val:
+                return val
+    return None
+
+
+_BULAN_ID = {
+    "januari": 1, "februari": 2, "maret": 3, "april": 4, "mei": 5, "juni": 6,
+    "juli": 7, "agustus": 8, "september": 9, "oktober": 10, "november": 11,
+    "desember": 12,
+}
+
+
+def _parse_tanggal_kirim(text):
+    """Parse teks tanggal kirim bebas jadi string 'YYYY-MM-DD', atau None
+    kalau nggak ketemu pola yang dikenal. Support: 'besok', 'lusa', tanggal
+    eksplisit 'DD/MM' atau 'DD/MM/YYYY', atau 'DD <nama bulan>' / 'DD <nama
+    bulan> YYYY'. Kalau tahun nggak disebut & tanggalnya udah lewat buat
+    tahun ini, dianggap tahun depan (jaga-jaga order lintas tahun baru)."""
+    lower = text.lower()
+    tz = date_helpers.get_timezone()
+    today = datetime.datetime.now(tz).date()
+
+    if "besok" in lower:
+        return (today + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    if "lusa" in lower:
+        return (today + datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+
+    m = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?\b", text)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else today.year
+        try:
+            d = datetime.date(year, month, day)
+            if not m.group(3) and d < today:
+                d = datetime.date(year + 1, month, day)
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    m = re.search(r"\b(\d{1,2})\s+(" + "|".join(_BULAN_ID.keys()) + r")\b(?:\s+(\d{4}))?", lower)
+    if m:
+        day = int(m.group(1))
+        month = _BULAN_ID[m.group(2)]
+        year = int(m.group(3)) if m.group(3) else today.year
+        try:
+            d = datetime.date(year, month, day)
+            if not m.group(3) and d < today:
+                d = datetime.date(year + 1, month, day)
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    return None
+
+
+def _try_parse_field_correction(instruction):
+    """Coba deteksi instruksi koreksi DATA customer (No HP/Alamat/Nama/
+    Metode) langsung dari kata kunci, TANPA lewat AI -- biar reliable buat
+    hal krusial kayak nomor HP (nggak digantung interpretasi model bahasa).
+    Return (field, value_baru) kalau ketemu SATU koreksi yang jelas, atau
+    None kalau nggak yakin -- yang berarti fallback ke alur edit ITEM (AI)
+    yang udah ada, jadi kapabilitas lama nggak keganggu sama sekali.
+
+    Catatan: 1 pesan = 1 koreksi field. Mau ubah lebih dari 1 field, tinggal
+    kirim beberapa pesan berurutan (masih dalam mode /edit yang sama)."""
+    text = instruction.strip()
+    lower = text.lower()
+
+    # No HP -- paling gampang & paling penting buat dideteksi akurat.
+    if any(k in lower for k in ("no hp", "nomor hp", "no telp", "nomor telp", "no wa", "nomor wa")):
+        digits = re.findall(r"\d[\d\-\s]{7,14}\d", text)
+        if digits:
+            new_hp = re.sub(r"[^\d]", "", digits[-1])
+            if len(new_hp) >= 8:
+                return "no_hp", new_hp
+
+    if "alamat" in lower:
+        val = _extract_after_splitter(lower, text)
+        if val:
+            return "alamat", val
+
+    if re.search(r"\bnama\b", lower):
+        val = _extract_after_splitter(lower, text)
+        if val:
+            return "nama", val
+
+    if "metode" in lower:
+        if "antar" in lower:
+            return "metode", "Diantar"
+        if "ambil" in lower:
+            return "metode", "Ambil sendiri"
+
+    # Tanggal kirim custom (default-nya tetep Kamis PO minggu berjalan kalau
+    # nggak pernah disebut sama sekali). Sengaja butuh kata "tanggal" +
+    # "kirim" bareng biar nggak ke-trigger sama omongan lain yang kebetulan
+    # nyebut "besok"/"kirim" tanpa maksud ganti tanggal.
+    if ("tanggal" in lower and "kirim" in lower) or "tgl kirim" in lower:
+        tanggal = _parse_tanggal_kirim(text)
+        if tanggal:
+            return "tanggal_kirim", tanggal
+
+    return None
+
 async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                     instruction_override: str = None):
     editing = context.user_data["editing_order"]
     instruction = instruction_override or update.message.text
+
+    # Cek dulu apa ini koreksi DATA customer (No HP/Nama/Alamat/Metode) --
+    # kalau iya, langsung apply & minta konfirmasi, item-nya nggak disentuh
+    # sama sekali (nggak perlu manggil AI item-parser buat ini).
+    field_correction = _try_parse_field_correction(instruction)
+    if field_correction:
+        field, new_value = field_correction
+        editing[field] = new_value
+
+        field_label = {
+            "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
+            "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
+        }[field]
+        item_list_text = "\n".join(
+            f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
+        ) or "  (kosong)"
+        tanggal_kirim_now = editing.get("tanggal_kirim") or editing["minggu_po"]
+
+        preview = (
+            f"*{field_label} diganti jadi:* {new_value}\n\n"
+            f"*Data order {editing['nama']} sekarang:*\n"
+            f"Nama: {editing['nama']}\n"
+            f"No HP: {editing['no_hp']}\n"
+            f"Alamat: {editing['alamat']}\n"
+            f"Metode: {editing['metode']}\n"
+            f"Tanggal Kirim: {tanggal_kirim_now}\n"
+            f"Items (nggak berubah):\n{item_list_text}\n\n"
+            f"Item pesanan nggak ikut berubah. Mau koreksi field lain juga? "
+            f"Ketik lagi sebelum konfirmasi. Kalau udah bener, klik Konfirmasi."
+        )
+
+        context.user_data["pending_edit"] = {
+            "nama": editing["nama"],
+            "no_hp": editing["no_hp"],
+            "alamat": editing["alamat"],
+            "metode": editing["metode"],
+            "items": editing["existing_items"],
+            "ongkir": editing["ongkir"],
+            "minggu_po": editing["minggu_po"],
+            "tanggal_kirim": tanggal_kirim_now,
+        }
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Konfirmasi", callback_data="confirm_edit"),
+            InlineKeyboardButton("❌ Batal", callback_data="cancel_edit"),
+        ]])
+        await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+        return
+
     await update.message.reply_text("Menghitung ulang order...")
 
     sheets = get_sheets_client()
@@ -715,6 +923,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         "items": new_items,
         "ongkir": ongkir_final,
         "minggu_po": editing["minggu_po"],
+        "tanggal_kirim": editing.get("tanggal_kirim"),
     }
 
     keyboard = InlineKeyboardMarkup([[
@@ -790,6 +999,7 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
             "metode": pending["metode"],
             "items": pending["items"],
             "ongkir": pending.get("ongkir", 0),
+            "tanggal_kirim": pending.get("tanggal_kirim"),
         }
         return sheets.add_order_rows(order, pending["minggu_po"])
 
