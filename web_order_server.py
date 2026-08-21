@@ -123,16 +123,18 @@ def create_web_order_app(application):
             logger.error("Web order masuk tapi OWNER_TELEGRAM_IDS kosong, nggak ada yang dikirimin.")
             return web.json_response({"ok": False, "error": "no_owner_configured"}, status=500)
 
-        # Siapin pending_order buat SEMUA admin (siapa pun yang mijit tombol
-        # Konfirmasi nanti, dari HP mana pun, datanya udah ada).
+        # Simpen pending_order di bot_data (BUKAN user_data per-admin).
+        # bot_data itu satu tempat yang sama buat SEMUA admin, jadi siapa pun
+        # yang mijit tombol Konfirmasi/Isi Ongkir duluan -- dari HP/akun
+        # Telegram mana pun -- bisa langsung kepake, nggak tergantung ID
+        # Telegram siapa yang klik. (Sebelumnya sempet dicoba per-admin lewat
+        # user_data dan itu yang bikin tombol "Isi/Ubah Ongkir" gagal nemuin
+        # order-nya kalau yang mijit bukan admin yang "kebetulan" ke-seed.)
         #
-        # CATATAN: application.user_data itu read-only (MappingProxyType) di
-        # python-telegram-bot 21.x kalau diakses dari luar handler biasa --
-        # sengaja dibikin gitu biar plugin/luar nggak asal ubah. Storage
-        # aslinya ada di application._user_data (defaultdict(dict)), jadi
-        # buat nulis dari luar handler context, kita akses langsung ke situ.
-        for owner_id in owner_ids:
-            application._user_data[owner_id]["pending_order"] = parsed
+        # bot_data itu dict biasa yang mutable (beda sama user_data yang
+        # read-only proxy kalau diakses dari luar handler), jadi aman ditulis
+        # langsung kayak gini.
+        application.bot_data["pending_order"] = parsed
 
         # Kirim preview-nya ke GRUP admin kalau ada (biar kelihatan bareng di
         # semua HP), kalau GROUP_CHAT_ID belum di-set baru fallback kirim
