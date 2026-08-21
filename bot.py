@@ -37,15 +37,25 @@ def owner_only(func):
     return wrapper
 
 
+def _is_delivery_metode(metode):
+    """True kalau metode-nya berarti 'dikirim' -- ada 2 istilah yang beredar
+    di sistem ini: halaman order web pakai 'Diantar', tapi order yang di-AI
+    parse dari chat manual (ai_parser.py) pakai 'Kirim'. Dicek berbasis
+    substring biar dua-duanya (dan variasinya kayak 'Dikirim') kena."""
+    m = (metode or "").strip().lower()
+    return "antar" in m or "kirim" in m
+
+
 def build_confirm_keyboard(parsed):
     """Tombol Simpan/Batal standar, ditambah tombol 'Isi/Ubah Ongkir' KHUSUS
-    kalau metode-nya 'Diantar' -- biar admin bisa isi ongkir dulu SEBELUM
-    invoice & surat jalan ke-generate (jadi nggak perlu /edit belakangan)."""
+    kalau metode-nya DIKIRIM (bukan ambil sendiri) -- biar admin bisa isi
+    ongkir dulu SEBELUM invoice & surat jalan ke-generate (jadi nggak perlu
+    /edit belakangan)."""
     rows = [[
         InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
         InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
     ]]
-    if (parsed.get("metode") or "").strip().lower() == "diantar":
+    if _is_delivery_metode(parsed.get("metode")):
         rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data="set_ongkir")])
     return InlineKeyboardMarkup(rows)
 
@@ -699,7 +709,7 @@ def _extract_after_splitter(lower_text, original_text):
     """Ambil teks SETELAH kata sambung kayak 'jadi'/'ganti ke', dari akhir
     kalimat -- biar 'nama nya salah, ganti jadi Budi Santoso' ngambil
     'Budi Santoso' doang."""
-    for splitter in (" jadi ", " ganti ke ", " menjadi ", " ke "):
+    for splitter in (" jadi ", " ganti ke ", " menjadi ", " ke ", " di ", " adalah "):
         idx = lower_text.rfind(splitter)
         if idx != -1:
             val = original_text[idx + len(splitter):].strip(" .,!")
@@ -790,16 +800,18 @@ def _try_parse_field_correction(instruction):
             return "nama", val
 
     if "metode" in lower:
-        if "antar" in lower:
+        if "antar" in lower or "kirim" in lower:
             return "metode", "Diantar"
         if "ambil" in lower:
             return "metode", "Ambil sendiri"
 
     # Tanggal kirim custom (default-nya tetep Kamis PO minggu berjalan kalau
-    # nggak pernah disebut sama sekali). Sengaja butuh kata "tanggal" +
-    # "kirim" bareng biar nggak ke-trigger sama omongan lain yang kebetulan
-    # nyebut "besok"/"kirim" tanpa maksud ganti tanggal.
-    if ("tanggal" in lower and "kirim" in lower) or "tgl kirim" in lower:
+    # nggak pernah disebut sama sekali). Nggak wajib kata "tanggal" -- admin
+    # sering cuma bilang "buat besok" doang -- tapi ini SENGAJA dicek PALING
+    # TERAKHIR (semua field lain udah dicoba duluan) biar "besok" yang
+    # nyempil di kalimat lain nggak salah kesedot jadi koreksi tanggal.
+    if ("tanggal" in lower and "kirim" in lower) or "tgl kirim" in lower \
+            or "besok" in lower or "lusa" in lower:
         tanggal = _parse_tanggal_kirim(text)
         if tanggal:
             return "tanggal_kirim", tanggal
