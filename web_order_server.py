@@ -117,8 +117,14 @@ def create_web_order_app(application):
 
         # Siapin pending_order buat SEMUA admin (siapa pun yang mijit tombol
         # Konfirmasi nanti, dari HP mana pun, datanya udah ada).
+        #
+        # CATATAN: application.user_data itu read-only (MappingProxyType) di
+        # python-telegram-bot 21.x kalau diakses dari luar handler biasa --
+        # sengaja dibikin gitu biar plugin/luar nggak asal ubah. Storage
+        # aslinya ada di application._user_data (defaultdict(dict)), jadi
+        # buat nulis dari luar handler context, kita akses langsung ke situ.
         for owner_id in owner_ids:
-            application.user_data.setdefault(owner_id, {})["pending_order"] = parsed
+            application._user_data[owner_id]["pending_order"] = parsed
 
         # Kirim preview-nya ke GRUP admin kalau ada (biar kelihatan bareng di
         # semua HP), kalau GROUP_CHAT_ID belum di-set baru fallback kirim
@@ -150,7 +156,20 @@ def create_web_order_app(application):
         if request.method == "OPTIONS":
             resp = web.Response(status=204)
         else:
-            resp = await handler(request)
+            try:
+                resp = await handler(request)
+            except web.HTTPException as exc:
+                # aiohttp punya beberapa error "normal" yang dilempar sebagai
+                # exception (mis. 404). Tetep dianggap response biasa biar
+                # header CORS di bawah nempel.
+                resp = exc
+            except Exception:
+                # Error nggak terduga (kayak bug mappingproxy kemarin) --
+                # jangan biarin request mati begitu aja tanpa header CORS,
+                # soalnya kalau gitu browser cuma bakal bilang "gagal
+                # terhubung" padahal request-nya sebenernya nyampe.
+                logger.exception("Unhandled error di web-order handler")
+                resp = web.json_response({"ok": False, "error": "internal_error"}, status=500)
         resp.headers["Access-Control-Allow-Origin"] = "*"
         resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Web-Order-Secret"
