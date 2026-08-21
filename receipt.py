@@ -40,6 +40,18 @@ CATEGORY_ORDER = ["Roti", "Roti Gandum", "Donat", "Roti Tawar"]
 INDENT_ITEM = 22  # geser ke kanan dikit buat rasa di bawah header kategori
 
 
+def _is_delivery_metode(metode):
+    """True kalau metode-nya berarti 'dikirim' -- ada 2 istilah yang beredar
+    di sistem ini: halaman order web pakai 'Diantar', tapi order yang di-AI
+    parse dari chat manual (ai_parser.py) pakai 'Kirim'. Dicek berbasis
+    substring biar dua-duanya (dan variasinya kayak 'Dikirim') kena -- surat
+    jalan buat order manual sempet salah nampilin 'Ambil di: ...' padahal
+    order-nya harusnya dikirim ke alamat customer, gara-gara di sini cuma
+    ngecek == 'Diantar' persis."""
+    m = (metode or "").strip().lower()
+    return "antar" in m or "kirim" in m
+
+
 def _wrap_text(text, font, max_width, draw):
     words = text.split(" ")
     lines = []
@@ -114,10 +126,11 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list)
     # Info Ambil/Diantar sengaja ditaruh PALING BAWAH (nempel sama total),
     # biar paling gampang kebaca sama bagian packing pas terakhir liat
     # surat jalan ini sebelum barangnya dibungkus/diberangkatin.
-    metode_label = "DIANTAR" if metode == "Diantar" else "AMBIL SENDIRI"
+    is_delivery = _is_delivery_metode(metode)
+    metode_label = "DIANTAR" if is_delivery else "AMBIL SENDIRI"
     lines.append(("", FONT_SMALL, "left", 0))
     lines.append((f"CARA: {metode_label}", FONT_HUGE, "center", 0))
-    if metode == "Diantar":
+    if is_delivery:
         lines.append(("Alamat:", FONT_BOLD, "left", 0))
         lines.append((alamat, FONT_NORMAL, "left_wrap", 0))
     else:
