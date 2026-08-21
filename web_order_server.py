@@ -47,6 +47,7 @@ def _build_preview_text(parsed):
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
         f"Catatan: {parsed.get('catatan') or '-'}\n"
