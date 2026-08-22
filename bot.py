@@ -7,6 +7,7 @@ import asyncio
 import logging
 import datetime
 import re
+import uuid
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -46,49 +47,84 @@ def _is_delivery_metode(metode):
     return "antar" in m or "kirim" in m
 
 
-def build_confirm_keyboard(parsed):
+def build_confirm_keyboard(parsed, order_id):
     """Tombol Simpan/Batal standar, ditambah tombol 'Isi/Ubah Ongkir' KHUSUS
     kalau metode-nya DIKIRIM (bukan ambil sendiri) -- biar admin bisa isi
     ongkir dulu SEBELUM invoice & surat jalan ke-generate (jadi nggak perlu
-    /edit belakangan)."""
+    /edit belakangan).
+
+    order_id SENGAJA ditempel di callback_data (bukan cuma 'confirm_order'
+    polos) -- biar tombol di pesan MANA PUN tetep nunjuk ke order-nya
+    sendiri-sendiri, walau ada beberapa order numpuk nunggu diproses
+    bareng. Tanpa ini, klik tombol di order lama bisa nyasar
+    ngonfirm/nyimpen order LAIN yang kebetulan lagi 'aktif' pas itu."""
     rows = [[
-        InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
-        InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
+        InlineKeyboardButton("✅ Simpan & Generate", callback_data=f"confirm_order:{order_id}"),
+        InlineKeyboardButton("❌ Batal", callback_data=f"cancel_order:{order_id}"),
     ]]
     if _is_delivery_metode(parsed.get("metode")):
-        rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data="set_ongkir")])
+        rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data=f"set_ongkir:{order_id}")])
     return InlineKeyboardMarkup(rows)
 
 
-def _get_pending_order(context):
-    """Ambil pending_order dari 2 kemungkinan tempat:
-    - user_data: order dari alur paste-chat manual (cuma keliatan sama admin
-      yang lagi ngobrol itu -- perilaku ASLI, nggak diubah).
-    - bot_data: order dari WEB (Netlify). Ini sengaja disimpen di bot_data
-      (bukan user_data per-admin) karena bot_data itu SATU tempat yang sama
-      buat SEMUA admin/HP -- jadi siapa pun yang lebih dulu buka Telegram-nya
-      bisa langsung proses, nggak peduli akun/HP mana (sesuai permintaan
-      'tetep di grup, bisa dihandle pake 2 hp').
-    Return (parsed_atau_None, dari_bot_data_bool)."""
-    parsed = context.user_data.get("pending_order")
-    if parsed:
-        return parsed, False
-    parsed = context.bot_data.get("pending_order")
-    if parsed:
-        return parsed, True
-    return None, False
+def _new_order_id():
+    return uuid.uuid4().hex[:8]
 
 
-def _save_pending_order(context, parsed, from_bot_data):
-    if from_bot_data:
-        context.bot_data["pending_order"] = parsed
-    else:
-        context.user_data["pending_order"] = parsed
+def _store_pending_order(context, parsed, order_id=None):
+    """Simpen/update 1 order ke bot_data['pending_orders'][order_id].
+    Kalau order_id nggak dikasih, generate ID baru (order BARU) dan
+    dijadiin 'order yang lagi aktif' (dipakai buat nebak target koreksi
+    bebas kayak 'yang apple salah hapus', liat handle_text).
+
+    SEKARANG SEMUA order (web ATAU paste-chat manual) disimpen di bot_data,
+    BUKAN user_data lagi -- bot_data itu SATU tempat yang sama buat SEMUA
+    admin/HP (sesuai 'tetep bisa dihandle pake 2 hp'). Dan yang PALING
+    PENTING: tiap order punya ID sendiri-sendiri di dalam SATU dict, jadi
+    kalau ada beberapa order numpuk (misal beberapa customer submit lewat
+    web hampir bareng), mereka nggak saling timpa kayak desain lama yang
+    cuma nampung 1 order dalam 1 slot -- itu yang bikin tombol di order
+    lama nyasar/ilang pas order baru dateng nyusul.
+
+    Return order_id yang dipakai (baru atau yang di-passing)."""
+    orders = context.bot_data.setdefault("pending_orders", {})
+    if order_id is None:
+        order_id = _new_order_id()
+        context.bot_data["active_pending_order_id"] = order_id
+    orders[order_id] = parsed
+    return order_id
 
 
-def _clear_pending_order(context):
-    context.user_data.pop("pending_order", None)
-    context.bot_data.pop("pending_order", None)
+def _get_pending_order_by_id(context, order_id):
+    if not order_id:
+        return None
+    return context.bot_data.get("pending_orders", {}).get(order_id)
+
+
+def _clear_pending_order_by_id(context, order_id):
+    context.bot_data.get("pending_orders", {}).pop(order_id, None)
+    # Kalau yang dihapus ini kebetulan yang lagi 'aktif' (target koreksi
+    # bebas), lepas juga penunjuknya -- biar koreksi bebas berikutnya
+    # nggak nunjuk ke order yang udah nggak ada.
+    if context.bot_data.get("active_pending_order_id") == order_id:
+        context.bot_data.pop("active_pending_order_id", None)
+
+
+def _get_active_pending_order(context):
+    """Order yang PALING TERAKHIR dibuat/disentuh -- ini yang dianggap
+    target kalau admin ngetik koreksi bebas TANPA nge-klik tombol dulu
+    (misal 'yang apple salah, tolong hapus'). Kalau ada beberapa order
+    numpuk, koreksi bebas cuma bisa nunjuk ke SATU (yang paling baru) --
+    sama kayak keterbatasan desain lama, bukan regresi baru. Buat order
+    LAIN yang ikut numpuk, admin tetep bisa proses lewat tombol
+    Simpan/Batal/Isi Ongkir di pesannya masing-masing (itu udah nggak
+    kena batasan ini sama sekali, soalnya order_id-nya nempel di tombol).
+    Return (order_id, parsed) atau (None, None)."""
+    order_id = context.bot_data.get("active_pending_order_id")
+    parsed = _get_pending_order_by_id(context, order_id)
+    if parsed is None:
+        return None, None
+    return order_id, parsed
 
 
 # ---------------- COMMANDS ----------------
@@ -417,7 +453,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Lagi nunggu admin ngetik nominal ongkir (abis klik "Isi/Ubah Ongkir")?
     # Ini dicek PALING atas, sebelum kemungkinan lain.
-    if context.user_data.get("awaiting_ongkir"):
+    if context.user_data.get("awaiting_ongkir_for"):
         await handle_ongkir_input(update, context)
         return
 
@@ -429,12 +465,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Kalau masih ada preview order yang nunggu Konfirmasi/Batal (belum
     # disimpen ke Sheets sama sekali), anggap chat berikutnya itu KOREKSI ke
-    # preview itu -- misal "yang apple salah, tolong hapus" -- bukan order
-    # baru. Kalau admin emang mau mulai order lain, klik dulu tombol Batal
-    # di preview yang lagi jalan.
-    pending_parsed, pending_from_bot_data = _get_pending_order(context)
+    # preview yang PALING TERAKHIR dibuat/disentuh -- misal "yang apple
+    # salah, tolong hapus" -- bukan order baru. Kalau ada beberapa order
+    # numpuk, koreksi bebas cuma nunjuk ke yang paling baru itu; order lain
+    # yang ikut numpuk tetep aman diproses lewat tombol di pesannya
+    # masing-masing (order_id-nya nempel di situ, nggak kena batasan ini).
+    # Kalau admin emang mau mulai order lain via ketik bebas, klik dulu
+    # tombol Batal di preview yang lagi aktif.
+    active_order_id, pending_parsed = _get_active_pending_order(context)
     if pending_parsed:
-        await handle_pending_correction(update, context, pending_parsed, pending_from_bot_data)
+        await handle_pending_correction(update, context, pending_parsed, active_order_id)
         return
 
     raw_text = update.message.text
@@ -557,7 +597,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tanggal_dari_teks:
             parsed["tanggal_kirim"] = tanggal_dari_teks
 
-    context.user_data["pending_order"] = parsed
+    order_id = _store_pending_order(context, parsed)
 
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -579,7 +619,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if parsed.get("kelengkapan") == "kurang_lengkap":
         preview += "⚠️ ADA YANG PERLU DICEK (lihat Catatan di atas) sebelum disimpan!\n\n"
 
-    keyboard = build_confirm_keyboard(parsed)
+    keyboard = build_confirm_keyboard(parsed, order_id)
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
 
@@ -587,21 +627,32 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "cancel_order":
-        _clear_pending_order(context)
+    # callback_data formatnya "confirm_order:<id>" / "cancel_order:<id>" --
+    # order_id-nya nempel di tombol itu sendiri, jadi tombol di pesan MANA
+    # PUN (walau ada beberapa order numpuk nunggu diproses bareng) selalu
+    # nunjuk ke order yang BENER, nggak nyasar ke order lain yang kebetulan
+    # lagi "aktif". Fallback split(":") kalau somehow ID-nya kosong/lama.
+    action, _, order_id = query.data.partition(":")
+
+    if action == "cancel_order":
+        _clear_pending_order_by_id(context, order_id)
         await query.edit_message_text("Dibatalin ya.")
         return
 
-    # Cegah klik dobel: begitu diproses, langsung matiin tombol & kasih flag,
-    # biar klik kedua (atau nyasar) nggak nyimpen data yang sama 2x.
-    if context.user_data.get("saving_in_progress"):
+    # Cegah klik dobel -- SEKARANG per-order_id (disimpen di bot_data, bukan
+    # user_data per-admin), soalnya order lain yang numpuk bareng harus
+    # tetep bisa diproses walau ada 1 order lain lagi disimpen. Kalau masih
+    # per-admin (desain lama), 1 admin nyimpen 1 order bakal ke-lock buat
+    # SEMUA order lain yang dia pegang juga -- padahal harusnya independen.
+    saving_flags = context.bot_data.setdefault("saving_in_progress", set())
+    if order_id in saving_flags:
         return
-    context.user_data["saving_in_progress"] = True
+    saving_flags.add(order_id)
 
-    parsed, _ = _get_pending_order(context)
+    parsed = _get_pending_order_by_id(context, order_id)
     if not parsed or not parsed.get("items"):
         await query.edit_message_text("Nggak ada data order yang tersimpan. Kirim ulang chat-nya ya.")
-        context.user_data["saving_in_progress"] = False
+        saving_flags.discard(order_id)
         return
 
     await query.edit_message_text("Menyimpan...")
@@ -631,11 +682,11 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Timeout — gagal simpan ke Sheets (lebih dari 30 detik). "
             "Cek koneksi Google Sheets, lalu kirim ulang chat order-nya."
         )
-        context.user_data["saving_in_progress"] = False
+        saving_flags.discard(order_id)
         return
     except Exception as e:
         await query.message.reply_text(f"Gagal simpan ke Sheets: {e}\nKirim ulang chat-nya ya.")
-        context.user_data["saving_in_progress"] = False
+        saving_flags.discard(order_id)
         return
 
     await query.message.reply_text("Tersimpan!")
@@ -658,8 +709,8 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
     )
 
-    _clear_pending_order(context)
-    context.user_data["saving_in_progress"] = False
+    _clear_pending_order_by_id(context, order_id)
+    saving_flags.discard(order_id)
 
 
 async def handle_set_ongkir(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -669,12 +720,22 @@ async def handle_set_ongkir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    parsed, _ = _get_pending_order(context)
+    # callback_data formatnya "set_ongkir:<id>" -- liat catatan di
+    # handle_confirm soal kenapa order_id nempel di tombol.
+    _, _, order_id = query.data.partition(":")
+
+    parsed = _get_pending_order_by_id(context, order_id)
     if not parsed:
         await query.message.reply_text("Nggak ada order yang lagi diproses.")
         return
 
-    context.user_data["awaiting_ongkir"] = True
+    # Disimpen per-admin (user_data) SENGAJA -- ini cuma nunggu 1 langkah
+    # balasan angka dari admin yang SAMA yang barusan mijit tombolnya,
+    # beda konsepnya sama pending_orders yang emang perlu dibagi ke semua
+    # admin/HP. order_id ikut disimpen di sini juga, jadi angka yang diketik
+    # abis ini pasti nempel ke order yang BENER (bukan order lain yang
+    # kebetulan lagi 'aktif').
+    context.user_data["awaiting_ongkir_for"] = order_id
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
@@ -693,9 +754,9 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Formatnya angka aja ya, contoh: 15000. Coba ketik lagi.")
         return
 
-    context.user_data["awaiting_ongkir"] = False
+    order_id = context.user_data.pop("awaiting_ongkir_for", None)
 
-    parsed, from_bot_data = _get_pending_order(context)
+    parsed = _get_pending_order_by_id(context, order_id)
     if not parsed:
         await update.message.reply_text(
             "Order-nya udah nggak ada / expired. Minta customer kirim ulang, atau paste ulang chat-nya."
@@ -703,7 +764,7 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     parsed["ongkir"] = int(digits)
-    _save_pending_order(context, parsed, from_bot_data)
+    _store_pending_order(context, parsed, order_id)
 
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -723,12 +784,12 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Catatan: {parsed.get('catatan') or '-'}\n"
     )
 
-    keyboard = build_confirm_keyboard(parsed)
+    keyboard = build_confirm_keyboard(parsed, order_id)
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def handle_pending_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                     parsed: dict, from_bot_data: bool):
+                                     parsed: dict, order_id: str):
     """Order masih di tahap preview (belum diklik Konfirmasi/Batal). Admin
     ngetik koreksi bebas -- misal 'yang apple salah, tolong hapus' atau
     'harusnya charsiu bukan cranberry' -- dan kita pakai ULANG mesin AI edit
@@ -742,7 +803,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     if field_correction:
         field, new_value = field_correction
         parsed[field] = new_value
-        _save_pending_order(context, parsed, from_bot_data)
+        _store_pending_order(context, parsed, order_id)
 
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
@@ -767,7 +828,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
             f"Ongkir: {ongkir_text}\n"
             f"Catatan: {parsed.get('catatan') or '-'}\n"
         )
-        keyboard = build_confirm_keyboard(parsed)
+        keyboard = build_confirm_keyboard(parsed, order_id)
         await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
         return
 
@@ -800,7 +861,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     if catatan_baru and catatan_baru != "-":
         parsed["catatan"] = catatan_baru
 
-    _save_pending_order(context, parsed, from_bot_data)
+    _store_pending_order(context, parsed, order_id)
 
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -820,7 +881,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         f"Ongkir: {ongkir_text}\n"
         f"Catatan: {parsed.get('catatan') or '-'}\n"
     )
-    keyboard = build_confirm_keyboard(parsed)
+    keyboard = build_confirm_keyboard(parsed, order_id)
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
 
@@ -1207,8 +1268,12 @@ def main():
     app.add_handler(CommandHandler("laporanbulanan", laporanbulanan_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("kirim", kirim_cmd))
-    app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order)$"))
-    app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir$"))
+    # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --
+    # soalnya callback_data sekarang bawa order_id juga, misal
+    # "confirm_order:a1b2c3d4", biar tombol tetep bener walau ada beberapa
+    # order numpuk nunggu diproses bareng (liat build_confirm_keyboard).
+    app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order):"))
+    app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir:"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
