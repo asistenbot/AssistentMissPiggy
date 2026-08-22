@@ -18,6 +18,7 @@ dijalanin manual.
 
 import logging
 import os
+import uuid
 
 from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -63,18 +64,25 @@ def _build_preview_text(parsed):
     )
 
 
-def _build_confirm_keyboard(parsed):
+def _build_confirm_keyboard(parsed, order_id):
     # Order dari web nggak pernah ada input ongkir dari customer (mereka
     # cuma pilih "Diantar" doang), jadi khusus metode itu kita kasih tombol
     # buat admin isi ongkir DULU sebelum invoice & surat jalan ke-generate.
     # (handle_set_ongkir / handle_ongkir_input ada di bot.py, dipakai bareng
     # sama alur paste-chat manual juga.)
+    #
+    # order_id nempel di callback_data (samain formatnya sama
+    # build_confirm_keyboard di bot.py: "confirm_order:<id>" dst) -- biar
+    # tombol di order INI tetep nunjuk ke order INI sendiri walau ada order
+    # web/manual LAIN yang numpuk nunggu diproses bareng. Tanpa ini, semua
+    # order dari web bakal rebutan 1 slot 'pending_order' yang sama, dan
+    # tombol di order lama bisa nyasar/ilang begitu order baru dateng.
     rows = [[
-        InlineKeyboardButton("✅ Simpan & Generate", callback_data="confirm_order"),
-        InlineKeyboardButton("❌ Batal", callback_data="cancel_order"),
+        InlineKeyboardButton("✅ Simpan & Generate", callback_data=f"confirm_order:{order_id}"),
+        InlineKeyboardButton("❌ Batal", callback_data=f"cancel_order:{order_id}"),
     ]]
     if _is_delivery_metode(parsed.get("metode")):
-        rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data="set_ongkir")])
+        rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data=f"set_ongkir:{order_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -125,26 +133,30 @@ def create_web_order_app(application):
             "kelengkapan": "lengkap",
         }
 
-        preview = _build_preview_text(parsed)
-        keyboard = _build_confirm_keyboard(parsed)
-
         owner_ids = config.OWNER_TELEGRAM_IDS or []
         if not owner_ids:
             logger.error("Web order masuk tapi OWNER_TELEGRAM_IDS kosong, nggak ada yang dikirimin.")
             return web.json_response({"ok": False, "error": "no_owner_configured"}, status=500)
 
-        # Simpen pending_order di bot_data (BUKAN user_data per-admin).
-        # bot_data itu satu tempat yang sama buat SEMUA admin, jadi siapa pun
-        # yang mijit tombol Konfirmasi/Isi Ongkir duluan -- dari HP/akun
-        # Telegram mana pun -- bisa langsung kepake, nggak tergantung ID
-        # Telegram siapa yang klik. (Sebelumnya sempet dicoba per-admin lewat
-        # user_data dan itu yang bikin tombol "Isi/Ubah Ongkir" gagal nemuin
-        # order-nya kalau yang mijit bukan admin yang "kebetulan" ke-seed.)
+        # Tiap order (web ATAU paste-chat manual di bot.py) disimpen dengan
+        # ID sendiri-sendiri di bot_data["pending_orders"][order_id] --
+        # BUKAN 1 slot tunggal kayak desain lama ("pending_order" doang).
+        # bot_data itu satu tempat yang sama buat SEMUA admin/HP (jadi siapa
+        # pun yang mijit tombol duluan bisa langsung kepake, sesuai 'tetep
+        # bisa dihandle pake 2 hp'), DAN yang paling penting: kalau ada
+        # beberapa order numpuk (misal beberapa customer submit lewat web
+        # hampir bareng), mereka nggak saling timpa/ilang -- masing-masing
+        # tombolnya bawa order_id sendiri (liat _build_confirm_keyboard).
         #
         # bot_data itu dict biasa yang mutable (beda sama user_data yang
         # read-only proxy kalau diakses dari luar handler), jadi aman ditulis
         # langsung kayak gini.
-        application.bot_data["pending_order"] = parsed
+        order_id = uuid.uuid4().hex[:8]
+        application.bot_data.setdefault("pending_orders", {})[order_id] = parsed
+        application.bot_data["active_pending_order_id"] = order_id
+
+        preview = _build_preview_text(parsed)
+        keyboard = _build_confirm_keyboard(parsed, order_id)
 
         # Kirim preview-nya ke GRUP admin kalau ada (biar kelihatan bareng di
         # semua HP), kalau GROUP_CHAT_ID belum di-set baru fallback kirim
