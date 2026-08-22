@@ -109,6 +109,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /invoice Nama Customer — bikin ulang invoice\n"
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
         "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
+        "- /kirim Nama Customer — tandain order udah Terkirim SAAT ITU JUGA (biar nggak numplek di rekap)\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
         "- /laporanbulanan 2026-07:2026-08 — laporan rentang beberapa bulan\n"
@@ -142,8 +143,14 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
+        # get_pending_orders_by_week (BUKAN get_orders_by_week) -- ini yang
+        # otomatis nge-rollover order yang tanggal kirimnya udah lewat jadi
+        # 'Terkirim', trus buang order yang statusnya udah 'Terkirim' dari
+        # rekap ini. Order yang dikirim SEBELUM tanggal kirimnya sendiri
+        # (mis. dikirim lebih cepet di hari H) tetep kehitung sampe besok --
+        # baru ilang otomatis keesokan harinya.
         orders = await asyncio.wait_for(
-            asyncio.to_thread(sheets.get_orders_by_week, minggu_po), timeout=20
+            asyncio.to_thread(sheets.get_pending_orders_by_week, minggu_po), timeout=20
         )
     except asyncio.TimeoutError:
         await update.message.reply_text("Timeout ambil data dari Sheets. Coba lagi.")
@@ -204,6 +211,98 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(
         photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
     )
+
+
+async def _tandai_terkirim(update: Update, nama: str):
+    """Tandain order 1 customer (minggu berjalan) jadi 'Terkirim' SAAT ITU
+    JUGA -- jaring pengaman manual buat pas admin mau langsung nandain abis
+    kurir beneran berangkat, nggak perlu nunggu cutoff otomatis jam 06:00
+    WIB (lihat rollover_delivered_orders di sheets_client.py). Dipakai bareng
+    sama command /kirim dan deteksi bahasa natural ('apple udah dikirim')."""
+    sheets = get_sheets_client()
+    minggu_po = date_helpers.current_po_week_thursday()
+    try:
+        jumlah = await asyncio.wait_for(
+            asyncio.to_thread(sheets.mark_customer_delivered, nama, minggu_po), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas update status. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal update status: {e}")
+        return
+
+    if jumlah == 0:
+        await update.message.reply_text(
+            f"Nggak ada order Pending atas nama {nama} untuk minggu ini "
+            f"(mungkin udah Terkirim duluan, atau nama/minggunya beda)."
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ {jumlah} baris order {nama} ditandain Terkirim -- nggak bakal numplek lagi di rekap produksi."
+    )
+
+
+@owner_only
+async def kirim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nama = " ".join(context.args)
+    if not nama:
+        await update.message.reply_text("Format: /kirim Nama Customer")
+        return
+    await _tandai_terkirim(update, nama)
+
+
+_FILLER_DEPAN_KIRIM = re.compile(r"^(yg|yang|itu|order)\s+", re.IGNORECASE)
+_FILLER_BELAKANG_KIRIM = re.compile(
+    r"^(hari ini|tadi|barusan|dong|ya|yah)\b.*$", re.IGNORECASE
+)
+_KATA_PEMICU_KIRIM = re.compile(r"\b(sudah|udah)\s*(di\s*)?(kirim|terkirim)\b", re.IGNORECASE)
+# Kata-kata yang nunjukkin ini KOMENTAR/PERTANYAAN, BUKAN perintah langsung
+# -- misal 'loh yg apple kan udah dikirim hari ini' itu admin lagi
+# NGELUH/NANYA soal rekap, bukan minta bot nandain status. Kalau salah satu
+# ini ada di kalimatnya, mending nggak usah dieksekusi otomatis -- lebih
+# aman drpd salah ubah data di Sheets gara-gara nyeletuk doang.
+_PENANDA_BUKAN_PERINTAH = re.compile(
+    r"\b(loh|lho|kok|kan|napa|kenapa|gimana|harusnya|masa|knp)\b|\?", re.IGNORECASE
+)
+
+
+def _try_parse_delivered_mark(text):
+    """Coba deteksi instruksi 'tandain order si X udah dikirim' langsung
+    dari kata kunci, TANPA perlu command /kirim -- misal 'apple udah di
+    kirim' atau 'yg apple udah dikirim'. Return nama customer kalau ketemu,
+    atau None kalau nggak yakin (fallback ke alur normal / AI
+    classify_intent yang udah ada, jadi kapabilitas lama nggak keganggu).
+
+    Sengaja mensyaratkan kata 'sudah'/'udah' NEMPEL LANGSUNG sebelum
+    'kirim'/'terkirim' (cuma boleh disisipin 'di') -- biar teks order BARU
+    yang kebetulan nyebut '... di kirim bun polos ...' (metode pengiriman,
+    bukan status) nggak salah kesedot ke sini. Juga SENGAJA nolak kalimat
+    yang ada penanda komentar/pertanyaan (liat _PENANDA_BUKAN_PERINTAH) dan
+    hasil ekstraksi nama yang kepanjangan (>4 kata) -- dua-duanya nurunin
+    resiko salah nandain order jadi Terkirim gara-gara admin cuma
+    nyeletuk/nanya, bukan ngasih perintah."""
+    text = text.strip()
+    lower = text.lower()
+
+    if _PENANDA_BUKAN_PERINTAH.search(lower):
+        return None
+
+    m = _KATA_PEMICU_KIRIM.search(lower)
+    if not m:
+        return None
+
+    before = text[:m.start()].strip(" ,.!")
+    after = text[m.end():].strip(" ,.!")
+
+    before_clean = _FILLER_DEPAN_KIRIM.sub("", before).strip()
+    after_clean = _FILLER_BELAKANG_KIRIM.sub("", after).strip()
+
+    nama = before_clean or after_clean
+    if not nama or len(nama) < 2 or len(nama.split()) > 4:
+        return None
+    return nama
 
 
 @owner_only
@@ -339,6 +438,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw_text = update.message.text
+
+    # Deteksi deterministik (BUKAN lewat AI) buat instruksi manual 'tandain
+    # udah dikirim' -- misal 'apple udah di kirim' -- biar admin nggak
+    # wajib ketik /kirim Nama Customer. Dicek SEBELUM classify_intent (AI)
+    # biar reliable & konsisten sama pola _try_parse_field_correction yang
+    # udah ada; kalau nggak yakin (misal kalimatnya lebih kayak komentar/
+    # pertanyaan), balik None dan lanjut ke alur normal di bawah.
+    nama_dikirim = _try_parse_delivered_mark(raw_text)
+    if nama_dikirim:
+        await _tandai_terkirim(update, nama_dikirim)
+        return
 
     # Coba tebak dulu maksud admin (bahasa natural, nggak wajib pakai '/')
     try:
@@ -1096,6 +1206,7 @@ def main():
     app.add_handler(CommandHandler("suratjalan", suratjalan_cmd))
     app.add_handler(CommandHandler("laporanbulanan", laporanbulanan_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
+    app.add_handler(CommandHandler("kirim", kirim_cmd))
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order)$"))
     app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir$"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
