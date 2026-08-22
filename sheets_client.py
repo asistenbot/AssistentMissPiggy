@@ -251,6 +251,10 @@ class SheetsClient:
             # belum lengkap) -- jangan ubah apa-apa, lebih aman diem drpd
             # salah update kolom yang lain.
             return 0
+        # Minggu_PO itu OPSIONAL buat fallback doang -- kalau nggak ketemu
+        # ya udah, order lama yang Tanggal_Kirim-nya kosong tetep diskip aja
+        # (nggak fatal, cuma nggak ke-rollover otomatis).
+        idx_minggu = header.index("Minggu_PO") if "Minggu_PO" in header else None
 
         tz = date_helpers.get_timezone()
         now = now or datetime.datetime.now(tz)
@@ -262,12 +266,25 @@ class SheetsClient:
 
         rows_to_update = []
         for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header
-            if len(row) <= max(idx_status, idx_tanggal_kirim):
+            if len(row) <= idx_status:
                 continue
             status = row[idx_status].strip()
-            tanggal_kirim = row[idx_tanggal_kirim].strip()
-            if status.lower() != "pending" or not tanggal_kirim:
+            if status.lower() != "pending":
                 continue
+
+            # Tanggal_Kirim itu kolom yang ditambahin BELAKANGAN -- order
+            # lama (sebelum kolom ini ada) bakal kosong di sini. Kalau
+            # kosong, balik ke Minggu_PO (Kamis PO minggu itu) sebagai
+            # tanggal kirim implisit -- SAMA PERSIS kayak fallback yang
+            # dipakai pas order itu pertama kali disimpen (add_order_rows).
+            # Tanpa ini, order lama bakal Pending selama-lamanya dan HARUS
+            # diubah manual satu-satu di Sheets.
+            tanggal_kirim = row[idx_tanggal_kirim].strip() if idx_tanggal_kirim < len(row) else ""
+            if not tanggal_kirim and idx_minggu is not None and idx_minggu < len(row):
+                tanggal_kirim = row[idx_minggu].strip()
+            if not tanggal_kirim:
+                continue
+
             d = self._parse_tanggal_fleksibel(tanggal_kirim)
             if d is not None and d <= boundary:
                 rows_to_update.append(i)
