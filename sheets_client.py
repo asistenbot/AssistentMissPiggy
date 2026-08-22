@@ -42,11 +42,6 @@ class SheetsClient:
         kolomnya dulu (spasi jadi underscore, dll) -- biar nggak masalah
         walau header di Sheets ditulis 'Minggu PO' atau 'Minggu_PO', dua-duanya
         tetap kebaca sebagai field yang sama oleh kode ini.
-
-        Untuk worksheet ORDERS, kolom 'Status' juga dihitung ULANG di sini
-        (lihat _effective_status) -- jadi order yang Tanggal_Kirim-nya udah
-        lewat/hari ini otomatis kebaca statusnya 'Sudah Dikirim', walau di
-        Sheets aslinya masih tertulis 'Pending'.
         """
         records = ws.get_all_records()
         normalized = []
@@ -55,38 +50,8 @@ class SheetsClient:
             for k, v in r.items():
                 key_norm = k.strip().replace(" ", "_")
                 new_r[key_norm] = v
-            if "Tanggal_Kirim" in new_r or "Status" in new_r:
-                new_r["Status"] = self._effective_status(new_r)
             normalized.append(new_r)
         return normalized
-
-    def _effective_status(self, order_record):
-        """Status 'asli' order (biasanya 'Pending' pas baru disimpen), TAPI
-        kalau Tanggal_Kirim order itu udah lewat atau PERSIS hari ini,
-        otomatis dianggap SUDAH PASTI DIKIRIM -- nggak perlu admin ubah
-        status manual di Sheets. Kalau kolom Status di Sheets udah keisi
-        'Sudah Dikirim'/'Selesai'/'Delivered' secara manual, itu tetap
-        dihormati (nggak ketimpa)."""
-        status_asli = str(order_record.get("Status") or "").strip()
-        if status_asli.lower() in ("sudah dikirim", "selesai", "delivered"):
-            return status_asli
-
-        tanggal_kirim = order_record.get("Tanggal_Kirim")
-        if not tanggal_kirim:
-            return status_asli or "Pending"
-
-        teks = str(tanggal_kirim).strip()
-        tz = date_helpers.get_timezone()
-        today = datetime.datetime.now(tz).date()
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-            try:
-                d = datetime.datetime.strptime(teks, fmt).date()
-                if d <= today:
-                    return "Sudah Dikirim"
-                break
-            except ValueError:
-                continue
-        return status_asli or "Pending"
 
     @staticmethod
     def _loose_key(s):
@@ -180,7 +145,6 @@ class SheetsClient:
                 "Alamat": order["alamat"],
                 "Ongkir": order.get("ongkir", 0),
                 "Tanggal_Kirim": tanggal_kirim,
-                "Status": "Pending",
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
@@ -190,19 +154,7 @@ class SheetsClient:
         return self._normalize_records(ws)
 
     def get_orders_by_week(self, minggu_po: str):
-        """PENTING: filter berdasarkan Tanggal_Kirim (tanggal kirim ASLI),
-        BUKAN Minggu_PO (yang cuma tag batch, selalu Kamis PO terdekat).
-        Ini yang bikin order yang tanggal kirimnya custom (misal 'hari ini')
-        nggak ikut kesedot ke rekap minggu PO lain walau Minggu_PO-nya
-        kebetulan sama."""
-        return [o for o in self.get_all_orders() if self._tanggal_kirim_cocok(o, minggu_po)]
-
-    def _tanggal_kirim_cocok(self, order_record, target_date):
-        tanggal_kirim = order_record.get("Tanggal_Kirim")
-        if tanggal_kirim:
-            return self._minggu_po_cocok(tanggal_kirim, target_date)
-        # Fallback buat data lama sebelum kolom Tanggal_Kirim ada
-        return self._minggu_po_cocok(order_record.get("Minggu_PO"), target_date)
+        return [o for o in self.get_all_orders() if self._minggu_po_cocok(o.get("Minggu_PO"), minggu_po)]
 
     def _minggu_po_cocok(self, nilai_di_sheet, minggu_po):
         teks = str(nilai_di_sheet).strip()
@@ -255,6 +207,140 @@ class SheetsClient:
 
         return len(rows_to_delete)
 
+    def _parse_tanggal_fleksibel(self, tanggal_teks):
+        """Parse teks tanggal (format bebas, apa adanya dari Sheets) jadi
+        objek date, atau None kalau formatnya nggak dikenalin."""
+        teks = str(tanggal_teks).strip()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+            try:
+                return datetime.datetime.strptime(teks, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
+        """
+        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 06:00 WIB PADA
+        HARI ITU SENDIRI otomatis dianggap udah kelar diproduksi & dikirim --
+        Status-nya diubah dari 'Pending' jadi 'Terkirim'. Jadi order buat
+        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 06:00 pagi juga -- nggak
+        perlu nunggu lewat ganti hari.
+
+        Dipanggil otomatis dari get_pending_orders_by_week() tiap kali ada
+        yang minta rekap produksi (jadi keupdate begitu direquest kapan aja
+        abis jam 6 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
+        harian jam 06:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
+        keupdate walau nggak ada satupun yang minta rekap hari itu -- itu
+        belum kepasang di sini karena scheduler_jobs.py belum ada.
+
+        now: datetime.datetime timezone-aware, default waktu sekarang
+        (timezone bot).
+        Return: jumlah baris yang Status-nya barusan diubah.
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_status = header.index("Status")
+            idx_tanggal_kirim = header.index("Tanggal_Kirim")
+        except ValueError:
+            # Kolom Status/Tanggal_Kirim nggak ketemu (mis. header di Sheets
+            # belum lengkap) -- jangan ubah apa-apa, lebih aman diem drpd
+            # salah update kolom yang lain.
+            return 0
+
+        tz = date_helpers.get_timezone()
+        now = now or datetime.datetime.now(tz)
+        cutoff_hari_ini = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        # Sebelum jam 6 pagi, "batas hari" efektifnya masih KEMARIN -- order
+        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 6 pagi
+        # bener-bener lewat.
+        boundary = now.date() if now >= cutoff_hari_ini else (now - datetime.timedelta(days=1)).date()
+
+        rows_to_update = []
+        for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header
+            if len(row) <= max(idx_status, idx_tanggal_kirim):
+                continue
+            status = row[idx_status].strip()
+            tanggal_kirim = row[idx_tanggal_kirim].strip()
+            if status.lower() != "pending" or not tanggal_kirim:
+                continue
+            d = self._parse_tanggal_fleksibel(tanggal_kirim)
+            if d is not None and d <= boundary:
+                rows_to_update.append(i)
+
+        for row_idx in rows_to_update:
+            ws.update_cell(row_idx, idx_status + 1, "Terkirim")
+
+        return len(rows_to_update)
+
+    def mark_customer_delivered(self, nama_customer: str, minggu_po: str) -> int:
+        """
+        Tandain SEMUA baris order milik nama_customer untuk minggu_po
+        tertentu yang masih Status 'Pending' jadi 'Terkirim' -- dipakai buat
+        /kirim, jaring pengaman MANUAL kalau admin mau langsung nandain SAAT
+        ITU JUGA (nggak nunggu cutoff otomatis jam 06:00 WIB di
+        rollover_delivered_orders).
+
+        Return: jumlah baris yang barusan diubah.
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_status = header.index("Status")
+            idx_minggu = header.index("Minggu_PO")
+            idx_nama = header.index("Nama_Customer")
+        except ValueError:
+            return 0
+
+        nama_target = nama_customer.strip().lower()
+        rows_to_update = []
+        for i, row in enumerate(all_values[1:], start=2):
+            if len(row) <= max(idx_status, idx_minggu, idx_nama):
+                continue
+            row_nama = row[idx_nama].strip().lower()
+            row_minggu = row[idx_minggu]
+            row_status = row[idx_status].strip()
+            if row_nama == nama_target and row_status.lower() == "pending" \
+                    and self._minggu_po_cocok(row_minggu, minggu_po):
+                rows_to_update.append(i)
+
+        for row_idx in rows_to_update:
+            ws.update_cell(row_idx, idx_status + 1, "Terkirim")
+
+        return len(rows_to_update)
+
+    def get_pending_orders_by_week(self, minggu_po: str):
+        """Sama kayak get_orders_by_week, TAPI (1) jalanin
+        rollover_delivered_orders dulu (order yang tanggal kirimnya udah
+        lewat otomatis kepindah Status-nya), lalu (2) buang order yang
+        Status-nya udah 'Terkirim' dari hasilnya. KHUSUS dipakai buat REKAP
+        PRODUKSI, biar nggak keitung ulang order yang sebenernya udah kelar
+        diproduksi & dikirim.
+
+        SENGAJA dibikin method BARU, bukan ubah get_orders_by_week langsung
+        -- soalnya get_orders_by_week masih dipakai /invoice, /suratjalan,
+        /edit yang justru HARUS tetep bisa nemuin order biar admin bisa
+        cetak ulang / edit order yang udah kelar dikirim kalau perlu."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            # Kalau rollover gagal (mis. kolom belum lengkap di Sheets),
+            # tetep lanjut nampilin rekap apa adanya drpd bikin /rekap
+            # ikutan error gara-gara ini.
+            pass
+        return [
+            o for o in self.get_orders_by_week(minggu_po)
+            if str(o.get("Status", "")).strip().lower() != "terkirim"
+        ]
+
     def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
         return [
             o for o in self.get_orders_by_week(minggu_po)
@@ -295,4 +381,67 @@ class SheetsClient:
         records = self._normalize_records(ws)
         result = {}
         for r in records:
-            kategori = self._get_field(r,
+            kategori = self._get_field(r, "Kategori")
+            rasa = self._get_field(r, "Rasa")
+            harga = self._get_field(r, "Harga")
+            if kategori is None or rasa is None or harga in (None, ""):
+                continue
+            try:
+                result[(str(kategori).strip(), str(rasa).strip())] = int(harga)
+            except (ValueError, TypeError):
+                continue
+        return result
+
+    def get_catalog_list(self):
+        """Return list of (kategori, rasa) yang BENERAN ada di PriceList.
+        Dipakai buat dikasih ke AI parsing biar dia cocokin item pesanan
+        ke produk asli, bukan asal nebak kategori."""
+        return sorted(self.get_price_map().keys())
+
+    def get_pricelist_text(self):
+        ws = self.sheet.worksheet(config.SHEET_PRICELIST)
+        records = self._normalize_records(ws)
+        by_category = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            rasa = self._get_field(r, "Rasa")
+            harga = self._get_field(r, "Harga")
+            if kategori is None or rasa is None or harga in (None, ""):
+                continue
+            by_category.setdefault(kategori, []).append((rasa, harga))
+        lines = []
+        for kategori, items in by_category.items():
+            lines.append(f"\n*{kategori}*")
+            for rasa, harga in items:
+                lines.append(f"  {rasa} — Rp{int(harga):,}".replace(",", "."))
+        return "\n".join(lines)
+
+    # ---------- SUPPLIER DOUGH PRICE ----------
+
+    def get_dough_price_map(self):
+        """Return dict {kategori: harga_dough_per_unit}"""
+        ws = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
+        records = self._normalize_records(ws)
+        result = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            harga = self._get_field(r, "Harga_Dough_Per_Unit")
+            if kategori is None or harga in (None, ""):
+                continue
+            try:
+                result[str(kategori).strip()] = int(harga)
+            except (ValueError, TypeError):
+                continue
+        return result
+
+
+# Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
+# (proses autentikasi itu yang bikin lambat kalau diulang terus).
+_cached_client = None
+
+
+def get_sheets_client() -> "SheetsClient":
+    global _cached_client
+    if _cached_client is None:
+        _cached_client = SheetsClient()
+    return _cached_client
