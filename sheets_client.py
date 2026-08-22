@@ -11,6 +11,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 import config
+import date_helpers
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -41,6 +42,11 @@ class SheetsClient:
         kolomnya dulu (spasi jadi underscore, dll) -- biar nggak masalah
         walau header di Sheets ditulis 'Minggu PO' atau 'Minggu_PO', dua-duanya
         tetap kebaca sebagai field yang sama oleh kode ini.
+
+        Untuk worksheet ORDERS, kolom 'Status' juga dihitung ULANG di sini
+        (lihat _effective_status) -- jadi order yang Tanggal_Kirim-nya udah
+        lewat/hari ini otomatis kebaca statusnya 'Sudah Dikirim', walau di
+        Sheets aslinya masih tertulis 'Pending'.
         """
         records = ws.get_all_records()
         normalized = []
@@ -49,8 +55,38 @@ class SheetsClient:
             for k, v in r.items():
                 key_norm = k.strip().replace(" ", "_")
                 new_r[key_norm] = v
+            if "Tanggal_Kirim" in new_r or "Status" in new_r:
+                new_r["Status"] = self._effective_status(new_r)
             normalized.append(new_r)
         return normalized
+
+    def _effective_status(self, order_record):
+        """Status 'asli' order (biasanya 'Pending' pas baru disimpen), TAPI
+        kalau Tanggal_Kirim order itu udah lewat atau PERSIS hari ini,
+        otomatis dianggap SUDAH PASTI DIKIRIM -- nggak perlu admin ubah
+        status manual di Sheets. Kalau kolom Status di Sheets udah keisi
+        'Sudah Dikirim'/'Selesai'/'Delivered' secara manual, itu tetap
+        dihormati (nggak ketimpa)."""
+        status_asli = str(order_record.get("Status") or "").strip()
+        if status_asli.lower() in ("sudah dikirim", "selesai", "delivered"):
+            return status_asli
+
+        tanggal_kirim = order_record.get("Tanggal_Kirim")
+        if not tanggal_kirim:
+            return status_asli or "Pending"
+
+        teks = str(tanggal_kirim).strip()
+        tz = date_helpers.get_timezone()
+        today = datetime.datetime.now(tz).date()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+            try:
+                d = datetime.datetime.strptime(teks, fmt).date()
+                if d <= today:
+                    return "Sudah Dikirim"
+                break
+            except ValueError:
+                continue
+        return status_asli or "Pending"
 
     @staticmethod
     def _loose_key(s):
@@ -144,6 +180,7 @@ class SheetsClient:
                 "Alamat": order["alamat"],
                 "Ongkir": order.get("ongkir", 0),
                 "Tanggal_Kirim": tanggal_kirim,
+                "Status": "Pending",
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
@@ -153,7 +190,19 @@ class SheetsClient:
         return self._normalize_records(ws)
 
     def get_orders_by_week(self, minggu_po: str):
-        return [o for o in self.get_all_orders() if self._minggu_po_cocok(o.get("Minggu_PO"), minggu_po)]
+        """PENTING: filter berdasarkan Tanggal_Kirim (tanggal kirim ASLI),
+        BUKAN Minggu_PO (yang cuma tag batch, selalu Kamis PO terdekat).
+        Ini yang bikin order yang tanggal kirimnya custom (misal 'hari ini')
+        nggak ikut kesedot ke rekap minggu PO lain walau Minggu_PO-nya
+        kebetulan sama."""
+        return [o for o in self.get_all_orders() if self._tanggal_kirim_cocok(o, minggu_po)]
+
+    def _tanggal_kirim_cocok(self, order_record, target_date):
+        tanggal_kirim = order_record.get("Tanggal_Kirim")
+        if tanggal_kirim:
+            return self._minggu_po_cocok(tanggal_kirim, target_date)
+        # Fallback buat data lama sebelum kolom Tanggal_Kirim ada
+        return self._minggu_po_cocok(order_record.get("Minggu_PO"), target_date)
 
     def _minggu_po_cocok(self, nilai_di_sheet, minggu_po):
         teks = str(nilai_di_sheet).strip()
@@ -246,67 +295,4 @@ class SheetsClient:
         records = self._normalize_records(ws)
         result = {}
         for r in records:
-            kategori = self._get_field(r, "Kategori")
-            rasa = self._get_field(r, "Rasa")
-            harga = self._get_field(r, "Harga")
-            if kategori is None or rasa is None or harga in (None, ""):
-                continue
-            try:
-                result[(str(kategori).strip(), str(rasa).strip())] = int(harga)
-            except (ValueError, TypeError):
-                continue
-        return result
-
-    def get_catalog_list(self):
-        """Return list of (kategori, rasa) yang BENERAN ada di PriceList.
-        Dipakai buat dikasih ke AI parsing biar dia cocokin item pesanan
-        ke produk asli, bukan asal nebak kategori."""
-        return sorted(self.get_price_map().keys())
-
-    def get_pricelist_text(self):
-        ws = self.sheet.worksheet(config.SHEET_PRICELIST)
-        records = self._normalize_records(ws)
-        by_category = {}
-        for r in records:
-            kategori = self._get_field(r, "Kategori")
-            rasa = self._get_field(r, "Rasa")
-            harga = self._get_field(r, "Harga")
-            if kategori is None or rasa is None or harga in (None, ""):
-                continue
-            by_category.setdefault(kategori, []).append((rasa, harga))
-        lines = []
-        for kategori, items in by_category.items():
-            lines.append(f"\n*{kategori}*")
-            for rasa, harga in items:
-                lines.append(f"  {rasa} — Rp{int(harga):,}".replace(",", "."))
-        return "\n".join(lines)
-
-    # ---------- SUPPLIER DOUGH PRICE ----------
-
-    def get_dough_price_map(self):
-        """Return dict {kategori: harga_dough_per_unit}"""
-        ws = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
-        records = self._normalize_records(ws)
-        result = {}
-        for r in records:
-            kategori = self._get_field(r, "Kategori")
-            harga = self._get_field(r, "Harga_Dough_Per_Unit")
-            if kategori is None or harga in (None, ""):
-                continue
-            try:
-                result[str(kategori).strip()] = int(harga)
-            except (ValueError, TypeError):
-                continue
-        return result
-
-
-# Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
-# (proses autentikasi itu yang bikin lambat kalau diulang terus).
-_cached_client = None
-
-
-def get_sheets_client() -> "SheetsClient":
-    global _cached_client
-    if _cached_client is None:
-        _cached_client = SheetsClient()
-    return _cached_client
+            kategori = self._get_field(r,
