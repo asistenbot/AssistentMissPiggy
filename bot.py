@@ -174,6 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
         "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
         "- /kirim Nama Customer — tandain order udah Terkirim SAAT ITU JUGA (biar nggak numplek di rekap)\n"
+        "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
         "- /laporanbulanan 2026-07:2026-08 — laporan rentang beberapa bulan\n"
@@ -247,7 +248,7 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+    orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
     if not orders:
         text = documents.build_invoice(nama, minggu_po, orders)
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -265,7 +266,7 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+    orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
     if not orders:
         text = documents.build_surat_jalan(nama, minggu_po, orders)
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -367,6 +368,170 @@ def _try_parse_delivered_mark(text):
     if not nama or len(nama) < 2 or len(nama.split()) > 4:
         return None
     return nama
+
+
+_KATA_PEMICU_GABUNG = re.compile(r"\b(gabung(?:in|kan)?|satuin|satukan)\b", re.IGNORECASE)
+# Kata pengiring umum yang sering nempel di depan/belakang nama customer di
+# kalimat gabung -- dibuang kata-per-kata (bukan regex ^...$ sekali jalan)
+# soalnya bisa lebih dari 1 filler nempel bareng DAN bisa berdiri sendiri
+# (mis. before-text-nya cuma 'tolong' doang, harus abis dibuang jadi "").
+_FILLER_WORDS_GABUNG = {
+    "yg", "yang", "itu", "order", "orderan", "pesanan", "punya", "punyanya",
+    "tolong", "nya", "dong", "ya", "yah", "aja", "dulu",
+}
+
+
+def _clean_nama_gabung(chunk):
+    """Bersihin kata pengiring umum (order/orderan/pesanan/tolong/dong/dst)
+    dari DEPAN dan BELAKANG potongan teks, kata per kata, sampai ketemu kata
+    yang bukan filler (dianggap bagian dari nama customer)."""
+    words = chunk.strip(" ,.!").split()
+    while words and words[0].lower() in _FILLER_WORDS_GABUNG:
+        words.pop(0)
+    while words and words[-1].lower() in _FILLER_WORDS_GABUNG:
+        words.pop()
+    return " ".join(words)
+
+
+def _try_parse_merge_pending(text):
+    """Coba deteksi instruksi 'gabungin order/pesanan si X' langsung dari
+    kata kunci, TANPA perlu command /gabung -- misal 'orderan pupu tolong
+    gabungin' atau 'gabungin order pupu'. Return nama customer kalau ketemu,
+    atau None kalau nggak yakin. Sama kayak _try_parse_delivered_mark,
+    SENGAJA nolak kalimat yang keliatan komentar/pertanyaan
+    (_PENANDA_BUKAN_PERINTAH) biar nggak salah gabung gara-gara admin cuma
+    nanya 'gimana caranya gabungin order?' misalnya."""
+    text = text.strip()
+    lower = text.lower()
+
+    if _PENANDA_BUKAN_PERINTAH.search(lower):
+        return None
+
+    m = _KATA_PEMICU_GABUNG.search(lower)
+    if not m:
+        return None
+
+    before = _clean_nama_gabung(text[:m.start()])
+    after = _clean_nama_gabung(text[m.end():])
+
+    nama = before or after
+    if not nama or len(nama) < 2 or len(nama.split()) > 4:
+        return None
+    return nama
+
+
+async def _gabung_pending_orders_by_nama(update: Update, context: ContextTypes.DEFAULT_TYPE, nama: str):
+    """Cari SEMUA order yang masih PENDING (preview belum di-'Simpan &
+    Generate') atas nama yang sama (case-insensitive) -- misal 2 order dari
+    web yang numpuk punya 1 customer -- gabungin item-nya jadi 1 order baru,
+    lalu kirim preview + tombol Simpan/Batal/Isi Ongkir yang baru.
+
+    Order-order lama otomatis kehapus dari pending_orders begitu digabung,
+    jadi tombol di pesan-pesan LAMA nggak berlaku lagi kalau dipencet
+    (bakal muncul 'Nggak ada data order yang tersimpan') -- ini SENGAJA,
+    soalnya isinya udah pindah ke order gabungan yang baru. Dipakai bareng
+    sama trigger bahasa natural ('orderan pupu tolong gabungin') DAN command
+    manual /gabung Nama Customer.
+
+    PENTING: ini cuma gabungin PREVIEW yang belum disimpan ke Sheets sama
+    sekali -- abis digabung, masih ada 1 langkah review terakhir (pencet
+    Simpan & Generate) sebelum kesave & invoice/surat jalan ke-generate,
+    biar aman kalau gabungannya ada yang keliru (misal alamat beda)."""
+    target = nama.strip().lower()
+    orders = context.bot_data.get("pending_orders", {})
+    matched_ids = [
+        oid for oid, p in orders.items()
+        if (p.get("nama") or "").strip().lower() == target
+    ]
+
+    if len(matched_ids) < 2:
+        keterangan = (
+            "nggak ketemu order pending atas nama itu" if not matched_ids
+            else "cuma ketemu 1 order pending atas nama itu, nggak ada yang perlu digabung"
+        )
+        await update.message.reply_text(f"{nama.title()}: {keterangan}.")
+        return
+
+    matched = [orders[oid] for oid in matched_ids]
+
+    # Gabungin item: kalau kategori+rasa-nya SAMA (case-insensitive), qty-nya
+    # dijumlah jadi 1 baris; kalau beda, ditambahin sebagai baris baru.
+    merged_items = []
+    index_by_key = {}
+    for p in matched:
+        for item in p.get("items", []):
+            key = (
+                str(item.get("kategori", "")).strip().lower(),
+                str(item.get("rasa", "")).strip().lower(),
+            )
+            if key in index_by_key:
+                merged_items[index_by_key[key]]["qty"] += int(item.get("qty") or 0)
+            else:
+                index_by_key[key] = len(merged_items)
+                merged_items.append({
+                    "kategori": item.get("kategori"),
+                    "rasa": item.get("rasa"),
+                    "qty": int(item.get("qty") or 0),
+                })
+
+    def _first_nonempty(field):
+        for p in matched:
+            v = p.get(field)
+            if v:
+                return v
+        return None
+
+    def _first_ongkir():
+        for p in matched:
+            v = int(p.get("ongkir") or 0)
+            if v:
+                return v
+        return 0
+
+    merged = {
+        "nama": matched[0].get("nama") or nama,
+        "no_hp": _first_nonempty("no_hp"),
+        "alamat": _first_nonempty("alamat"),
+        "metode": _first_nonempty("metode"),
+        "tanggal_kirim": _first_nonempty("tanggal_kirim"),
+        "ongkir": _first_ongkir(),
+        "items": merged_items,
+        "kelengkapan": "lengkap",
+    }
+
+    # Kalau ternyata field penting (alamat/no_hp/metode) BEDA antar order
+    # yang digabung, jangan diem-diem dipilih salah satu -- catet di
+    # 'catatan' + tandain 'kurang_lengkap' biar admin sadar & ngecek manual
+    # sebelum pencet Simpan & Generate.
+    catatan_list = [p.get("catatan") for p in matched if p.get("catatan")]
+    peringatan = []
+    for field, label in (("alamat", "Alamat"), ("no_hp", "No HP"), ("metode", "Metode")):
+        nilai_beda = {str(p.get(field)).strip() for p in matched if p.get(field)}
+        if len(nilai_beda) > 1:
+            peringatan.append(f"{label} beda antar order yang digabung ({' vs '.join(nilai_beda)}), cek manual!")
+            merged["kelengkapan"] = "kurang_lengkap"
+    if peringatan:
+        catatan_list.append(" | ".join(peringatan))
+    merged["catatan"] = " | ".join(catatan_list) if catatan_list else None
+
+    for oid in matched_ids:
+        _clear_pending_order_by_id(context, oid)
+
+    order_id = _store_pending_order(context, merged)
+    preview = _build_new_order_preview_text(
+        merged, f"Digabung dari {len(matched_ids)} order — Hasil Gabungan:"
+    )
+    keyboard = build_confirm_keyboard(merged, order_id)
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+
+
+@owner_only
+async def gabung_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nama = " ".join(context.args)
+    if not nama:
+        await update.message.reply_text("Format: /gabung Nama Customer")
+        return
+    await _gabung_pending_orders_by_nama(update, context, nama)
 
 
 @owner_only
@@ -489,6 +654,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ke-detect mau edit), teks ini instruksi perubahan, BUKAN order baru.
     if context.user_data.get("editing_order"):
         await handle_edit_instruction(update, context)
+        return
+
+    # Deteksi deterministik buat instruksi 'gabungin order/pesanan si X' --
+    # misal 'orderan pupu tolong gabungin' -- DICEK DULU SEBELUM blok
+    # koreksi-ke-order-aktif di bawah. Soalnya kalau ada beberapa order
+    # numpuk 1 customer yang sama (kasus yang justru mau digabung), salah
+    # satunya otomatis jadi 'order aktif' -- kalau nggak dicek di sini
+    # duluan, perintah gabung ini malah kesedot jadi 'koreksi' ke SATU
+    # order aktif itu doang (lewat handle_pending_correction), bukan
+    # digabungin ke semua order pending atas nama itu.
+    nama_digabung = _try_parse_merge_pending(update.message.text)
+    if nama_digabung:
+        await _gabung_pending_orders_by_nama(update, context, nama_digabung)
         return
 
     # Kalau masih ada preview order yang nunggu Konfirmasi/Batal (belum
@@ -1348,6 +1526,7 @@ def main():
     app.add_handler(CommandHandler("laporanbulanan", laporanbulanan_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("kirim", kirim_cmd))
+    app.add_handler(CommandHandler("gabung", gabung_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --
     # soalnya callback_data sekarang bawa order_id juga, misal
     # "confirm_order:a1b2c3d4", biar tombol tetep bener walau ada beberapa
