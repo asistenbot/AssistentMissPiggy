@@ -22,7 +22,7 @@ import receipt
 import invoice_image
 import monthly_report_pdf
 from sheets_client import get_sheets_client
-from ai_parser import parse_customer_chat, parse_order_edit, classify_intent
+from ai_parser import parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent
 from scheduler_jobs import setup_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -125,6 +125,34 @@ def _get_active_pending_order(context):
     if parsed is None:
         return None, None
     return order_id, parsed
+
+
+def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
+    """Susun teks preview order BARU (belum disimpan) dari hasil parse AI --
+    dipake bareng sama alur teks (handle_text) DAN alur gambar (handle_photo),
+    biar tampilan preview-nya konsisten nggak peduli order-nya dateng dari
+    chat diketik/paste atau dari screenshot yang difoto/di-forward."""
+    items_text = "\n".join(
+        f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
+        for i in parsed.get("items", [])
+    ) or "  (belum ada item terdeteksi)"
+
+    preview = (
+        f"*{title}*\n"
+        f"Nama: {parsed.get('nama') or '-'}\n"
+        f"No HP: {parsed.get('no_hp') or '-'}\n"
+        f"Alamat: {parsed.get('alamat') or '-'}\n"
+        f"Metode: {parsed.get('metode') or '-'}\n"
+        f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini, ketik tanggal kirim jadi ... buat ubah)'}\n"
+        f"Items:\n{items_text}\n"
+        f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
+        f"Catatan: {parsed.get('catatan') or '-'}\n\n"
+    )
+
+    if parsed.get("kelengkapan") == "kurang_lengkap":
+        preview += "⚠️ ADA YANG PERLU DICEK (lihat Catatan di atas) sebelum disimpan!\n\n"
+
+    return preview
 
 
 # ---------------- COMMANDS ----------------
@@ -598,27 +626,79 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parsed["tanggal_kirim"] = tanggal_dari_teks
 
     order_id = _store_pending_order(context, parsed)
+    preview = _build_new_order_preview_text(parsed, "Hasil Parse:")
+    keyboard = build_confirm_keyboard(parsed, order_id)
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
-    items_text = "\n".join(
-        f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
-        for i in parsed.get("items", [])
-    ) or "  (belum ada item terdeteksi)"
 
-    preview = (
-        f"*Hasil Parse:*\n"
-        f"Nama: {parsed.get('nama') or '-'}\n"
-        f"No HP: {parsed.get('no_hp') or '-'}\n"
-        f"Alamat: {parsed.get('alamat') or '-'}\n"
-        f"Metode: {parsed.get('metode') or '-'}\n"
-        f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini, ketik tanggal kirim jadi ... buat ubah)'}\n"
-        f"Items:\n{items_text}\n"
-        f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
-        f"Catatan: {parsed.get('catatan') or '-'}\n\n"
-    )
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin kirim/forward SCREENSHOT chat order customer (bukan diketik/paste
+    teks) -- dibaca pake Claude vision (ai_parser.parse_customer_chat_image)
+    trus diperlakukan PERSIS kayak order dari teks: masuk ke pending_orders
+    yang sama, keluar preview + tombol Simpan/Batal/Isi Ongkir yang sama.
 
-    if parsed.get("kelengkapan") == "kurang_lengkap":
-        preview += "⚠️ ADA YANG PERLU DICEK (lihat Catatan di atas) sebelum disimpan!\n\n"
+    Nggak nyentuh alur teks sama sekali -- foto & teks jalan independen,
+    jadi admin bebas kirim orderan lewat cara mana aja (ketik/paste ATAU
+    screenshot), bahkan bisa gantian nyampur keduanya buat order yang beda."""
+    # Kalau lagi di tengah langkah SATU-KALI-JAWAB yang nunggu TEKS spesifik
+    # (nominal ongkir, atau instruksi edit), foto yang nyasar ke sini bukan
+    # itu yang diharepin -- kasih tau admin biar beresin dulu step teksnya.
+    if context.user_data.get("awaiting_ongkir_for"):
+        await update.message.reply_text(
+            "Lagi nunggu kamu ketik nominal ongkir buat order sebelumnya dulu ya, "
+            "baru kirim gambar order lain."
+        )
+        return
+    if context.user_data.get("editing_order"):
+        await update.message.reply_text(
+            "Lagi dalam mode edit order (nunggu instruksi teks) -- selesein dulu "
+            "atau /edit lagi, baru kirim gambar order baru."
+        )
+        return
 
+    await update.message.reply_text("Lagi baca gambar...")
+
+    try:
+        photo = update.message.photo[-1]  # resolusi paling tinggi
+        photo_file = await photo.get_file()
+        image_bytes = bytes(await photo_file.download_as_bytearray())
+    except Exception as e:
+        await update.message.reply_text(f"Gagal download gambarnya: {e}\nCoba kirim ulang.")
+        return
+
+    caption = (update.message.caption or "").strip() or None
+
+    sheets = get_sheets_client()
+    try:
+        catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
+    except Exception:
+        catalog = None
+
+    try:
+        parsed = await asyncio.wait_for(
+            asyncio.to_thread(parse_customer_chat_image, image_bytes, "image/jpeg", caption, catalog),
+            timeout=40,
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Timeout — proses baca gambar kelamaan (lebih dari 40 detik). "
+            "Coba kirim ulang gambarnya."
+        )
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ada error pas baca gambar: {e}\nCoba kirim ulang.")
+        return
+
+    # Sama kayak alur teks: AI parser kadang nggak nangkep tanggal kirim
+    # custom ('besok'/'lusa') dari CAPTION yang ditulis admin bareng foto --
+    # coba deteksi juga pake parser deterministik yang sama.
+    if caption and not parsed.get("tanggal_kirim"):
+        tanggal_dari_caption = _parse_tanggal_kirim(caption)
+        if tanggal_dari_caption:
+            parsed["tanggal_kirim"] = tanggal_dari_caption
+
+    order_id = _store_pending_order(context, parsed)
+    preview = _build_new_order_preview_text(parsed, "Hasil Baca Gambar:")
     keyboard = build_confirm_keyboard(parsed, order_id)
     await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -1276,6 +1356,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir:"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     logger.info("Bot jalan...")
     app.run_polling()
