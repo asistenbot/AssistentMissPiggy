@@ -108,7 +108,25 @@ def _tujuan_order(update):
         return chat_id, None
     return update.effective_chat.id, None
 
+def _tujuan_rekapproduksi(update):
+    topic_id = getattr(config, "TOPIC_ID_REKAPPRODUKSI", None)
+    if topic_id:
+        return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
+    chat_id = getattr(config, "GROUP_CHAT_ID_REKAPPRODUKSI", None)
+    if chat_id:
+        return chat_id, None
+    return update.effective_chat.id, None
 
+
+def _tujuan_laporanbulanan(update):
+    topic_id = getattr(config, "TOPIC_ID_LAPORANBULANAN", None)
+    if topic_id:
+        return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
+    chat_id = getattr(config, "GROUP_CHAT_ID_LAPORANBULANAN", None)
+    if chat_id:
+        return chat_id, None
+    return update.effective_chat.id, None
+    
 async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", reply_markup=None):
     """Kirim TEKS ke tujuan = (chat_id, message_thread_id) dari
     _tujuan_invoice/_tujuan_suratjalan/_tujuan_order, catet di log + kasih
@@ -338,7 +356,7 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # (buat kurir) -- kalau grup-grup itu belum di-setting, fallback balas
     # di chat ini kayak biasa.
     text_produksi = documents.build_production_recap(minggu_po, orders)
-    await _kirim_teks_ke(context, update, _tujuan_invoice(update), text_produksi)
+    await _kirim_teks_ke(context, update, _tujuan_rekapproduksi(update), text_produksi)
 
     text_kirim = documents.build_delivery_kirim(minggu_po, orders)
     if text_kirim:
@@ -696,7 +714,7 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     text = documents.build_monthly_supplier_report(periode_label, orders, dough_price_map)
-    tujuan = _tujuan_invoice(update)
+    tujuan = _tujuan_laporanbulanan(update)
     invoice_chat_id, invoice_thread_id = tujuan
     await _kirim_teks_ke(context, update, tujuan, text)
 
