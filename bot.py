@@ -47,6 +47,105 @@ def _is_delivery_metode(metode):
     return "antar" in m or "kirim" in m
 
 
+def _tujuan_invoice(update):
+    """(chat_id, message_thread_id) TUJUAN buat semua yang berbau
+    invoice/keuangan (foto invoice, rekap produksi, laporan bulanan). Ada 2
+    cara misahin, admin bebas pilih salah satu lewat env var Railway
+    (kalau nggak di-setting dua-duanya, fallback balas di chat yang lagi
+    dipake SEKARANG -- perilaku lama, aman):
+
+      1) TOPIC di grup yang SAMA (Telegram Forum topics) -- LEBIH SIMPEL,
+         bot cuma perlu di-invite/jadi admin di 1 grup. Diisi lewat
+         config.TOPIC_ID_INVOICE (angka topic, dapetnya dari /groupid yang
+         diketik DI DALAM topic itu sendiri) -- grupnya tetep pake
+         config.GROUP_CHAT_ID yang udah ada.
+      2) GRUP TERPISAH -- config.GROUP_CHAT_ID_INVOICE diisi ID grup lain.
+
+    Kalau dua-duanya kebetulan diisi, TOPIC yang menang (lebih spesifik).
+    getattr dipake di semua tempat biar nggak error walau config.py belum
+    sempet ditambahin variabel-variabel baru ini."""
+    topic_id = getattr(config, "TOPIC_ID_INVOICE", None)
+    if topic_id:
+        return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
+    chat_id = getattr(config, "GROUP_CHAT_ID_INVOICE", None)
+    if chat_id:
+        return chat_id, None
+    return update.effective_chat.id, None
+
+
+def _tujuan_suratjalan(update):
+    """Sama kayak _tujuan_invoice, tapi buat 'admin surat jalan' (foto
+    surat jalan, rekap pengiriman kurir/ambil sendiri) --
+    config.TOPIC_ID_SURATJALAN (topic) atau config.GROUP_CHAT_ID_SURATJALAN
+    (grup terpisah)."""
+    topic_id = getattr(config, "TOPIC_ID_SURATJALAN", None)
+    if topic_id:
+        return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
+    chat_id = getattr(config, "GROUP_CHAT_ID_SURATJALAN", None)
+    if chat_id:
+        return chat_id, None
+    return update.effective_chat.id, None
+
+
+def _tujuan_order(update):
+    """(chat_id, message_thread_id) TUJUAN buat preview order BARU (belum
+    disimpan) -- baik dari paste/screenshot manual maupun dari web, dan
+    hasil gabungan (/gabung). Sama pola-nya kayak _tujuan_invoice/
+    _tujuan_suratjalan: TOPIC_ID_ORDER (topic 'ORDER' di grup yang sama)
+    atau GROUP_CHAT_ID_ORDER (grup terpisah), fallback ke chat sekarang
+    kalau nggak di-setting.
+
+    SENGAJA dipake CUMA di titik order BARU dibikin (bukan di setiap balesan
+    koreksi/ongkir/dst) -- begitu preview-nya nongol di topic ORDER, admin
+    ngerjain sisanya (klik tombol, ketik koreksi/ongkir) dari SITU juga,
+    jadi otomatis nyangkut di topic yang sama tanpa perlu kode tambahan di
+    tiap langkah."""
+    topic_id = getattr(config, "TOPIC_ID_ORDER", None)
+    if topic_id:
+        return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
+    chat_id = getattr(config, "GROUP_CHAT_ID_ORDER", None)
+    if chat_id:
+        return chat_id, None
+    return update.effective_chat.id, None
+
+
+async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", reply_markup=None):
+    """Kirim TEKS ke tujuan = (chat_id, message_thread_id) dari
+    _tujuan_invoice/_tujuan_suratjalan/_tujuan_order, catet di log + kasih
+    tau di chat asal kalau ternyata gagal (misal bot belum di-invite ke
+    grup/topic tujuan itu) -- biar nggak diem-diem ilang. reply_markup
+    opsional -- dipake buat preview order baru yang butuh tombol
+    Simpan/Batal/Isi Ongkir."""
+    chat_id, thread_id = tujuan
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=parse_mode,
+            message_thread_id=thread_id, reply_markup=reply_markup,
+        )
+    except Exception as e:
+        logger.error(f"Gagal kirim teks ke chat {chat_id} (topic {thread_id}): {e}")
+        if chat_id != update.effective_chat.id:
+            await update.effective_chat.send_message(
+                f"⚠️ Gagal kirim ke grup/topic tujuan ({e}). Cek bot udah di-invite & jadi admin di situ belum.\n\n"
+                f"Ini isinya (kirim manual dulu ya):\n\n{text}",
+                parse_mode=parse_mode,
+            )
+
+
+async def _kirim_foto_ke(context, update, tujuan, photo, caption):
+    """Sama kayak _kirim_teks_ke, versi FOTO (invoice/surat jalan)."""
+    chat_id, thread_id = tujuan
+    try:
+        await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption, message_thread_id=thread_id)
+    except Exception as e:
+        logger.error(f"Gagal kirim foto ke chat {chat_id} (topic {thread_id}): {e}")
+        if chat_id != update.effective_chat.id:
+            await update.effective_chat.send_message(
+                f"⚠️ Gagal kirim '{caption}' ke grup/topic tujuan: {e}\n"
+                "Cek bot udah di-invite & jadi admin di situ belum."
+            )
+
+
 def build_confirm_keyboard(parsed, order_id):
     """Tombol Simpan/Batal standar, ditambah tombol 'Isi/Ubah Ongkir' KHUSUS
     kalau metode-nya DIKIRIM (bukan ambil sendiri) -- biar admin bisa isi
@@ -186,13 +285,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def groupid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    await update.message.reply_text(
+    thread_id = update.message.message_thread_id
+    teks = (
         f"ID chat ini: `{chat.id}`\n"
         f"Tipe: {chat.type}\n\n"
         "Kalau ini grup dan mau dipakai buat terima auto-recap, "
-        "copy ID di atas (termasuk tanda minus kalau ada) ke GROUP_CHAT_ID di Railway.",
-        parse_mode="Markdown",
+        "copy ID di atas (termasuk tanda minus kalau ada) ke GROUP_CHAT_ID di Railway."
     )
+    if thread_id:
+        teks += (
+            f"\n\nID TOPIC ini: `{thread_id}`\n"
+            "Copy ID topic di atas ke salah satu env var Railway ini (sesuai topic ini "
+            "buat apa): TOPIC_ID_ORDER (order masuk & konfirmasi), TOPIC_ID_INVOICE "
+            "(invoice/rekap produksi/laporan bulanan), atau TOPIC_ID_SURATJALAN "
+            "(surat jalan/rekap kurir) — chat/grup-nya tetep pake GROUP_CHAT_ID yang biasa."
+        )
+    await update.message.reply_text(teks, parse_mode="Markdown")
 
 
 @owner_only
@@ -224,20 +332,21 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Gagal ambil data rekap: {e}")
         return
 
-    # Kirim sebagai pesan TERPISAH biar gampang di-forward tanpa crop:
-    # 1) total produksi per rasa (buat baking)
-    # 2) daftar yang dikirim kurir
-    # 3) daftar yang diambil sendiri
+    # Kirim sebagai pesan TERPISAH biar gampang di-forward tanpa crop, DAN
+    # ke grup TUJUAN yang beda-beda: rekap produksi ke grup admin invoice
+    # (buat baking/bahan), daftar kirim & ambil ke grup admin surat jalan
+    # (buat kurir) -- kalau grup-grup itu belum di-setting, fallback balas
+    # di chat ini kayak biasa.
     text_produksi = documents.build_production_recap(minggu_po, orders)
-    await update.message.reply_text(text_produksi, parse_mode="Markdown")
+    await _kirim_teks_ke(context, update, _tujuan_invoice(update), text_produksi)
 
     text_kirim = documents.build_delivery_kirim(minggu_po, orders)
     if text_kirim:
-        await update.message.reply_text(text_kirim, parse_mode="Markdown")
+        await _kirim_teks_ke(context, update, _tujuan_suratjalan(update), text_kirim)
 
     text_ambil = documents.build_delivery_ambil(minggu_po, orders)
     if text_ambil:
-        await update.message.reply_text(text_ambil, parse_mode="Markdown")
+        await _kirim_teks_ke(context, update, _tujuan_suratjalan(update), text_ambil)
 
 
 @owner_only
@@ -255,7 +364,7 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
-    await update.message.reply_photo(photo=img, caption="Invoice (siap kirim ke customer)")
+    await _kirim_foto_ke(context, update, _tujuan_invoice(update), img, "Invoice (siap kirim ke customer)")
 
 
 @owner_only
@@ -273,8 +382,9 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
-    await update.message.reply_photo(
-        photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
+    await _kirim_foto_ke(
+        context, update, _tujuan_suratjalan(update), img,
+        "Surat jalan (siap print) — tap gambar → Share → app printer",
     )
 
 
@@ -523,7 +633,7 @@ async def _gabung_pending_orders_by_nama(update: Update, context: ContextTypes.D
         merged, f"Digabung dari {len(matched_ids)} order — Hasil Gabungan:"
     )
     keyboard = build_confirm_keyboard(merged, order_id)
-    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+    await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
 
 
 @owner_only
@@ -586,7 +696,9 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     text = documents.build_monthly_supplier_report(periode_label, orders, dough_price_map)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    tujuan = _tujuan_invoice(update)
+    invoice_chat_id, invoice_thread_id = tujuan
+    await _kirim_teks_ke(context, update, tujuan, text)
 
     month_results, grand_total_qty, grand_total_bayar = documents.aggregate_dough_by_month(orders, dough_price_map)
     if month_results:
@@ -594,9 +706,17 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             periode_label, month_results, grand_total_qty, grand_total_bayar
         )
         filename = f"Laporan_Bulanan_{year_start}{month_start:02d}-{year_end}{month_end:02d}.pdf"
-        await update.message.reply_document(
-            document=pdf_buf, filename=filename, caption="Versi PDF (siap print A4)"
-        )
+        try:
+            await context.bot.send_document(
+                chat_id=invoice_chat_id, document=pdf_buf, filename=filename,
+                caption="Versi PDF (siap print A4)", message_thread_id=invoice_thread_id,
+            )
+        except Exception as e:
+            logger.error(f"Gagal kirim PDF laporan bulanan ke chat {invoice_chat_id}: {e}")
+            if invoice_chat_id != update.effective_chat.id:
+                await update.effective_chat.send_message(
+                    f"⚠️ Gagal kirim PDF laporan bulanan ke grup/topic admin invoice: {e}"
+                )
 
 
 @owner_only
@@ -807,7 +927,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Parse:")
     keyboard = build_confirm_keyboard(parsed, order_id)
-    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+    await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -879,7 +999,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Baca Gambar:")
     keyboard = build_confirm_keyboard(parsed, order_id)
-    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+    await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
 
 
 async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -960,12 +1080,17 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Cek & benerin manual di Google Sheets ya."
         )
 
+    # Invoice & surat jalan DIPISAH ke 2 grup TUJUAN beda (admin invoice /
+    # admin surat jalan) kalau udah di-setting -- biar nggak numplek di 1
+    # tempat sama pesan status ("Menyimpan...", "Tersimpan!") yang tetep di
+    # sini (chat/grup tempat order-nya diproses).
     invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders)
-    await query.message.reply_photo(photo=invoice_img, caption="Invoice (siap kirim ke customer)")
+    await _kirim_foto_ke(context, update, _tujuan_invoice(update), invoice_img, "Invoice (siap kirim ke customer)")
 
     img = receipt.generate_surat_jalan_image(order["nama"], minggu_po, orders)
-    await query.message.reply_photo(
-        photo=img, caption="Surat jalan (siap print) — tap gambar → Share → app printer"
+    await _kirim_foto_ke(
+        context, update, _tujuan_suratjalan(update), img,
+        "Surat jalan (siap print) — tap gambar → Share → app printer",
     )
 
     _clear_pending_order_by_id(context, order_id)
@@ -1484,11 +1609,14 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     invoice_img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
-    await query.message.reply_photo(photo=invoice_img, caption="Invoice terbaru (siap kirim ke customer)")
+    await _kirim_foto_ke(
+        context, update, _tujuan_invoice(update), invoice_img, "Invoice terbaru (siap kirim ke customer)"
+    )
 
     img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
-    await query.message.reply_photo(
-        photo=img, caption="Surat jalan terbaru (siap print) — tap gambar → Share → app printer"
+    await _kirim_foto_ke(
+        context, update, _tujuan_suratjalan(update), img,
+        "Surat jalan terbaru (siap print) — tap gambar → Share → app printer",
     )
 
     context.user_data.pop("editing_order", None)
