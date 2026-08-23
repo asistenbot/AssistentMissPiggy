@@ -28,7 +28,19 @@ from scheduler_jobs import setup_scheduler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-
+def _rewrite_customer_order(sheets, pending):
+    sheets.delete_customer_week_rows(pending.get("original_nama", pending["nama"]), pending["minggu_po"])
+    order = {
+        "nama": pending["nama"],
+        "no_hp": pending["no_hp"],
+        "alamat": pending["alamat"],
+        "metode": pending["metode"],
+        "items": pending["items"],
+        "ongkir": pending.get("ongkir", 0),
+        "tanggal_kirim": pending.get("tanggal_kirim"),
+    }
+    return sheets.add_order_rows(order, pending["minggu_po"])
+    
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in config.OWNER_TELEGRAM_IDS:
@@ -1592,21 +1604,10 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["saving_in_progress"] = False
         return
 
-     def _hapus_lalu_tulis_ulang():
-        sheets.delete_customer_week_rows(pending.get("original_nama", pending["nama"]), pending["minggu_po"])
-        order = {
-            "nama": pending["nama"],
-            "no_hp": pending["no_hp"],
-            "alamat": pending["alamat"],
-            "metode": pending["metode"],
-            "items": pending["items"],
-            "ongkir": pending.get("ongkir", 0),
-            "tanggal_kirim": pending.get("tanggal_kirim"),
-        }
-        return sheets.add_order_rows(order, pending["minggu_po"])
+
 
     try:
-        orders = await asyncio.wait_for(asyncio.to_thread(_hapus_lalu_tulis_ulang), timeout=30)
+        orders = await asyncio.wait_for(asyncio.to_thread(_rewrite_customer_order, sheets, pending), timeout=30)
     except asyncio.TimeoutError:
         await query.message.reply_text(
             "Timeout pas nyimpen perubahan. PENTING: cek manual di Google Sheets, "
