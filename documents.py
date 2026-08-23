@@ -12,6 +12,20 @@ def rupiah(n):
     return "Rp" + f"{int(n):,}".replace(",", ".")
 
 
+def _is_delivery_metode(metode):
+    """True kalau metode-nya berarti 'dikirim' -- ada 2 istilah yang beredar
+    di sistem ini: order dari halaman web pakai 'Diantar', tapi order yang
+    di-AI parse dari chat manual (ai_parser.py) pakai 'Kirim'. Disamain sama
+    helper versi bot.py/web_order_server.py/receipt.py (dicek berbasis
+    substring biar dua-duanya, dan variasi kayak 'Dikirim', kena) -- SEBELUM
+    ini, fungsi-fungsi di bawah nyocokin metode pake '== \"Kirim\"' persis,
+    jadi order dari web ('Diantar') ke-skip diam-diam dari daftar kurir
+    (kejadian di order Ratna: kehitung di rekap produksi tapi ilang dari
+    'DIKIRIM KURIR')."""
+    m = (metode or "").strip().lower()
+    return "antar" in m or "kirim" in m
+
+
 def build_invoice(nama_customer: str, minggu_po: str, orders: list) -> str:
     if not orders:
         return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
@@ -59,7 +73,11 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
     lines.append(f"Nama: {nama_customer}")
     lines.append(f"No HP: {orders[0].get('No_HP', '-')}")
     lines.append(f"Metode: {orders[0].get('Metode', '-')}")
-    if orders[0].get("Metode") == "Kirim":
+    # DULU: `if orders[0].get("Metode") == "Kirim"` -- exact match doang,
+    # jadi order dari web ("Diantar") kena cabang ELSE dan alamatnya nggak
+    # ketulis (malah nongol alamat toko buat ambil sendiri, padahal harusnya
+    # dikirim ke alamat customer). Sekarang disamain pake _is_delivery_metode.
+    if _is_delivery_metode(orders[0].get("Metode")):
         lines.append(f"Alamat: {orders[0].get('Alamat', '-')}")
     else:
         lines.append(f"Ambil di: {config.PICKUP_ADDRESS}")
@@ -114,7 +132,13 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
     ke bagian gudang/kurir tanpa perlu crop screenshot."""
     per_customer = _group_per_customer(orders)
-    kirim_entries = {k: v for k, v in per_customer.items() if k[0] == "Kirim"}
+    # DULU: `k[0] == "Kirim"` -- exact match literal, jadi order dari web
+    # (Metode-nya "Diantar") nggak pernah kematch sama sekali dan ke-skip
+    # diam-diam dari daftar ini (walau tetep kehitung di rekap produksi,
+    # soalnya build_production_recap nggak filter metode). Sekarang pake
+    # _is_delivery_metode biar "Kirim" (chat manual) DAN "Diantar" (web)
+    # dua-duanya kehitung.
+    kirim_entries = {k: v for k, v in per_customer.items() if _is_delivery_metode(k[0])}
     if not kirim_entries:
         return None
 
@@ -129,7 +153,10 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
 def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
     per_customer = _group_per_customer(orders)
-    ambil_entries = {k: v for k, v in per_customer.items() if k[0] == "Ambil"}
+    # Disamain juga sama _is_delivery_metode (negasinya) -- biar "AMBIL"
+    # konsisten nangkep semua variasi non-antar/non-kirim, bukan cuma
+    # literal "Ambil" doang.
+    ambil_entries = {k: v for k, v in per_customer.items() if not _is_delivery_metode(k[0])}
     if not ambil_entries:
         return None
 
