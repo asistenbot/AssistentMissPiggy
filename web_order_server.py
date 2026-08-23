@@ -86,6 +86,27 @@ def _build_confirm_keyboard(parsed, order_id):
     return InlineKeyboardMarkup(rows)
 
 
+def _target_order(owner_ids):
+    """Daftar (chat_id, message_thread_id) TUJUAN buat preview order BARU
+    dari web -- disamain sama prioritas _tujuan_order() versi bot.py, biar
+    order dari web & order dari paste/screenshot manual nyampe di TEMPAT
+    YANG SAMA (topic 'ORDER' kalau di-setting, atau grup biasa, atau
+    fallback DM ke tiap owner kalau GROUP_CHAT_ID belum ada sama sekali):
+      1) TOPIC_ID_ORDER (topic di GROUP_CHAT_ID yang sama)
+      2) GROUP_CHAT_ID_ORDER (grup terpisah)
+      3) GROUP_CHAT_ID biasa (perilaku lama, tanpa topic)
+      4) fallback: DM ke tiap owner satu-satu (kalau GROUP_CHAT_ID kosong)."""
+    topic_id = getattr(config, "TOPIC_ID_ORDER", None)
+    if topic_id and config.GROUP_CHAT_ID:
+        return [(config.GROUP_CHAT_ID, topic_id)]
+    group_chat_id_order = getattr(config, "GROUP_CHAT_ID_ORDER", None)
+    if group_chat_id_order:
+        return [(group_chat_id_order, None)]
+    if config.GROUP_CHAT_ID:
+        return [(config.GROUP_CHAT_ID, None)]
+    return [(oid, None) for oid in owner_ids]
+
+
 def _parse_items(items_raw):
     items = []
     for it in items_raw or []:
@@ -159,17 +180,20 @@ def create_web_order_app(application):
         keyboard = _build_confirm_keyboard(parsed, order_id)
 
         # Kirim preview-nya ke GRUP admin kalau ada (biar kelihatan bareng di
-        # semua HP), kalau GROUP_CHAT_ID belum di-set baru fallback kirim
-        # satu-satu ke tiap admin secara pribadi.
+        # semua HP) -- ke topic/grup 'ORDER' khusus kalau udah di-setting
+        # (_target_order), biar order dari web nyatu di tempat yang sama
+        # sama order dari paste/screenshot manual. Kalau GROUP_CHAT_ID
+        # belum di-set sama sekali, fallback kirim satu-satu ke tiap admin
+        # secara pribadi (perilaku lama).
         sent_to_anyone = False
-        targets = [config.GROUP_CHAT_ID] if config.GROUP_CHAT_ID else owner_ids
-        for chat_id in targets:
+        for chat_id, thread_id in _target_order(owner_ids):
             try:
                 await application.bot.send_message(
                     chat_id=chat_id,
                     text=preview,
                     parse_mode="Markdown",
                     reply_markup=keyboard,
+                    message_thread_id=thread_id,
                 )
                 sent_to_anyone = True
             except Exception as e:
