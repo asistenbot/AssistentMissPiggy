@@ -764,7 +764,9 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         "ongkir": int(orders[0].get("Ongkir", 0) or 0),
         "minggu_po": minggu_po,
+                    "original_nama": orders[0].get("Nama_Customer", nama),
         "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
+        
     }
 
     await update.message.reply_text(
@@ -897,6 +899,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             "ongkir": int(orders[0].get("Ongkir", 0) or 0),
             "minggu_po": minggu_po,
+            "original_nama": orders[0].get("Nama_Customer", nama),
             "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
         }
         # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
@@ -1439,6 +1442,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
 
         context.user_data["pending_edit"] = {
             "nama": editing["nama"],
+                        "original_nama": editing.get("original_nama", editing["nama"]),
             "no_hp": editing["no_hp"],
             "alamat": editing["alamat"],
             "metode": editing["metode"],
@@ -1513,6 +1517,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
 
     context.user_data["pending_edit"] = {
         "nama": editing["nama"],
+                    "original_nama": editing.get("original_nama", editing["nama"]),
         "no_hp": editing["no_hp"],
         "alamat": editing["alamat"],
         "metode": editing["metode"],
@@ -1556,6 +1561,7 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     sheets = get_sheets_client()
     nama = pending["nama"]
+    old_nama = pending.get("original_nama", nama)
     minggu_po = pending["minggu_po"]
 
     if not pending["items"]:
@@ -1565,7 +1571,7 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         # buat dikirim ke customer yang udah batal).
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(sheets.delete_customer_week_rows, nama, minggu_po), timeout=30
+                asyncio.to_thread(sheets.delete_customer_week_rows, old_nama, minggu_po), timeout=30
             )
         except asyncio.TimeoutError:
             await query.message.reply_text(
@@ -1587,7 +1593,7 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     def _hapus_lalu_tulis_ulang():
-        sheets.delete_customer_week_rows(pending["nama"], pending["minggu_po"])
+       sheets.delete_customer_week_rows(pending.get("original_nama", pending["nama"]), pending["minggu_po"])
         order = {
             "nama": pending["nama"],
             "no_hp": pending["no_hp"],
