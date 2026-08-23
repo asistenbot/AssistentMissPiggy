@@ -3,6 +3,7 @@ Pakai Claude buat ubah chat customer yang berantakan jadi data order terstruktur
 """
 
 import json
+import base64
 import datetime
 import anthropic
 
@@ -80,6 +81,37 @@ def _build_alias_text():
 
 PARSE_SYSTEM_PROMPT = PARSE_SYSTEM_PROMPT_BASE
 
+# Instruksi tambahan KHUSUS dipasang di ATAS system prompt yang sama pas
+# input-nya GAMBAR (screenshot), bukan teks -- biar Claude tau harus "baca"
+# gambarnya dulu (OCR + pahami konteks chat-nya), baru diproses persis kayak
+# alur teks biasa (JSON output-nya format-nya SAMA PERSIS, nggak diubah).
+PARSE_IMAGE_PREFIX = """PENTING: input dari user kali ini berupa GAMBAR SCREENSHOT
+(bukan teks langsung) -- biasanya screenshot chat WhatsApp customer yang
+di-forward admin. Baca semua teks yang ada di gambar itu (nama, alamat, no HP,
+item pesanan, dst), lalu proses PERSIS sama kayak instruksi di bawah ini biar
+hasilnya konsisten sama alur order dari teks biasa.
+
+"""
+
+
+def _prepare_catalog_prompt(system_prompt, catalog):
+    if not catalog:
+        return system_prompt
+    by_kategori = {}
+    for kategori, rasa in catalog:
+        by_kategori.setdefault(kategori, []).append(rasa)
+    catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
+    catalog_text = "\n".join(catalog_lines)
+    return system_prompt + PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
+
+
+def _empty_parse_result(catatan):
+    return {
+        "nama": None, "no_hp": None, "alamat": None, "metode": None,
+        "items": [], "catatan": catatan, "kelengkapan": "kurang_lengkap",
+    }
+
+
 EDIT_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
 Customer punya order yang SUDAH ADA, dan sekarang admin mau UBAH order itu
 (nambah item, ngurangin qty, hapus item, ganti item, atau ubah ongkir).
@@ -136,14 +168,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     Kalau dikasih, AI bakal cocokin item pesanan ke produk asli & nandain
     kalau ada yang ambigu -- jauh lebih akurat daripada nebak generik.
     """
-    system_prompt = PARSE_SYSTEM_PROMPT_BASE
-    if catalog:
-        by_kategori = {}
-        for kategori, rasa in catalog:
-            by_kategori.setdefault(kategori, []).append(rasa)
-        catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
-        catalog_text = "\n".join(catalog_lines)
-        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
+    system_prompt = _prepare_catalog_prompt(PARSE_SYSTEM_PROMPT_BASE, catalog)
 
     try:
         response = client.messages.create(
@@ -153,11 +178,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
             messages=[{"role": "user", "content": raw_text}],
         )
     except Exception as e:
-        return {
-            "nama": None, "no_hp": None, "alamat": None, "metode": None,
-            "items": [], "catatan": f"Gagal hubungi AI: {e}. Coba kirim ulang.",
-            "kelengkapan": "kurang_lengkap",
-        }
+        return _empty_parse_result(f"Gagal hubungi AI: {e}. Coba kirim ulang.")
 
     text = response.content[0].text.strip()
     # Jaga-jaga kalau model tetap kasih code fence
@@ -165,11 +186,63 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {
-            "nama": None, "no_hp": None, "alamat": None, "metode": None,
-            "items": [], "catatan": "Gagal parsing otomatis, isi manual ya.",
-            "kelengkapan": "kurang_lengkap",
-        }
+        return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
+
+
+def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg",
+                               caption: str = None, catalog: list = None) -> dict:
+    """
+    Sama kayak parse_customer_chat, TAPI input-nya SCREENSHOT (misal admin
+    forward/kirim screenshot chat WA customer langsung ke bot, bukan
+    copy-paste teksnya). Claude yang "baca" isi gambarnya (nama, alamat, no
+    HP, item pesanan, dst), lalu diproses lewat system prompt YANG SAMA
+    persis kayak alur teks -- jadi hasil JSON-nya konsisten & bisa langsung
+    dipakai di alur preview/konfirmasi yang udah ada, nggak perlu kode
+    terpisah di bot.py buat nanganin hasilnya.
+
+    media_type: MIME type gambarnya -- Telegram selalu ngirim foto sebagai
+    JPEG (bahkan kalau aslinya PNG/screenshot), jadi "image/jpeg" aman
+    dipakai sebagai default.
+    caption: teks tambahan yang mungkin ditulis admin BARENG foto-nya (kalau
+    ada) -- ikut dikirim ke AI biar info yang kepisah antara gambar & caption
+    (misal "ongkir 15rb" ditulis di caption, bukan kelihatan di screenshot)
+    nggak ilang.
+    """
+    system_prompt = _prepare_catalog_prompt(PARSE_SYSTEM_PROMPT_BASE, catalog)
+
+    instruksi = PARSE_IMAGE_PREFIX
+    if caption:
+        instruksi += f'Catatan tambahan yang ditulis admin bareng foto ini: "{caption}"\n\n'
+    instruksi += "Baca gambar di atas dan ubah jadi data order terstruktur sesuai format yang diminta."
+
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            },
+        },
+        {"type": "text", "text": instruksi},
+    ]
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=1200,
+            system=system_prompt,
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as e:
+        return _empty_parse_result(f"Gagal hubungi AI: {e}. Coba kirim ulang.")
+
+    text = response.content[0].text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
 
 
 def parse_order_edit(existing_items: list, instruction: str, catalog: list = None) -> dict:
@@ -186,14 +259,7 @@ def parse_order_edit(existing_items: list, instruction: str, catalog: list = Non
 
     user_message = f"Order yang sudah ada:\n{existing_text}\n\nInstruksi perubahan:\n{instruction}"
 
-    system_prompt = EDIT_SYSTEM_PROMPT_BASE
-    if catalog:
-        by_kategori = {}
-        for kategori, rasa in catalog:
-            by_kategori.setdefault(kategori, []).append(rasa)
-        catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
-        catalog_text = "\n".join(catalog_lines)
-        system_prompt += PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
+    system_prompt = _prepare_catalog_prompt(EDIT_SYSTEM_PROMPT_BASE, catalog)
 
     try:
         response = client.messages.create(
