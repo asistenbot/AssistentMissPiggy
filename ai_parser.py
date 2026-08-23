@@ -155,6 +155,11 @@ Panduan milih intent:
   (kata kunci: tambah, nambah, kurang, kurangin, hapus, ganti, ubah, edit, jadi) -> edit_order
 - "invoice buat X", "minta invoice X", "invoice-nya X mana" -> invoice (isi nama_customer)
 - "surat jalan X", "suratjalan buat X" -> surat_jalan (isi nama_customer)
+- Nyebut nama customer TERTENTU dan cuma mau NGELIAT/NGECEK pesanan dia
+  (bukan ubah), kayak "lihat orderan X", "liat order X", "orderan X apa aja",
+  "cek pesanan X", "orderannya X mana" -> invoice (isi nama_customer) --
+  soalnya invoice udah nampilin rincian lengkap order customer itu (item,
+  qty, alamat, metode, total)
 - Kalau pesan itu isinya DATA PESANAN BARU (nama, alamat, item pesanan dari customer
   yang baru mau order, biasanya di-copy-paste dari chat customer) -> order_baru
 - Kalau nggak jelas / cuma basa-basi / ambigu -> order_baru (paling aman, tetap
