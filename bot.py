@@ -377,7 +377,8 @@ _KATA_PEMICU_GABUNG = re.compile(r"\b(gabung(?:in|kan)?|satuin|satukan)\b", re.I
 # (mis. before-text-nya cuma 'tolong' doang, harus abis dibuang jadi "").
 _FILLER_WORDS_GABUNG = {
     "yg", "yang", "itu", "order", "orderan", "pesanan", "punya", "punyanya",
-    "tolong", "nya", "dong", "ya", "yah", "aja", "dulu",
+    "tolong", "nya", "dong", "donk", "ya", "yah", "aja", "dulu",
+    "sih", "deh", "nih", "toh",
 }
 
 
