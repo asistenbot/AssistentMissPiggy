@@ -120,11 +120,22 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
 
 
 def _group_per_customer(orders: list) -> dict:
+    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
+    diringkas jadi boolean 'ini pengiriman apa bukan' lewat
+    _is_delivery_metode -- BUKAN metode/nama literal apa adanya.
+
+    DULU key-nya `(metode, nama)` mentah, jadi 1 customer yang SAMA tapi
+    kebetulan punya order dari 2 SUMBER beda (web selalu nulis 'Diantar',
+    chat manual yang di-AI-parse kadang nulis 'Kirim') kepisah jadi 2 grup
+    beda -- muncul 2x di daftar kurir padahal orangnya sama (ini yang
+    kejadian ke Pupu: order Roti dari web 'Diantar' + order Donat manual
+    'Kirim' jadi 2 baris terpisah, padahal harusnya 1)."""
     per_customer = {}
     for o in orders:
-        nama = o.get("Nama_Customer", "-")
+        nama = str(o.get("Nama_Customer", "-")).strip()
         metode = o.get("Metode", "-")
-        per_customer.setdefault((metode, nama), []).append(o)
+        key = (_is_delivery_metode(metode), nama.lower())
+        per_customer.setdefault(key, []).append(o)
     return per_customer
 
 
@@ -132,18 +143,13 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
     ke bagian gudang/kurir tanpa perlu crop screenshot."""
     per_customer = _group_per_customer(orders)
-    # DULU: `k[0] == "Kirim"` -- exact match literal, jadi order dari web
-    # (Metode-nya "Diantar") nggak pernah kematch sama sekali dan ke-skip
-    # diam-diam dari daftar ini (walau tetep kehitung di rekap produksi,
-    # soalnya build_production_recap nggak filter metode). Sekarang pake
-    # _is_delivery_metode biar "Kirim" (chat manual) DAN "Diantar" (web)
-    # dua-duanya kehitung.
-    kirim_entries = {k: v for k, v in per_customer.items() if _is_delivery_metode(k[0])}
+    kirim_entries = {k: v for k, v in per_customer.items() if k[0]}
     if not kirim_entries:
         return None
 
     lines = [f"🛵 *DIKIRIM KURIR — Minggu PO {minggu_po}*\n"]
-    for (metode, nama), items in kirim_entries.items():
+    for (is_delivery, nama_key), items in kirim_entries.items():
+        nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
         alamat = items[0].get("Alamat", "-")
         lines.append(f"• {nama} — {alamat} — {no_hp}")
@@ -153,15 +159,13 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
 def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
     per_customer = _group_per_customer(orders)
-    # Disamain juga sama _is_delivery_metode (negasinya) -- biar "AMBIL"
-    # konsisten nangkep semua variasi non-antar/non-kirim, bukan cuma
-    # literal "Ambil" doang.
-    ambil_entries = {k: v for k, v in per_customer.items() if not _is_delivery_metode(k[0])}
+    ambil_entries = {k: v for k, v in per_customer.items() if not k[0]}
     if not ambil_entries:
         return None
 
     lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
-    for (metode, nama), items in ambil_entries.items():
+    for (is_delivery, nama_key), items in ambil_entries.items():
+        nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
         lines.append(f"• {nama} — {no_hp}")
     return "\n".join(lines)
