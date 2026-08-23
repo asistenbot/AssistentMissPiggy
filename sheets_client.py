@@ -358,6 +358,28 @@ class SheetsClient:
             if str(o.get("Status", "")).strip().lower() != "terkirim"
         ]
 
+    def get_pending_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
+        """Sama kayak get_orders_by_customer_week, TAPI (kalau ada campuran)
+        buang baris yang Status-nya udah 'Terkirim'. Dipakai KHUSUS oleh
+        /invoice & /suratjalan biar order BARU yang lagi mau di-invoice-in
+        nggak ke-mix diam-diam sama order LAIN (nggak berhubungan) dari
+        customer yang sama, yang KEBETULAN punya Minggu_PO yang sama juga
+        tapi udah kelar/Terkirim duluan.
+
+        TAPI kalau baris customer ini buat minggu itu TERNYATA semuanya
+        udah 'Terkirim' (nggak ada campuran, murni 1 order yang udah kelar
+        dikirim) -- balikin SEMUA baris apa adanya, biar kapabilitas REPRINT
+        invoice/surat jalan yang udah kelar (fitur lama) tetep jalan kayak
+        biasa. Cuma kasus CAMPURAN (sebagian Terkirim + sebagian Pending)
+        yang di-filter, soalnya di situ risiko ke-mix-nya."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            pass
+        semua = self.get_orders_by_customer_week(nama_customer, minggu_po)
+        belum_terkirim = [o for o in semua if str(o.get("Status", "")).strip().lower() != "terkirim"]
+        return belum_terkirim if belum_terkirim else semua
+
     def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
         return [
             o for o in self.get_orders_by_week(minggu_po)
