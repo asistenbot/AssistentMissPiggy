@@ -35,6 +35,41 @@ Kalau ada informasi penting yang tidak disebutkan customer (nama, alamat kalau k
 no hp, atau item pesanan kosong), set "kelengkapan" jadi "kurang_lengkap" dan sebutkan
 apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalangi
 "kelengkapan" jadi "lengkap" -- ongkir boleh diisi belakangan.
+
+ATURAN KHUSUS SATUAN "BOX" (PENTING, baca pelan-pelan):
+Kadang customer pesan pakai satuan "box" (atau "dus", "paket") -- yaitu ada
+ANGKA JUMLAH BOX duluan, lalu daftar rasa dengan qty yang berlaku UNTUK
+SETIAP BOX (bukan qty total). Dalam kasus ini, qty final tiap rasa = qty per
+box DIKALI jumlah box-nya.
+
+Contoh:
+"22 box isi tiap box: roti baso 1, roti piscok 1, roti ham cheese 3"
+artinya qty FINAL yang harus masuk ke "items" adalah:
+  - roti baso: 1 x 22 = 22
+  - roti piscok: 1 x 22 = 22
+  - roti ham cheese: 3 x 22 = 66
+BUKAN qty 1, 1, 3 apa adanya.
+
+Ciri-ciri kalimat pola ini: ada angka + kata "box"/"dus"/"paket" (misal "22
+box", "3 box", "1 box"), lalu di baris-baris berikutnya ada daftar rasa
+dengan angka qty yang JAUH LEBIH KECIL dibanding jumlah box-nya -- itu tanda
+angka tersebut adalah qty PER BOX, bukan qty total, dan harus dikalikan.
+
+Kalau jumlah box-nya PERSIS 1 ("1 box: ..."), qty yang disebutkan adalah qty
+FINAL apa adanya (1 box dikali qty per box = qty itu sendiri), tidak perlu
+dikali apa-apa lagi.
+
+Kalau dalam SATU pesan ada BEBERAPA kelompok box yang berbeda (misal "22 box
+isi ..." lalu di bawahnya ada lagi "3 box isi ..." lalu "1 box isi ..."),
+hitung tiap kelompok TERPISAH dulu (qty per box x jumlah box kelompok itu),
+baru GABUNGKAN hasilnya: kalau ada rasa yang sama muncul di lebih dari satu
+kelompok box, JUMLAHKAN qty final-nya jadi SATU baris item saja di "items"
+(jangan bikin baris duplikat untuk rasa+kategori yang sama).
+
+Kalau ada bagian pesanan yang ditulis TANPA keterangan "box"/"dus"/"paket"
+sama sekali (cuma daftar item dengan qty biasa, misal "roti coklat 5"),
+perlakukan qty itu sebagai qty FINAL seperti biasa -- JANGAN dikalikan
+apa-apa, karena itu bukan pola per-box.
 """
 
 PARSE_CATALOG_INSTRUCTION = """
@@ -130,6 +165,14 @@ Balas HANYA dengan JSON valid, tanpa teks lain, tanpa markdown code fence:
 Kalau instruksinya "hapus X" atau qty item di-set jadi 0, JANGAN masukkan item itu
 ke daftar final. Item yang tidak disebut sama sekali dalam instruksi TETAP dipertahankan
 qty aslinya (jangan dihapus kalau tidak diminta).
+
+ATURAN KHUSUS SATUAN "BOX" (PENTING): kalau instruksi perubahan menyebutkan
+pola "X box isi tiap box: rasa qty, rasa qty, ..." (jumlah box duluan, lalu
+daftar rasa dengan qty PER BOX), kalikan qty tiap rasa dengan jumlah box-nya
+sebelum ditambahkan/digabungkan ke daftar item final -- persis seperti aturan
+box saat parsing order baru. Kalau jumlah box-nya cuma 1, tidak perlu dikali.
+Kalau ada beberapa kelompok box berbeda dalam satu instruksi, hitung tiap
+kelompok terpisah lalu gabungkan (jumlahkan) rasa yang sama jadi satu baris.
 """
 
 EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT_BASE
