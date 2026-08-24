@@ -83,7 +83,7 @@ def _group_by_category(orders):
     return [(k, by_kategori[k]) for k in urutan]
 
 
-def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list) -> BytesIO:
+def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list, box_groups: list = None) -> BytesIO:
     usable_width = RECEIPT_WIDTH - 2 * MARGIN
 
     # Tanggal_Kirim itu kolom BARU (opsional) di Sheets -- kalau admin nggak
@@ -118,6 +118,20 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list)
             qty = int(o["Qty"])
             total_qty += qty
             lines.append((f"{o['Rasa']}  x{qty}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
+
+    # ---- Rincian Box (opsional, cuma muncul kalau order-nya pakai satuan box) ----
+    # Ditaruh SETELAH daftar per-kategori (yang dipakai buat packing/hitung
+    # per rasa) tapi SEBELUM total -- biar jadi referensi tambahan buat
+    # ngecek pembagian per box aslinya, tanpa ganggu alur baca utama.
+    if box_groups:
+        lines.append(("-" * 22, FONT_SMALL, "center", 0))
+        lines.append(("RINCIAN BOX:", FONT_BOLD, "left", 0))
+        for grp in box_groups:
+            jumlah = grp.get("jumlah_box", "?")
+            desc = ", ".join(
+                f"{i.get('rasa', '?')} x{i.get('qty_per_box', '?')}" for i in grp.get("items", [])
+            )
+            lines.append((f"{jumlah} box: {desc}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
 
     lines.append(("-" * 22, FONT_SMALL, "center", 0))
     lines.append((f"Total item: {total_qty} pcs", FONT_BOLD, "left", 0))
