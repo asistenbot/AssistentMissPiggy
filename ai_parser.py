@@ -3,6 +3,7 @@ Pakai Claude buat ubah chat customer yang berantakan jadi data order terstruktur
 """
 
 import json
+import re
 import base64
 import datetime
 import anthropic
@@ -16,8 +17,13 @@ PARSE_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
 Tugasmu HANYA satu: ubah chat customer (yang sering berantakan, tidak lengkap,
 atau dicampur basa-basi) menjadi data order terstruktur dalam format JSON.
 
-Balas HANYA dengan JSON valid, tanpa teks lain, tanpa markdown code fence, dengan struktur:
+Balas HANYA dengan JSON valid, TANPA teks lain apapun -- tanpa penjelasan,
+tanpa perhitungan yang ditulis keluar, tanpa markdown code fence. Kalau perlu
+menghitung sesuatu (misal perkalian box, lihat aturan di bawah), lakukan
+perhitungan itu di dalam kepalamu saja dan langsung tulis HASIL AKHIRNYA ke
+field yang sesuai -- JANGAN tulis proses hitungnya sebagai teks di luar JSON.
 
+Struktur JSON:
 {
   "nama": "nama customer atau null kalau tidak disebut",
   "no_hp": "nomor hp atau null",
@@ -36,40 +42,21 @@ no hp, atau item pesanan kosong), set "kelengkapan" jadi "kurang_lengkap" dan se
 apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalangi
 "kelengkapan" jadi "lengkap" -- ongkir boleh diisi belakangan.
 
-ATURAN KHUSUS SATUAN "BOX" (PENTING, baca pelan-pelan):
-Kadang customer pesan pakai satuan "box" (atau "dus", "paket") -- yaitu ada
-ANGKA JUMLAH BOX duluan, lalu daftar rasa dengan qty yang berlaku UNTUK
-SETIAP BOX (bukan qty total). Dalam kasus ini, qty final tiap rasa = qty per
-box DIKALI jumlah box-nya.
-
-Contoh:
-"22 box isi tiap box: roti baso 1, roti piscok 1, roti ham cheese 3"
-artinya qty FINAL yang harus masuk ke "items" adalah:
-  - roti baso: 1 x 22 = 22
-  - roti piscok: 1 x 22 = 22
-  - roti ham cheese: 3 x 22 = 66
-BUKAN qty 1, 1, 3 apa adanya.
-
-Ciri-ciri kalimat pola ini: ada angka + kata "box"/"dus"/"paket" (misal "22
-box", "3 box", "1 box"), lalu di baris-baris berikutnya ada daftar rasa
-dengan angka qty yang JAUH LEBIH KECIL dibanding jumlah box-nya -- itu tanda
-angka tersebut adalah qty PER BOX, bukan qty total, dan harus dikalikan.
-
-Kalau jumlah box-nya PERSIS 1 ("1 box: ..."), qty yang disebutkan adalah qty
-FINAL apa adanya (1 box dikali qty per box = qty itu sendiri), tidak perlu
-dikali apa-apa lagi.
-
-Kalau dalam SATU pesan ada BEBERAPA kelompok box yang berbeda (misal "22 box
-isi ..." lalu di bawahnya ada lagi "3 box isi ..." lalu "1 box isi ..."),
-hitung tiap kelompok TERPISAH dulu (qty per box x jumlah box kelompok itu),
-baru GABUNGKAN hasilnya: kalau ada rasa yang sama muncul di lebih dari satu
-kelompok box, JUMLAHKAN qty final-nya jadi SATU baris item saja di "items"
-(jangan bikin baris duplikat untuk rasa+kategori yang sama).
-
-Kalau ada bagian pesanan yang ditulis TANPA keterangan "box"/"dus"/"paket"
-sama sekali (cuma daftar item dengan qty biasa, misal "roti coklat 5"),
-perlakukan qty itu sebagai qty FINAL seperti biasa -- JANGAN dikalikan
-apa-apa, karena itu bukan pola per-box.
+ATURAN KHUSUS SATUAN "BOX": kadang pesanan ditulis pakai satuan "box"/"dus"/
+"paket" -- ada angka jumlah box duluan, lalu daftar rasa dengan qty PER BOX.
+Qty final tiap rasa = qty per box dikali jumlah box.
+Contoh: "22 box isi baso ayam 1, piscok 1, ham cheese 3" -> qty final: baso
+ayam 22, piscok 22, ham cheese 66 (BUKAN 1, 1, 3).
+Kalau jumlah box-nya 1, qty yang disebutkan sudah final, tidak perlu dikali.
+Kalau ada beberapa kelompok box berbeda dalam satu pesan, hitung tiap kelompok
+sendiri-sendiri dulu, baru jumlahkan rasa yang sama jadi satu baris item.
+Kalau qty ditulis TANPA keterangan box sama sekali, itu sudah qty final,
+jangan dikalikan apa-apa.
+Tulis di field "catatan" ringkasan pembagian box-nya secara singkat (misal:
+"22 box: baso ayam 1, piscok 1, ham cheese 3/box; 3 box: charsiu 2, baso
+ayam 2, piscok 1/box; 1 box: ham 5, keju susu 2, coklat 1, charsiu 2") --
+ini PENTING supaya admin bisa lihat rincian box aslinya, JANGAN dihilangkan
+walau "kelengkapan" jadi "lengkap".
 """
 
 PARSE_CATALOG_INSTRUCTION = """
@@ -147,6 +134,30 @@ def _empty_parse_result(catatan):
     }
 
 
+def _safe_json_loads(raw_text):
+    """Parse JSON dari balasan AI dengan toleransi ekstra. Kadang model
+    (apalagi kalau instruksinya minta dia "mikir" dulu, misal ngitung box)
+    tetap nyempilin teks di luar JSON walau udah diminta jangan -- daripada
+    langsung gagal total, coba ekstrak blok JSON-nya aja (dari '{' pertama
+    sampai '}' terakhir) sebelum menyerah. Return None kalau tetap gagal."""
+    text = raw_text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 EDIT_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
 Customer punya order yang SUDAH ADA, dan sekarang admin mau UBAH order itu
 (nambah item, ngurangin qty, hapus item, ganti item, atau ubah ongkir).
@@ -154,7 +165,8 @@ Customer punya order yang SUDAH ADA, dan sekarang admin mau UBAH order itu
 Tugasmu: hitung ulang dan hasilkan DAFTAR ITEM FINAL (versi lengkap SETELAH
 perubahan diterapkan) -- bukan cuma daftar perubahannya doang.
 
-Balas HANYA dengan JSON valid, tanpa teks lain, tanpa markdown code fence:
+Balas HANYA dengan JSON valid, TANPA teks lain apapun -- tanpa penjelasan,
+tanpa perhitungan yang ditulis keluar, tanpa markdown code fence:
 
 {
   "items": [{"kategori": "...", "rasa": "...", "qty": 0}],
@@ -166,13 +178,12 @@ Kalau instruksinya "hapus X" atau qty item di-set jadi 0, JANGAN masukkan item i
 ke daftar final. Item yang tidak disebut sama sekali dalam instruksi TETAP dipertahankan
 qty aslinya (jangan dihapus kalau tidak diminta).
 
-ATURAN KHUSUS SATUAN "BOX" (PENTING): kalau instruksi perubahan menyebutkan
-pola "X box isi tiap box: rasa qty, rasa qty, ..." (jumlah box duluan, lalu
-daftar rasa dengan qty PER BOX), kalikan qty tiap rasa dengan jumlah box-nya
-sebelum ditambahkan/digabungkan ke daftar item final -- persis seperti aturan
-box saat parsing order baru. Kalau jumlah box-nya cuma 1, tidak perlu dikali.
-Kalau ada beberapa kelompok box berbeda dalam satu instruksi, hitung tiap
-kelompok terpisah lalu gabungkan (jumlahkan) rasa yang sama jadi satu baris.
+ATURAN KHUSUS SATUAN "BOX": kalau instruksi menyebutkan pola "X box isi rasa
+qty, rasa qty" (jumlah box duluan, qty PER BOX), kalikan qty tiap rasa dengan
+jumlah box-nya (hitung diam-diam, jangan ditulis prosesnya) sebelum
+ditambahkan/digabungkan ke daftar item final. Kalau jumlah box cuma 1, tidak
+perlu dikali. Kalau ada beberapa kelompok box berbeda, hitung tiap kelompok
+sendiri-sendiri lalu gabungkan rasa yang sama.
 """
 
 EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT_BASE
@@ -221,20 +232,17 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     try:
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=1200,
+            max_tokens=1500,
             system=system_prompt,
             messages=[{"role": "user", "content": raw_text}],
         )
     except Exception as e:
         return _empty_parse_result(f"Gagal hubungi AI: {e}. Coba kirim ulang.")
 
-    text = response.content[0].text.strip()
-    # Jaga-jaga kalau model tetap kasih code fence
-    text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
         return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
+    return result
 
 
 def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg",
@@ -278,19 +286,17 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
     try:
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=1200,
+            max_tokens=1500,
             system=system_prompt,
             messages=[{"role": "user", "content": content}],
         )
     except Exception as e:
         return _empty_parse_result(f"Gagal hubungi AI: {e}. Coba kirim ulang.")
 
-    text = response.content[0].text.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
         return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
+    return result
 
 
 def parse_order_edit(existing_items: list, instruction: str, catalog: list = None) -> dict:
@@ -312,22 +318,19 @@ def parse_order_edit(existing_items: list, instruction: str, catalog: list = Non
     try:
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=1200,
+            max_tokens=1500,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
     except Exception as e:
         return {"items": existing_items, "catatan": f"Gagal hubungi AI: {e}. Coba lagi."}
 
-    text = response.content[0].text.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        result = json.loads(text)
-        if "items" not in result:
-            result["items"] = existing_items
-        return result
-    except json.JSONDecodeError:
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
         return {"items": existing_items, "catatan": "Gagal parsing perubahan, coba lagi dengan kalimat lebih jelas."}
+    if "items" not in result:
+        result["items"] = existing_items
+    return result
 
 
 def classify_intent(raw_text: str) -> dict:
@@ -352,11 +355,8 @@ def classify_intent(raw_text: str) -> dict:
     except Exception:
         return default
 
-    text = response.content[0].text.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError:
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
         return default
 
     for key, val in default.items():
