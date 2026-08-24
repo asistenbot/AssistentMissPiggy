@@ -3,7 +3,6 @@ Pakai Claude buat ubah chat customer yang berantakan jadi data order terstruktur
 """
 
 import json
-import re
 import base64
 import datetime
 import anthropic
@@ -32,6 +31,9 @@ Struktur JSON:
   "items": [
     {"kategori": "...", "rasa": "...", "qty": 0}
   ],
+  "box_groups": [
+    {"jumlah_box": 0, "items": [{"kategori": "...", "rasa": "...", "qty_per_box": 0}]}
+  ],
   "ongkir": angka ongkir dalam rupiah kalau admin menyebutkannya (misal "ongkir 15rb" jadi 15000), atau null kalau tidak disebutkan,
   "catatan": "hal lain yang perlu diperhatikan admin, atau null",
   "kelengkapan": "lengkap" atau "kurang_lengkap"
@@ -44,19 +46,35 @@ apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalan
 
 ATURAN KHUSUS SATUAN "BOX": kadang pesanan ditulis pakai satuan "box"/"dus"/
 "paket" -- ada angka jumlah box duluan, lalu daftar rasa dengan qty PER BOX.
-Qty final tiap rasa = qty per box dikali jumlah box.
-Contoh: "22 box isi baso ayam 1, piscok 1, ham cheese 3" -> qty final: baso
-ayam 22, piscok 22, ham cheese 66 (BUKAN 1, 1, 3).
-Kalau jumlah box-nya 1, qty yang disebutkan sudah final, tidak perlu dikali.
-Kalau ada beberapa kelompok box berbeda dalam satu pesan, hitung tiap kelompok
-sendiri-sendiri dulu, baru jumlahkan rasa yang sama jadi satu baris item.
-Kalau qty ditulis TANPA keterangan box sama sekali, itu sudah qty final,
-jangan dikalikan apa-apa.
-Tulis di field "catatan" ringkasan pembagian box-nya secara singkat (misal:
-"22 box: baso ayam 1, piscok 1, ham cheese 3/box; 3 box: charsiu 2, baso
-ayam 2, piscok 1/box; 1 box: ham 5, keju susu 2, coklat 1, charsiu 2") --
-ini PENTING supaya admin bisa lihat rincian box aslinya, JANGAN dihilangkan
-walau "kelengkapan" jadi "lengkap".
+
+Untuk field "items" (dipakai buat hitung harga & simpan ke sistem), qty final
+tiap rasa = qty per box DIKALI jumlah box. Contoh: "22 box isi baso ayam 1,
+piscok 1, ham cheese 3" -> qty final di "items": baso ayam 22, piscok 22, ham
+cheese 66 (BUKAN 1, 1, 3). Kalau ada beberapa kelompok box berbeda dalam satu
+pesan, hitung tiap kelompok sendiri-sendiri dulu, baru JUMLAHKAN rasa yang
+sama jadi satu baris di "items". Kalau qty ditulis TANPA keterangan box sama
+sekali, itu sudah qty final apa adanya, masukkan langsung ke "items" tanpa
+dikalikan, dan JANGAN dimasukkan ke "box_groups" (biarkan "box_groups" cuma
+berisi kelompok yang beneran pakai satuan box).
+
+Untuk field "box_groups" (dipakai buat cetak rincian ke invoice/surat jalan,
+BUKAN untuk hitung harga): tulis ULANG setiap kelompok box PERSIS seperti asal
+disebutkan customer, SATU per SATU (jangan digabung/dijumlahkan di sini,
+biarkan qty_per_box tetap qty ASLI per box, JANGAN dikalikan). Kalau order ini
+sama sekali tidak pakai satuan box, "box_groups" harus berupa array kosong []
+(bukan null).
+
+Contoh lengkap: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham
+cheese 3" dan "3 box isi charsiu 2, baso ayam 2" dan juga tambahan "roti
+coklat 5" (tanpa box), maka:
+- "items" (final, sudah dikali+dijumlah): baso ayam 22+6=28, piscok 22, ham
+  cheese 66, charsiu 6, roti coklat 5 (roti coklat TIDAK dikali karena tanpa
+  keterangan box).
+- "box_groups": [
+    {"jumlah_box": 22, "items": [{"kategori":"Roti","rasa":"Baso ( Ayam )","qty_per_box":1}, {"kategori":"Roti","rasa":"Piscok","qty_per_box":1}, {"kategori":"Roti","rasa":"Ham Cheese","qty_per_box":3}]},
+    {"jumlah_box": 3, "items": [{"kategori":"Roti","rasa":"Charsiu","qty_per_box":2}, {"kategori":"Roti","rasa":"Baso ( Ayam )","qty_per_box":2}]}
+  ]
+  (item "roti coklat 5" TIDAK masuk box_groups karena bukan bagian box manapun)
 """
 
 PARSE_CATALOG_INSTRUCTION = """
@@ -80,7 +98,8 @@ ATURAN PENTING soal mencocokkan item pesanan ke daftar di atas:
    "kurang_lengkap" dan jelaskan di "catatan" bahwa nama itu tidak ada persis
    di daftar dan apa kemungkinan yang dimaksud.
 4. Field "kategori" dan "rasa" di output HARUS ditulis PERSIS sama seperti di
-   daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas.
+   daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas -- ini
+   berlaku juga untuk "kategori"/"rasa" di dalam "box_groups".
 {alias_text}"""
 
 
@@ -130,7 +149,7 @@ def _prepare_catalog_prompt(system_prompt, catalog):
 def _empty_parse_result(catatan):
     return {
         "nama": None, "no_hp": None, "alamat": None, "metode": None,
-        "items": [], "catatan": catatan, "kelengkapan": "kurang_lengkap",
+        "items": [], "box_groups": [], "catatan": catatan, "kelengkapan": "kurang_lengkap",
     }
 
 
@@ -242,6 +261,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     result = _safe_json_loads(response.content[0].text)
     if result is None:
         return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
+    result.setdefault("box_groups", [])
     return result
 
 
@@ -296,6 +316,7 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
     result = _safe_json_loads(response.content[0].text)
     if result is None:
         return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
+    result.setdefault("box_groups", [])
     return result
 
 
