@@ -119,6 +119,48 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
     return "\n".join(lines)
 
 
+def build_production_recap_customer(nama_customer: str, minggu_po: str, orders: list) -> str:
+    """Rekap produksi TAPI cuma buat 1 customer tertentu -- dipanggil manual
+    kalau admin EKSPLISIT minta (misal '/rekap Ci Meyvany' atau bahasa
+    natural 'minta rekap produksi Ci Meyvany'), BUKAN bagian dari rekap
+    mingguan otomatis (yang tetap gabungan semua customer seperti biasa,
+    lihat build_production_recap -- TIDAK diubah/disentuh sama sekali).
+
+    Berguna buat ngecek kebutuhan produksi 1 pesanan gede/khusus secara
+    terpisah, apalagi kalau tanggal kirimnya beda dari minggu PO biasa
+    (Tanggal_Kirim custom, misal order borongan yang mesti dikirim lebih
+    cepat/lambat dari Kamis PO biasa) -- makanya tanggal kirim customer ini
+    ditampilin jelas di baris kedua."""
+    if not orders:
+        return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
+
+    tanggal_kirim = orders[0].get("Tanggal_Kirim") or minggu_po
+
+    recap = {}  # {(kategori, rasa): total_qty}
+    for o in orders:
+        key = (o["Kategori"], o["Rasa"])
+        recap[key] = recap.get(key, 0) + int(o["Qty"])
+
+    by_category = {}
+    for (kategori, rasa), qty in recap.items():
+        by_category.setdefault(kategori, []).append((rasa, qty))
+
+    lines = [f"*REKAP PRODUKSI — {nama_customer}*"]
+    lines.append(f"(Tanggal Kirim: {tanggal_kirim})")
+    grand_total = 0
+    for kategori, items in by_category.items():
+        lines.append(f"\n*{kategori}*")
+        subtotal_kategori = 0
+        for rasa, qty in sorted(items, key=lambda x: -x[1]):
+            lines.append(f"  {rasa}: {qty} pcs")
+            subtotal_kategori += qty
+        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
+        grand_total += subtotal_kategori
+
+    lines.append(f"\n*Total: {grand_total} pcs*")
+    return "\n".join(lines)
+
+
 def _group_per_customer(orders: list) -> dict:
     """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
     diringkas jadi boolean 'ini pengiriman apa bukan' lewat
