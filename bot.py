@@ -28,19 +28,7 @@ from scheduler_jobs import setup_scheduler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-def _rewrite_customer_order(sheets, pending):
-    sheets.delete_customer_week_rows(pending.get("original_nama", pending["nama"]), pending["minggu_po"])
-    order = {
-        "nama": pending["nama"],
-        "no_hp": pending["no_hp"],
-        "alamat": pending["alamat"],
-        "metode": pending["metode"],
-        "items": pending["items"],
-        "ongkir": pending.get("ongkir", 0),
-        "tanggal_kirim": pending.get("tanggal_kirim"),
-    }
-    return sheets.add_order_rows(order, pending["minggu_po"])
-    
+
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in config.OWNER_TELEGRAM_IDS:
@@ -60,9 +48,8 @@ def _is_delivery_metode(metode):
 
 
 def _tujuan_invoice(update):
-    """(chat_id, message_thread_id) TUJUAN buat semua yang berbau
-    invoice/keuangan (foto invoice, rekap produksi, laporan bulanan). Ada 2
-    cara misahin, admin bebas pilih salah satu lewat env var Railway
+    """(chat_id, message_thread_id) TUJUAN buat foto invoice customer.
+    Ada 2 cara misahin, admin bebas pilih salah satu lewat env var Railway
     (kalau nggak di-setting dua-duanya, fallback balas di chat yang lagi
     dipake SEKARANG -- perilaku lama, aman):
 
@@ -120,7 +107,14 @@ def _tujuan_order(update):
         return chat_id, None
     return update.effective_chat.id, None
 
+
 def _tujuan_rekapproduksi(update):
+    """(chat_id, message_thread_id) TUJUAN khusus buat rekap produksi
+    mingguan (bagian resep/bahan, dari /rekap) -- DIPISAH dari
+    _tujuan_invoice supaya rekap produksi nggak numplek sama invoice/
+    laporan bulanan. Pola sama persis: config.TOPIC_ID_REKAPPRODUKSI (topic)
+    atau config.GROUP_CHAT_ID_REKAPPRODUKSI (grup terpisah), fallback ke
+    chat sekarang kalau nggak di-setting."""
     topic_id = getattr(config, "TOPIC_ID_REKAPPRODUKSI", None)
     if topic_id:
         return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
@@ -131,6 +125,12 @@ def _tujuan_rekapproduksi(update):
 
 
 def _tujuan_laporanbulanan(update):
+    """(chat_id, message_thread_id) TUJUAN khusus buat laporan bulanan
+    supplier (/laporanbulanan, teks + PDF) -- DIPISAH dari _tujuan_invoice
+    supaya laporan bulanan nggak numplek sama invoice/rekap produksi. Pola
+    sama persis: config.TOPIC_ID_LAPORANBULANAN (topic) atau
+    config.GROUP_CHAT_ID_LAPORANBULANAN (grup terpisah), fallback ke chat
+    sekarang kalau nggak di-setting."""
     topic_id = getattr(config, "TOPIC_ID_LAPORANBULANAN", None)
     if topic_id:
         return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
@@ -138,7 +138,8 @@ def _tujuan_laporanbulanan(update):
     if chat_id:
         return chat_id, None
     return update.effective_chat.id, None
-    
+
+
 async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", reply_markup=None):
     """Kirim TEKS ke tujuan = (chat_id, message_thread_id). Kalau gagal
     (misal bot belum di-invite, ATAU teksnya ngandung karakter Markdown yang
@@ -313,6 +314,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Paste/forward chat customer ke sini, akan diparse otomatis jadi order.\n"
         "- /pricelist — lihat daftar harga\n"
         "- /rekap — rekap produksi minggu berjalan\n"
+        "- /rekap Nama Customer — rekap produksi khusus 1 customer aja\n"
         "- /invoice Nama Customer — bikin ulang invoice\n"
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
         "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
@@ -341,8 +343,10 @@ async def groupid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n\nID TOPIC ini: `{thread_id}`\n"
             "Copy ID topic di atas ke salah satu env var Railway ini (sesuai topic ini "
             "buat apa): TOPIC_ID_ORDER (order masuk & konfirmasi), TOPIC_ID_INVOICE "
-            "(invoice/rekap produksi/laporan bulanan), atau TOPIC_ID_SURATJALAN "
-            "(surat jalan/rekap kurir) — chat/grup-nya tetep pake GROUP_CHAT_ID yang biasa."
+            "(invoice foto ke customer), TOPIC_ID_REKAPPRODUKSI (rekap produksi "
+            "mingguan/bahan baku), TOPIC_ID_LAPORANBULANAN (laporan bulanan supplier), "
+            "atau TOPIC_ID_SURATJALAN (surat jalan/rekap kurir) — chat/grup-nya tetep "
+            "pake GROUP_CHAT_ID yang biasa."
         )
     await update.message.reply_text(teks, parse_mode="Markdown")
 
@@ -357,6 +361,22 @@ async def pricelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Kalau admin kasih nama customer (misal '/rekap Ci Meyvany' atau lewat
+    # bahasa natural 'minta rekap produksi Ci Meyvany'), tampilin rekap
+    # produksi KHUSUS customer itu doang -- BUKAN pengganti rekap mingguan
+    # biasa (di bawah ini, kalau context.args kosong, tetep jalan seperti
+    # semula, gabungan SEMUA customer). Fitur ini cuma aktif kalau admin
+    # EKSPLISIT minta pakai nama, jadi auto-recap terjadwal (scheduler_jobs.py)
+    # nggak kesenggol sama sekali -- itu selalu manggil rekap() tanpa args.
+    nama_customer_rekap = " ".join(context.args) if context.args else None
+    if nama_customer_rekap:
+        sheets = get_sheets_client()
+        minggu_po = date_helpers.current_po_week_thursday()
+        orders = sheets.get_pending_orders_by_customer_week(nama_customer_rekap, minggu_po)
+        text_customer = documents.build_production_recap_customer(nama_customer_rekap, minggu_po, orders)
+        await _kirim_teks_ke(context, update, _tujuan_rekapproduksi(update), text_customer)
+        return
+
     try:
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
@@ -377,10 +397,10 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Kirim sebagai pesan TERPISAH biar gampang di-forward tanpa crop, DAN
-    # ke grup TUJUAN yang beda-beda: rekap produksi ke grup admin invoice
-    # (buat baking/bahan), daftar kirim & ambil ke grup admin surat jalan
-    # (buat kurir) -- kalau grup-grup itu belum di-setting, fallback balas
-    # di chat ini kayak biasa.
+    # ke grup TUJUAN yang beda-beda: rekap produksi ke grup admin rekap
+    # produksi (buat baking/bahan), daftar kirim & ambil ke grup admin surat
+    # jalan (buat kurir) -- kalau grup-grup itu belum di-setting, fallback
+    # balas di chat ini kayak biasa.
     text_produksi = documents.build_production_recap(minggu_po, orders)
     await _kirim_teks_ke(context, update, _tujuan_rekapproduksi(update), text_produksi)
 
@@ -759,7 +779,7 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Gagal kirim PDF laporan bulanan ke chat {invoice_chat_id}: {e}")
             if invoice_chat_id != update.effective_chat.id:
                 await update.effective_chat.send_message(
-                    f"⚠️ Gagal kirim PDF laporan bulanan ke grup/topic admin invoice: {e}"
+                    f"⚠️ Gagal kirim PDF laporan bulanan ke grup/topic admin laporan bulanan: {e}"
                 )
 
 
@@ -782,6 +802,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["editing_order"] = {
         "nama": orders[0].get("Nama_Customer", nama),
+        "original_nama": orders[0].get("Nama_Customer", nama),
         "no_hp": orders[0].get("No_HP", "-"),
         "alamat": orders[0].get("Alamat", "-"),
         "metode": orders[0].get("Metode", "Ambil"),
@@ -790,9 +811,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         "ongkir": int(orders[0].get("Ongkir", 0) or 0),
         "minggu_po": minggu_po,
-                    "original_nama": orders[0].get("Nama_Customer", nama),
         "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
-        
     }
 
     await update.message.reply_text(
@@ -874,6 +893,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     intent = intent_result.get("intent", "order_baru")
 
     if intent == "rekap_produksi":
+        # Kalau AI kebetulan nangkep nama customer TERTENTU disebut bareng
+        # permintaan rekap (misal "minta rekap produksi Ci Meyvany"), pass
+        # sebagai context.args biar rekap() nunjukkin versi khusus 1
+        # customer itu. Kalau nggak ada nama, context.args dikosongin
+        # eksplisit (bukan dibiarin nyisa dari command sebelumnya) biar
+        # rekap() jalan seperti biasa (gabungan semua customer).
+        nama_customer_rekap = intent_result.get("nama_customer")
+        context.args = nama_customer_rekap.split() if nama_customer_rekap else []
         await rekap(update, context)
         return
 
@@ -917,6 +944,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data["editing_order"] = {
             "nama": orders[0].get("Nama_Customer", nama),
+            "original_nama": orders[0].get("Nama_Customer", nama),
             "no_hp": orders[0].get("No_HP", "-"),
             "alamat": orders[0].get("Alamat", "-"),
             "metode": orders[0].get("Metode", "Ambil"),
@@ -925,7 +953,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             "ongkir": int(orders[0].get("Ongkir", 0) or 0),
             "minggu_po": minggu_po,
-            "original_nama": orders[0].get("Nama_Customer", nama),
             "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
         }
         # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
@@ -1130,11 +1157,20 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Invoice & surat jalan DIPISAH ke 2 grup TUJUAN beda (admin invoice /
     # admin surat jalan) kalau udah di-setting -- biar nggak numplek di 1
     # tempat sama pesan status ("Menyimpan...", "Tersimpan!") yang tetep di
-    # sini (chat/grup tempat order-nya diproses).
-    invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups"))
+    # sini (chat/grup tempat order-nya diproses). box_groups (rincian
+    # pembagian per box, kalau order-nya pakai satuan box) ikut dioper ke
+    # invoice & surat jalan biar ada section tambahan "Rincian Box" -- cuma
+    # tersedia SEKALI di titik konfirmasi ini (nggak kesimpen ke Sheets),
+    # jadi kalau invoice/surat jalan ini di-generate ULANG lewat /invoice
+    # atau /suratjalan nanti, rincian box-nya nggak ikut muncul lagi.
+    invoice_img = invoice_image.generate_invoice_image(
+        order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups")
+    )
     await _kirim_foto_ke(context, update, _tujuan_invoice(update), invoice_img, "Invoice (siap kirim ke customer)")
 
-    img = receipt.generate_surat_jalan_image(order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups"))
+    img = receipt.generate_surat_jalan_image(
+        order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups")
+    )
     await _kirim_foto_ke(
         context, update, _tujuan_suratjalan(update), img,
         "Surat jalan (siap print) — tap gambar → Share → app printer",
@@ -1468,7 +1504,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
 
         context.user_data["pending_edit"] = {
             "nama": editing["nama"],
-                        "original_nama": editing.get("original_nama", editing["nama"]),
+            "original_nama": editing.get("original_nama", editing["nama"]),
             "no_hp": editing["no_hp"],
             "alamat": editing["alamat"],
             "metode": editing["metode"],
@@ -1543,7 +1579,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
 
     context.user_data["pending_edit"] = {
         "nama": editing["nama"],
-                    "original_nama": editing.get("original_nama", editing["nama"]),
+        "original_nama": editing.get("original_nama", editing["nama"]),
         "no_hp": editing["no_hp"],
         "alamat": editing["alamat"],
         "metode": editing["metode"],
@@ -1618,10 +1654,10 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["saving_in_progress"] = False
         return
 
-
-
     try:
-        orders = await asyncio.wait_for(asyncio.to_thread(_rewrite_customer_order, sheets, pending), timeout=30)
+        orders = await asyncio.wait_for(
+            asyncio.to_thread(_rewrite_customer_order, sheets, pending), timeout=30
+        )
     except asyncio.TimeoutError:
         await query.message.reply_text(
             "Timeout pas nyimpen perubahan. PENTING: cek manual di Google Sheets, "
@@ -1661,6 +1697,27 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.pop("editing_order", None)
     context.user_data.pop("pending_edit", None)
     context.user_data["saving_in_progress"] = False
+
+
+def _rewrite_customer_order(sheets, pending):
+    """Hapus baris LAMA di Sheets (pakai nama ASLI sebelum diedit, bukan
+    nama baru kalau kebetulan admin lagi ganti nama juga -- kalau pakai nama
+    BARU buat nyari baris lama, baris lama nggak ketemu/nggak kehapus dan
+    malah numpuk dobel, itu yang kejadian pas nama diganti lewat /edit),
+    lalu tulis ulang order dengan data TERBARU (termasuk nama baru kalau
+    ada). Dipanggil di thread terpisah dari handle_edit_confirm biar nggak
+    blocking event loop bot."""
+    sheets.delete_customer_week_rows(pending.get("original_nama", pending["nama"]), pending["minggu_po"])
+    order = {
+        "nama": pending["nama"],
+        "no_hp": pending["no_hp"],
+        "alamat": pending["alamat"],
+        "metode": pending["metode"],
+        "items": pending["items"],
+        "ongkir": pending.get("ongkir", 0),
+        "tanggal_kirim": pending.get("tanggal_kirim"),
+    }
+    return sheets.add_order_rows(order, pending["minggu_po"])
 
 
 async def on_startup(app: Application):

@@ -221,7 +221,7 @@ JSON valid tanpa teks lain, tanpa markdown code fence:
 }}
 
 Panduan milih intent:
-- "minta rekap produksi", "rekap dong", "mau liat rekap", "udah berapa pesanan masuk" -> rekap_produksi
+- "minta rekap produksi", "rekap dong", "mau liat rekap", "udah berapa pesanan masuk" -> rekap_produksi (kalau ADA nama customer tertentu disebut bareng permintaan ini, misal "minta rekap produksi Ci Meyvany" atau "rekap produksi buat Budi", isi juga nama_customer dengan nama itu -- kalau nggak disebut nama, biarkan nama_customer null biar rekapnya tetap buat SEMUA customer minggu ini seperti biasa)
 - "laporan bulanan", "rekap bulanan", "mau tau total bulan ini", "berapa yang harus dibayar ke supplier" -> laporan_bulanan
 - "harga berapa", "price list", "liat catalog/katalog", "kirim daftar harga" -> pricelist
 - Kalau nyebut nama customer TERTENTU dan maksudnya ubah pesanan yang SUDAH ADA
