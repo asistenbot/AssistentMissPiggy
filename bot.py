@@ -140,26 +140,40 @@ def _tujuan_laporanbulanan(update):
     return update.effective_chat.id, None
     
 async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", reply_markup=None):
-    """Kirim TEKS ke tujuan = (chat_id, message_thread_id) dari
-    _tujuan_invoice/_tujuan_suratjalan/_tujuan_order, catet di log + kasih
-    tau di chat asal kalau ternyata gagal (misal bot belum di-invite ke
-    grup/topic tujuan itu) -- biar nggak diem-diem ilang. reply_markup
-    opsional -- dipake buat preview order baru yang butuh tombol
-    Simpan/Batal/Isi Ongkir."""
+    """Kirim TEKS ke tujuan = (chat_id, message_thread_id). Kalau gagal
+    (misal bot belum di-invite, ATAU teksnya ngandung karakter Markdown yang
+    nggak seimbang kayak * _ ` [ ), dicoba dulu kirim ULANG tanpa format
+    sebelum bener-bener nyerah -- biar admin tetep kebagian isinya walau
+    jadi polos. Kalau tetap gagal, SELALU kasih tau di chat asal (nggak lagi
+    cuma kalau beda topic) -- biar nggak diem-diem ilang kayak sebelumnya."""
     chat_id, thread_id = tujuan
     try:
         await context.bot.send_message(
             chat_id=chat_id, text=text, parse_mode=parse_mode,
             message_thread_id=thread_id, reply_markup=reply_markup,
         )
+        return
     except Exception as e:
         logger.error(f"Gagal kirim teks ke chat {chat_id} (topic {thread_id}): {e}")
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=None,
+            message_thread_id=thread_id, reply_markup=reply_markup,
+        )
         if chat_id != update.effective_chat.id:
             await update.effective_chat.send_message(
-                f"⚠️ Gagal kirim ke grup/topic tujuan ({e}). Cek bot udah di-invite & jadi admin di situ belum.\n\n"
-                f"Ini isinya (kirim manual dulu ya):\n\n{text}",
-                parse_mode=parse_mode,
+                "⚠️ Berhasil kirim ke grup/topic tujuan, tapi formatnya jadi polos "
+                "(ada karakter yang bikin format tebal/miring gagal)."
             )
+        return
+    except Exception as e2:
+        logger.error(f"Tetap gagal kirim teks (plain) ke chat {chat_id} (topic {thread_id}): {e2}")
+
+    await update.effective_chat.send_message(
+        f"⚠️ Gagal kirim ke grup/topic tujuan. Cek bot udah di-invite & jadi admin di situ belum.\n\n"
+        f"Ini isinya (kirim manual dulu ya):\n\n{text}"
+    )
 
 
 async def _kirim_foto_ke(context, update, tujuan, photo, caption):
