@@ -216,13 +216,14 @@ JSON valid tanpa teks lain, tanpa markdown code fence:
 {{
   "intent": salah satu dari "rekap_produksi", "laporan_bulanan", "pricelist", "edit_order", "invoice", "surat_jalan", "order_baru",
   "nama_customer": "nama customer yang disebut (kalau ada), atau null",
-  "bulan": "format YYYY-MM kalau admin sebut bulan tertentu buat laporan bulanan, atau null kalau tidak disebut / minta bulan ini",
+  "bulan_mulai": "format YYYY-MM (pakai tahun {today} kalau nggak disebut eksplisit) kalau admin minta laporan bulanan buat 1 bulan tertentu ATAU ini bulan AWAL dari sebuah rentang (misal 'dari Januari sampai Agustus' -> bulan_mulai Januari), atau null kalau nggak disebut sama sekali / minta bulan ini",
+  "bulan_akhir": "format YYYY-MM, isi HANYA kalau admin eksplisit minta RENTANG beberapa bulan (misal 'Januari sampai Agustus', 'Jan - Agustus', 'dari bulan 1 ke bulan 8') -- isi bulan AKHIR rentangnya. Kalau cuma minta 1 bulan doang (bukan rentang), biarkan null.",
   "instruksi_edit": "kalau intent-nya edit_order, tulis ulang instruksi perubahannya (item apa ditambah/dikurangi/dihapus dan jumlahnya), atau null"
 }}
 
 Panduan milih intent:
 - "minta rekap produksi", "rekap dong", "mau liat rekap", "udah berapa pesanan masuk" -> rekap_produksi (kalau ADA nama customer tertentu disebut bareng permintaan ini, misal "minta rekap produksi Ci Meyvany" atau "rekap produksi buat Budi", isi juga nama_customer dengan nama itu -- kalau nggak disebut nama, biarkan nama_customer null biar rekapnya tetap buat SEMUA customer minggu ini seperti biasa)
-- "laporan bulanan", "rekap bulanan", "mau tau total bulan ini", "berapa yang harus dibayar ke supplier" -> laporan_bulanan
+- "laporan bulanan", "rekap bulanan", "mau tau total bulan ini", "berapa yang harus dibayar ke supplier" -> laporan_bulanan (kalau admin sebut RENTANG bulan, misal "laporan bulanan dari Januari sampai Agustus", "laporan bulanan Jan - Agustus", "minta laporan bulan 1-3", "laporan bulan 1 sampai 3", isi bulan_mulai DAN bulan_akhir sesuai rentangnya -- ANGKA bulan (1=Januari, 2=Februari, dst sampai 12=Desember) harus dikonversi ke nomor bulan yang sama, cuma beda cara nulis; kalau cuma 1 bulan/nggak disebut, cukup isi bulan_mulai. Kalau TAHUN nggak disebut sama sekali (baik nama bulan maupun angka), pakai tahun {today} secara default -- JANGAN nebak tahun lain.)
 - "harga berapa", "price list", "liat catalog/katalog", "kirim daftar harga" -> pricelist
 - Kalau nyebut nama customer TERTENTU dan maksudnya ubah pesanan yang SUDAH ADA
   (kata kunci: tambah, nambah, kurang, kurangin, hapus, ganti, ubah, edit, jadi) -> edit_order
@@ -360,7 +361,7 @@ def classify_intent(raw_text: str) -> dict:
     Return dict dengan key: intent, nama_customer, bulan, instruksi_edit.
     Kalau gagal/nggak yakin, default ke 'order_baru' (paling aman).
     """
-    default = {"intent": "order_baru", "nama_customer": None, "bulan": None, "instruksi_edit": None}
+    default = {"intent": "order_baru", "nama_customer": None, "bulan_mulai": None, "bulan_akhir": None, "instruksi_edit": None}
 
     try:
         tz = date_helpers.get_timezone()
