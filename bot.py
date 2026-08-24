@@ -1117,10 +1117,10 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # admin surat jalan) kalau udah di-setting -- biar nggak numplek di 1
     # tempat sama pesan status ("Menyimpan...", "Tersimpan!") yang tetep di
     # sini (chat/grup tempat order-nya diproses).
-    invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders)
+    invoice_img = invoice_image.generate_invoice_image(order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups"))
     await _kirim_foto_ke(context, update, _tujuan_invoice(update), invoice_img, "Invoice (siap kirim ke customer)")
 
-    img = receipt.generate_surat_jalan_image(order["nama"], minggu_po, orders)
+    img = receipt.generate_surat_jalan_image(order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups"))
     await _kirim_foto_ke(
         context, update, _tujuan_suratjalan(update), img,
         "Surat jalan (siap print) — tap gambar → Share → app printer",
