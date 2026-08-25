@@ -228,7 +228,7 @@ Panduan milih intent:
 - Kalau nyebut nama customer TERTENTU dan maksudnya ubah pesanan yang SUDAH ADA
   (kata kunci: tambah, nambah, kurang, kurangin, hapus, ganti, ubah, edit, jadi) -> edit_order
 - "invoice buat X", "minta invoice X", "invoice-nya X mana" -> invoice (isi nama_customer)
-- "surat jalan X", "suratjalan buat X" -> surat_jalan (isi nama_customer)
+- "surat jalan X", "suratjalan buat X" -> surat_jalan (isi nama_customer) -- PENTING: kata yang PERSIS muncul setelah "surat jalan"/"suratjalan"/"invoice" itu HAMPIR SELALU nama customer, WALAUPUN kebetulan sama kayak nama bulan (Januari-Desember) atau kata umum lainnya. Contoh: "surat jalan juni" -> intent surat_jalan, nama_customer "Juni" (BUKAN merujuk ke bulan Juni, itu nama orang). Jangan biarkan kemiripan sama nama bulan bikin nama_customer jadi kosong/null.
 - Nyebut nama customer TERTENTU dan cuma mau NGELIAT/NGECEK pesanan dia
   (bukan ubah), kayak "lihat orderan X", "liat order X", "orderan X apa aja",
   "cek pesanan X", "orderannya X mana" -> invoice (isi nama_customer) --
