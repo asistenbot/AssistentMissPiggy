@@ -107,7 +107,7 @@ def generate_monthly_report_pdf(periode_label: str, month_results: list, grand_t
     elements = []
     elements.append(Paragraph(config.BUSINESS_NAME, title_style))
     elements.append(Paragraph(f"Periode: {periode_label}", sub_style))
-    tz_now = datetime.now().strftime("%d-%m-%Y %H:%M")
+    tz_now = datetime.now(date_helpers.get_timezone()).strftime("%d-%m-%Y %H:%M")
     elements.append(Paragraph(f"Digenerate: {tz_now} WIB", generated_style))
 
     for bulan_label, rows, bulan_qty, bulan_bayar in month_results:
