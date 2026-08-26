@@ -21,6 +21,7 @@ import documents
 import receipt
 import invoice_image
 import monthly_report_pdf
+import production_recap_pdf
 from sheets_client import get_sheets_client
 from ai_parser import parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent
 from scheduler_jobs import setup_scheduler
@@ -374,7 +375,25 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minggu_po = date_helpers.current_po_week_thursday()
         orders = sheets.get_pending_orders_by_customer_week(nama_customer_rekap, minggu_po)
         text_customer = documents.build_production_recap_customer(nama_customer_rekap, minggu_po, orders)
-        await _kirim_teks_ke(context, update, _tujuan_rekapproduksi(update), text_customer)
+        tujuan_produksi = _tujuan_rekapproduksi(update)
+        await _kirim_teks_ke(context, update, tujuan_produksi, text_customer)
+
+        if orders:
+            try:
+                tanggal_kirim = orders[0].get("Tanggal_Kirim") or minggu_po
+                pdf_buf = production_recap_pdf.generate_production_recap_pdf(
+                    f"REKAP PRODUKSI — {nama_customer_rekap}",
+                    f"(Tanggal Kirim: {tanggal_kirim})",
+                    orders,
+                )
+                chat_id_produksi, thread_id_produksi = tujuan_produksi
+                await context.bot.send_document(
+                    chat_id=chat_id_produksi, document=pdf_buf,
+                    filename=f"Rekap_Produksi_{nama_customer_rekap}.pdf",
+                    caption="Versi PDF (siap print)", message_thread_id=thread_id_produksi,
+                )
+            except Exception as e:
+                logger.error(f"Gagal generate/kirim PDF rekap produksi customer: {e}")
         return
 
     try:
@@ -402,7 +421,23 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # jalan (buat kurir) -- kalau grup-grup itu belum di-setting, fallback
     # balas di chat ini kayak biasa.
     text_produksi = documents.build_production_recap(minggu_po, orders)
-    await _kirim_teks_ke(context, update, _tujuan_rekapproduksi(update), text_produksi)
+    tujuan_produksi = _tujuan_rekapproduksi(update)
+    await _kirim_teks_ke(context, update, tujuan_produksi, text_produksi)
+
+    try:
+        pdf_buf = production_recap_pdf.generate_production_recap_pdf(
+            f"REKAP PRODUKSI — Minggu PO {minggu_po}",
+            f"(Kirim: {config.DELIVERY_DAY.upper()} {config.DELIVERY_WINDOW})",
+            orders,
+        )
+        chat_id_produksi, thread_id_produksi = tujuan_produksi
+        await context.bot.send_document(
+            chat_id=chat_id_produksi, document=pdf_buf,
+            filename=f"Rekap_Produksi_{minggu_po}.pdf",
+            caption="Versi PDF (siap print)", message_thread_id=thread_id_produksi,
+        )
+    except Exception as e:
+        logger.error(f"Gagal generate/kirim PDF rekap produksi: {e}")
 
     text_kirim = documents.build_delivery_kirim(minggu_po, orders)
     if text_kirim:
