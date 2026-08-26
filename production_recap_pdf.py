@@ -18,6 +18,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
 import config
+import date_helpers
 
 COLOR_HEADER = colors.HexColor("#442818")
 COLOR_LINE = colors.HexColor("#d8caa8")
@@ -112,7 +113,7 @@ def generate_production_recap_pdf(judul: str, subtitle: str, orders: list) -> By
     elements.append(Paragraph(judul, sub_style))
     if subtitle:
         elements.append(Paragraph(subtitle, sub_style))
-    tz_now = datetime.now().strftime("%d-%m-%Y %H:%M")
+    tz_now = datetime.now(date_helpers.get_timezone()).strftime("%d-%m-%Y %H:%M")
     elements.append(Paragraph(f"Digenerate: {tz_now} WIB", generated_style))
 
     grand_total = 0
