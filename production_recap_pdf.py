@@ -25,9 +25,12 @@ COLOR_ACCENT = colors.HexColor("#bf8f3f")
 COLOR_ACCENT_BG = colors.HexColor("#f3e8d3")
 
 
-def _build_category_table(items):
+def _build_category_table(items, col_widths=None):
     """items = list of (rasa, qty), sudah diurutin dari qty terbesar.
+    col_widths = [lebar_rasa, lebar_qty], default lebar penuh 1 kolom.
     Return (table, subtotal_qty)."""
+    if col_widths is None:
+        col_widths = [10.5 * cm, 6 * cm]
     data = [["Rasa", "Qty (pcs)"]]
     subtotal = 0
     for rasa, qty in items:
@@ -36,7 +39,7 @@ def _build_category_table(items):
     data.append(["Subtotal", f"{subtotal:,}".replace(",", ".")])
 
     n_data_rows = len(items)
-    table = Table(data, colWidths=[10.5 * cm, 6 * cm])
+    table = Table(data, colWidths=col_widths)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_HEADER),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -115,13 +118,46 @@ def generate_production_recap_pdf(judul: str, subtitle: str, orders: list) -> By
     grand_total = 0
     if not by_category:
         elements.append(Paragraph("Belum ada order.", styles["Normal"]))
-    for kategori in urutan_kategori:
+
+    # ---- Layout 3 KOLOM SEJAJAR dengan urutan TETAP: Donat - Roti Gandum -
+    # Roti (gak tergantung urutan random data, biar konsisten tiap minggu).
+    # Kategori LAIN di luar 3 itu (misal Bun Polos, Roti Tawar, Roti Tawar
+    # Loaf) otomatis ditumpuk DI BAWAH kolom Donat (kolom paling kiri),
+    # bukan bikin baris baru -- soalnya kategori-kategori itu biasanya kecil
+    # jumlahnya, jadi lebih hemat tempat ditumpuk drpd makan 1 baris sendiri. ----
+    col_w = [3.7 * cm, 1.7 * cm]  # lebar Rasa & Qty per kategori (versi sempit, 3 kolom sejajar)
+    PRIMARY_ORDER = ["Donat", "Roti Gandum", "Roti"]
+    col_contents = [[], [], []]
+
+    for idx, kategori in enumerate(PRIMARY_ORDER):
+        if kategori in by_category:
+            items_sorted = sorted(by_category[kategori], key=lambda x: -x[1])
+            table, subtotal = _build_category_table(items_sorted, col_widths=col_w)
+            grand_total += subtotal
+            col_contents[idx].append(Paragraph(kategori, kategori_header_style))
+            col_contents[idx].append(table)
+            col_contents[idx].append(Spacer(1, 8))
+
+    kategori_ekstra = [k for k in urutan_kategori if k not in PRIMARY_ORDER]
+    for kategori in kategori_ekstra:
         items_sorted = sorted(by_category[kategori], key=lambda x: -x[1])
-        elements.append(Paragraph(kategori, kategori_header_style))
-        table, subtotal = _build_category_table(items_sorted)
-        elements.append(table)
-        elements.append(Spacer(1, 6))
+        table, subtotal = _build_category_table(items_sorted, col_widths=col_w)
         grand_total += subtotal
+        col_contents[0].append(Paragraph(kategori, kategori_header_style))
+        col_contents[0].append(table)
+        col_contents[0].append(Spacer(1, 8))
+
+    if by_category:
+        row = [content if content else [Spacer(1, 1)] for content in col_contents]
+        wrapper = Table([row], colWidths=[5.6 * cm] * 3)
+        wrapper.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ]))
+        elements.append(wrapper)
 
     # ---- Kotak TOTAL SEMUA PRODUK ----
     if by_category:
