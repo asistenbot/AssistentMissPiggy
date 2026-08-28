@@ -261,13 +261,13 @@ class SheetsClient:
 
     def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
         """
-        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 08:00 WIB PADA
+        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 10:00 WIB PADA
         HARI ITU SENDIRI otomatis dianggap udah kelar diproduksi & dikirim --
         Status-nya diubah dari 'Pending' jadi 'Terkirim'. Jadi order buat
-        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 08:00 pagi juga -- nggak
+        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 10:00 pagi juga -- nggak
         perlu nunggu lewat ganti hari.
 
-        Cutoff-nya sengaja jam 08:00 (bukan lebih pagi) biar ada waktu buat
+        Cutoff-nya sengaja jam 10:00 (bukan lebih pagi) biar ada waktu buat
         order yang masuk tengah malam (misal jam 00:00) tetap kejaring di
         rekap produksi paginya sebelum ke-flip -- kalau cutoff-nya lebih
         mepet ke jam 00:00, order dini hari kayak gitu bisa keburu ke-flip
@@ -275,8 +275,8 @@ class SheetsClient:
 
         Dipanggil otomatis dari get_pending_orders_by_week() tiap kali ada
         yang minta rekap produksi (jadi keupdate begitu direquest kapan aja
-        abis jam 8 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
-        harian jam 08:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
+        abis jam 10 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
+        harian jam 10:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
         keupdate walau nggak ada satupun yang minta rekap hari itu -- itu
         belum kepasang di sini karena scheduler_jobs.py belum ada.
 
@@ -305,9 +305,9 @@ class SheetsClient:
 
         tz = date_helpers.get_timezone()
         now = now or datetime.datetime.now(tz)
-        cutoff_hari_ini = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        # Sebelum jam 8 pagi, "batas hari" efektifnya masih KEMARIN -- order
-        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 8 pagi
+        cutoff_hari_ini = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        # Sebelum jam 10 pagi, "batas hari" efektifnya masih KEMARIN -- order
+        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 10 pagi
         # bener-bener lewat.
         boundary = now.date() if now >= cutoff_hari_ini else (now - datetime.timedelta(days=1)).date()
 
@@ -346,7 +346,7 @@ class SheetsClient:
         Tandain SEMUA baris order milik nama_customer untuk minggu_po
         tertentu yang masih Status 'Pending' jadi 'Terkirim' -- dipakai buat
         /kirim, jaring pengaman MANUAL kalau admin mau langsung nandain SAAT
-        ITU JUGA (nggak nunggu cutoff otomatis jam 08:00 WIB di
+        ITU JUGA (nggak nunggu cutoff otomatis jam 10:00 WIB di
         rollover_delivered_orders).
 
         Return: jumlah baris yang barusan diubah.
@@ -404,6 +404,40 @@ class SheetsClient:
             o for o in self.get_orders_by_week(minggu_po)
             if str(o.get("Status", "")).strip().lower() != "terkirim"
         ]
+
+    def get_pending_orders_by_tanggal_range(self, start_date: str, end_date: str):
+        """Rekap produksi berdasarkan TANGGAL_KIRIM (BUKAN Minggu_PO) dalam
+        rentang tanggal tertentu -- gabungan SEMUA customer yang tanggal
+        kirimnya jatuh di rentang itu, nggak peduli Minggu_PO-nya beda-beda.
+        Dipakai buat '/rekap 2026-08-29' atau '/rekap 2026-08-28:2026-08-29'.
+
+        Berguna banget buat kasus tanggal kirim custom (besok/lusa) yang
+        bikin Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu
+        nggak nongol di rekap mingguan biasa, tapi tetep kejaring di sini
+        selama Tanggal_Kirim-nya masuk rentang yang diminta.
+
+        start_date, end_date: string 'YYYY-MM-DD' (inklusif dua-duanya).
+        Sama kayak get_pending_orders_by_week: jalanin rollover dulu, baru
+        buang yang Status-nya udah 'Terkirim'."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            pass
+
+        try:
+            d_start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
+            d_end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            return []
+
+        result = []
+        for o in self.get_all_orders():
+            if str(o.get("Status", "")).strip().lower() == "terkirim":
+                continue
+            d = self._parse_tanggal_fleksibel(o.get("Tanggal_Kirim"))
+            if d is not None and d_start <= d <= d_end:
+                result.append(o)
+        return result
 
     def get_pending_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
         """Sama kayak get_orders_by_customer_week, TAPI (kalau ada campuran)
