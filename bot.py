@@ -363,6 +363,40 @@ async def pricelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Kalau argumennya PERSIS format tanggal 'YYYY-MM-DD' atau rentang
+    # 'YYYY-MM-DD:YYYY-MM-DD' (misal '/rekap 2026-08-29' atau
+    # '/rekap 2026-08-28:2026-08-29'), tampilin rekap produksi berdasarkan
+    # TANGGAL KIRIM (gabungan SEMUA customer di rentang itu, nggak peduli
+    # Minggu_PO-nya beda-beda) -- BEDA sama filter per-nama-customer di
+    # bawah. Dicek PALING ATAS sebelum dianggap nama customer, soalnya nama
+    # customer nggak bakal persis berformat tanggal kayak gini.
+    if context.args and len(context.args) == 1:
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})(?::(\d{4}-\d{2}-\d{2}))?$", context.args[0])
+        if m:
+            tgl_mulai = m.group(1)
+            tgl_akhir = m.group(2) or tgl_mulai
+            sheets = get_sheets_client()
+            orders = sheets.get_pending_orders_by_tanggal_range(tgl_mulai, tgl_akhir)
+            label = tgl_mulai if tgl_mulai == tgl_akhir else f"{tgl_mulai} s/d {tgl_akhir}"
+            text_tanggal = documents.build_production_recap_tanggal(label, orders)
+            tujuan_produksi = _tujuan_rekapproduksi(update)
+            await _kirim_teks_ke(context, update, tujuan_produksi, text_tanggal)
+
+            if orders:
+                try:
+                    pdf_buf = production_recap_pdf.generate_production_recap_pdf(
+                        f"REKAP PRODUKSI — {label}", "", orders,
+                    )
+                    chat_id_produksi, thread_id_produksi = tujuan_produksi
+                    await context.bot.send_document(
+                        chat_id=chat_id_produksi, document=pdf_buf,
+                        filename=f"Rekap_Produksi_{tgl_mulai}_{tgl_akhir}.pdf",
+                        caption="Versi PDF (siap print)", message_thread_id=thread_id_produksi,
+                    )
+                except Exception as e:
+                    logger.error(f"Gagal generate/kirim PDF rekap produksi tanggal: {e}")
+            return
+
     # Kalau admin kasih nama customer (misal '/rekap Ci Meyvany' atau lewat
     # bahasa natural 'minta rekap produksi Ci Meyvany'), tampilin rekap
     # produksi KHUSUS customer itu doang -- BUKAN pengganti rekap mingguan
@@ -375,6 +409,11 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
         orders = sheets.get_pending_orders_by_customer_week(nama_customer_rekap, minggu_po)
+        if not orders:
+            orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama_customer_rekap)
+            if orders_fallback:
+                orders = orders_fallback
+                minggu_po = minggu_fallback
         text_customer = documents.build_production_recap_customer(nama_customer_rekap, minggu_po, orders)
         tujuan_produksi = _tujuan_rekapproduksi(update)
         await _kirim_teks_ke(context, update, tujuan_produksi, text_customer)
@@ -968,10 +1007,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     intent = intent_result.get("intent", "order_baru")
 
     if intent == "rekap_produksi":
+        # Kalau AI nangkep TANGGAL/RENTANG TANGGAL spesifik (misal "rekap
+        # produksi besok", "rekap produksi sampe besok", "rekap produksi
+        # hari ini dan besok"), prioritasin itu -- pass sebagai context.args
+        # format 'YYYY-MM-DD' atau 'YYYY-MM-DD:YYYY-MM-DD' biar rekap()
+        # ke-detect sebagai rekap by tanggal (gabungan semua customer),
+        # BUKAN dianggap nama customer.
+        tanggal_mulai_rekap = intent_result.get("tanggal_mulai_rekap")
+        if tanggal_mulai_rekap:
+            tanggal_akhir_rekap = intent_result.get("tanggal_akhir_rekap") or tanggal_mulai_rekap
+            if tanggal_akhir_rekap != tanggal_mulai_rekap:
+                context.args = [f"{tanggal_mulai_rekap}:{tanggal_akhir_rekap}"]
+            else:
+                context.args = [tanggal_mulai_rekap]
+            await rekap(update, context)
+            return
+
         # Kalau AI kebetulan nangkep nama customer TERTENTU disebut bareng
         # permintaan rekap (misal "minta rekap produksi Ci Meyvany"), pass
         # sebagai context.args biar rekap() nunjukkin versi khusus 1
-        # customer itu. Kalau nggak ada nama, context.args dikosongin
+        # customer itu. Kalau nggak ada nama/tanggal, context.args dikosongin
         # eksplisit (bukan dibiarin nyisa dari command sebelumnya) biar
         # rekap() jalan seperti biasa (gabungan semua customer).
         nama_customer_rekap = intent_result.get("nama_customer")
