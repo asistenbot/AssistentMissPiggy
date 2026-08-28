@@ -161,6 +161,41 @@ def build_production_recap_customer(nama_customer: str, minggu_po: str, orders: 
     return "\n".join(lines)
 
 
+def build_production_recap_multi(nama_list: list, orders: list) -> str:
+    """Rekap produksi GABUNGAN buat BEBERAPA customer sekaligus -- dipanggil
+    kalau admin sebut lebih dari 1 nama dalam 1 permintaan (misal 'minta
+    rekap produksi Franky dan Kelvin' atau '/rekap Franky, Kelvin'). Total
+    per rasa digabung SEMUA customer yang disebut jadi satu angka, sama
+    kayak build_production_recap (mingguan) tapi scope-nya cuma nama-nama
+    yang diminta, bukan semua customer di minggu itu."""
+    label = ", ".join(nama_list)
+    if not orders:
+        return f"Nggak ada order atas nama {label}."
+
+    recap = {}  # {(kategori, rasa): total_qty}
+    for o in orders:
+        key = (o["Kategori"], o["Rasa"])
+        recap[key] = recap.get(key, 0) + int(o["Qty"])
+
+    by_category = {}
+    for (kategori, rasa), qty in recap.items():
+        by_category.setdefault(kategori, []).append((rasa, qty))
+
+    lines = [f"*REKAP PRODUKSI — {label}*"]
+    grand_total = 0
+    for kategori, items in by_category.items():
+        lines.append(f"\n*{kategori}*")
+        subtotal_kategori = 0
+        for rasa, qty in sorted(items, key=lambda x: -x[1]):
+            lines.append(f"  {rasa}: {qty} pcs")
+            subtotal_kategori += qty
+        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
+        grand_total += subtotal_kategori
+
+    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
+    return "\n".join(lines)
+
+
 def build_production_recap_tanggal(label: str, orders: list) -> str:
     """Rekap produksi berdasarkan RENTANG TANGGAL KIRIM (BUKAN Minggu_PO) --
     gabungan SEMUA customer yang tanggal kirimnya jatuh di rentang itu,
