@@ -124,6 +124,7 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
                 f"{i.get('rasa', '?')} x{i.get('qty_per_box', '?')}" for i in grp.get("items", [])
             )
             lines.append((f"{jumlah} box: {desc}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
+            lines.append(("", FONT_SMALL, "left", 0))
     else:
         for kategori, items in _group_by_category(orders):
             lines.append((f"» {kategori}", FONT_HEADER, "left", 0))
