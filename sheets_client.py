@@ -427,6 +427,43 @@ class SheetsClient:
             if o.get("Nama_Customer", "").strip().lower() == nama_customer.strip().lower()
         ]
 
+    def get_orders_by_customer_any_week(self, nama_customer: str):
+        """Cari order customer ini di SEMUA Minggu_PO (bukan cuma minggu yang
+        lagi aktif) -- dipakai sebagai FALLBACK oleh /edit, /invoice,
+        /suratjalan kalau pencarian di minggu aktif nggak ketemu apa-apa.
+
+        Kejadian nyata yang bikin ini perlu: customer yang minta tanggal
+        kirim CUSTOM (misal 'besok') bisa aja Minggu_PO-nya udah kepindah ke
+        minggu berikutnya sama sistem, sementara admin masih mikirnya itu
+        "punya minggu ini" -- alhasil /edit dia nggak ketemu apa-apa padahal
+        datanya ada, cuma nyangkut di Minggu_PO yang beda.
+
+        Kalau customer ini ternyata punya order di BEBERAPA Minggu_PO
+        berbeda (kasus jarang tapi mungkin), ambil yang Minggu_PO-nya PALING
+        BARU aja -- across historical resiko ke-mix minggu lama yang udah
+        nggak relevan.
+
+        Return: (list_order, minggu_po_string) atau ([], None) kalau nggak
+        ketemu sama sekali."""
+        nama_target = nama_customer.strip().lower()
+        semua = [
+            o for o in self.get_all_orders()
+            if o.get("Nama_Customer", "").strip().lower() == nama_target
+        ]
+        if not semua:
+            return [], None
+
+        by_week = {}
+        for o in semua:
+            d = self._parse_tanggal_fleksibel(o.get("Minggu_PO"))
+            key = d or datetime.date.min
+            by_week.setdefault(key, []).append(o)
+
+        minggu_terbaru_key = max(by_week.keys())
+        orders_terbaru = by_week[minggu_terbaru_key]
+        minggu_po_str = str(orders_terbaru[0].get("Minggu_PO", "")).strip()
+        return orders_terbaru, minggu_po_str
+
     def get_orders_by_month(self, year: int, month: int):
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""
         return self.get_orders_by_month_range(year, month, year, month)
