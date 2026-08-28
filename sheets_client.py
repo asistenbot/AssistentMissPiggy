@@ -90,6 +90,36 @@ class SheetsClient:
 
         return 0, rasa
 
+    @staticmethod
+    def _safe_text(val):
+        """Paksa value disimpen sebagai TEKS murni di Sheets, BUKAN kena
+        interpretasi jadi rumus -- ini yang bikin No HP Kelvin muncul jadi
+        '#ERROR!' di Sheets (kalau nomornya kebetulan diawali karakter kayak
+        '+' atau '=', Google Sheets ngira itu rumus, bukan teks biasa).
+        Nempelin apostrof di depan kalau perlu -- pola yang sama kayak yang
+        udah dipakai buat Minggu_PO/Tanggal_Kirim, sekarang diperluas buat
+        semua field teks bebas (No HP, Nama, Alamat) yang diisi customer/AI
+        dan berpotensi kebetulan diawali karakter pemicu rumus."""
+        s = str(val) if val is not None else ""
+        if s[:1] in ("=", "+", "-", "@"):
+            return f"'{s}"
+        return s
+
+    @staticmethod
+    def _clean_phone(no_hp):
+        """Rapiin nomor HP -- buang semua spasi/strip/tanda baca, TAPI
+        pertahanin tanda '+' di depan kalau ada (buat nomor luar negeri kayak
+        '+31 6 85118794' -> '+31685118794'). Nomor kosong/'-' dibiarin apa
+        adanya. Dipanggil sekali di sini biar berlaku SAMA buat semua jalur
+        order masuk (web ATAU chat Telegram yang di-AI-parse), nggak perlu
+        dibersihin manual satu-satu di /edit."""
+        s = str(no_hp or "").strip()
+        if not s or s == "-":
+            return s
+        prefix = "+" if s.startswith("+") else ""
+        digits = re.sub(r"[^\d]", "", s)
+        return prefix + digits if digits else s
+
     def add_order_rows(self, order: dict, minggu_po: str, box_groups: list = None):
         """
         order = {
@@ -130,9 +160,9 @@ class SheetsClient:
                 timestamp,
                 f"'{minggu_po}",  # apostrof di depan = paksa Sheets simpen sebagai teks,
                                    # biar nggak otomatis diubah jadi format Date sendiri
-                order["nama"],
-                order["no_hp"],
-                order["alamat"],
+                self._safe_text(order["nama"]),
+                self._safe_text(self._clean_phone(order["no_hp"])),
+                self._safe_text(order["alamat"]),
                 order["metode"],
                 item["kategori"],
                 rasa_cocok,
@@ -151,7 +181,7 @@ class SheetsClient:
                 "Qty": item["qty"],
                 "Harga_Satuan": harga,
                 "Metode": order["metode"],
-                "No_HP": order["no_hp"],
+                "No_HP": self._clean_phone(order["no_hp"]),
                 "Alamat": order["alamat"],
                 "Ongkir": order.get("ongkir", 0),
                 "Tanggal_Kirim": tanggal_kirim,
