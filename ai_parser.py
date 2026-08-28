@@ -45,7 +45,8 @@ apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalan
 "kelengkapan" jadi "lengkap" -- ongkir boleh diisi belakangan.
 
 ATURAN KHUSUS SATUAN "BOX": kadang pesanan ditulis pakai satuan "box"/"dus"/
-"paket" -- ada angka jumlah box duluan, lalu daftar rasa dengan qty PER BOX.
+"paket"/"pax"/"bungkus" (semua ini sinonim, artinya sama) -- ada angka jumlah
+box duluan, lalu daftar rasa dengan qty PER BOX.
 
 Untuk field "items" (dipakai buat hitung harga & simpan ke sistem), qty final
 tiap rasa = qty per box DIKALI jumlah box. Contoh: "22 box isi baso ayam 1,
@@ -84,19 +85,31 @@ Ini daftar produk yang BENERAN ADA di toko (format Kategori: daftar rasa):
 
 ATURAN PENTING soal mencocokkan item pesanan ke daftar di atas:
 1. Cocokkan nama yang disebut customer ke rasa yang PERSIS ada di daftar (boleh
-   toleransi typo/ejaan kecil, misal "meses" cocok ke "Meises").
-2. Kalau nama yang disebut customer BISA COCOK ke lebih dari satu produk di
-   kategori BERBEDA (misal "coklat" ada sebagai rasa di kategori Roti DAN Roti
-   Gandum yang harganya beda, atau "meses" mirip "Mocha Meises" di Roti TAPI
-   juga mirip "Meises" di Donat) -- JANGAN ASAL TEBAK. Tetap masukkan ke items
-   dengan tebakan yang paling masuk akal dari konteks, TAPI set "kelengkapan"
-   jadi "kurang_lengkap" dan di "catatan" sebutkan jelas: item mana yang ambigu
-   dan pilihan-pilihan kategorinya apa aja, biar admin bisa konfirmasi ulang.
+   toleransi typo/ejaan kecil, misal "meses" cocok ke "Meises"). Ini juga
+   berlaku buat SINGKATAN umum, misal "piscok" cocok ke "Pisang Coklat" dan
+   "pisju"/"pisket" cocok ke "Pisang Keju" -- kategorinya (Roti atau Roti
+   Gandum) tetap ditentuin dari konteks sama kayak biasa (lihat aturan 2 di
+   bawah kalau nggak jelas kategorinya yang mana).
+2. Kalau nama yang disebut customer BISA COCOK ke lebih dari satu produk --
+   entah itu di kategori BERBEDA (misal "coklat" ada sebagai rasa di kategori
+   Roti DAN Roti Gandum yang harganya beda), ATAU beberapa VARIAN dalam
+   kategori yang SAMA (misal "Baso" polos tanpa keterangan bisa berarti
+   "Baso (Ayam)" ATAU "Baso (Pork)" yang sama-sama ada di kategori Roti) --
+   JANGAN ASAL TEBAK dan JANGAN PERNAH menggabungkan nama beberapa pilihan
+   jadi satu string aneh (misal JANGAN tulis "Baso (Pork) (Ayam)" atau
+   sejenisnya -- itu BUKAN nama produk yang valid dan tidak akan cocok ke
+   manapun di sistem). Field "rasa" WAJIB selalu berisi PERSIS SATU nama yang
+   ada di daftar produk, tidak boleh gabungan. Kalau ambigu: pilih SATU
+   kandidat yang paling masuk akal dari konteks sebagai tebakan, TAPI set
+   "kelengkapan" jadi "kurang_lengkap" dan di "catatan" sebutkan jelas: item
+   mana yang ambigu dan pilihan-pilihan yang ada apa aja, biar admin bisa
+   konfirmasi ulang ke customer.
 3. Kalau nama yang disebut customer TIDAK ADA sama sekali di daftar produk
    (misal nyebut "Donat Coklat" padahal yang ada cuma "Donat Coklat Celup"),
-   tetap masukkan tebakan yang paling mendekati, TAPI set "kelengkapan" jadi
-   "kurang_lengkap" dan jelaskan di "catatan" bahwa nama itu tidak ada persis
-   di daftar dan apa kemungkinan yang dimaksud.
+   tetap masukkan tebakan yang paling mendekati (SATU nama valid dari daftar,
+   bukan gabungan), TAPI set "kelengkapan" jadi "kurang_lengkap" dan jelaskan
+   di "catatan" bahwa nama itu tidak ada persis di daftar dan apa kemungkinan
+   yang dimaksud.
 4. Field "kategori" dan "rasa" di output HARUS ditulis PERSIS sama seperti di
    daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas -- ini
    berlaku juga untuk "kategori"/"rasa" di dalam "box_groups".
@@ -197,12 +210,20 @@ Kalau instruksinya "hapus X" atau qty item di-set jadi 0, JANGAN masukkan item i
 ke daftar final. Item yang tidak disebut sama sekali dalam instruksi TETAP dipertahankan
 qty aslinya (jangan dihapus kalau tidak diminta).
 
-ATURAN KHUSUS SATUAN "BOX": kalau instruksi menyebutkan pola "X box isi rasa
-qty, rasa qty" (jumlah box duluan, qty PER BOX), kalikan qty tiap rasa dengan
-jumlah box-nya (hitung diam-diam, jangan ditulis prosesnya) sebelum
-ditambahkan/digabungkan ke daftar item final. Kalau jumlah box cuma 1, tidak
-perlu dikali. Kalau ada beberapa kelompok box berbeda, hitung tiap kelompok
-sendiri-sendiri lalu gabungkan rasa yang sama.
+ATURAN KHUSUS SATUAN "BOX": kalau instruksi menyebutkan pola "X box/pax/bungkus
+isi rasa qty, rasa qty" (jumlah box duluan, qty PER BOX -- "box"/"dus"/"paket"/
+"pax"/"bungkus" semua sinonim), kalikan qty tiap rasa dengan jumlah box-nya
+(hitung diam-diam, jangan ditulis prosesnya) sebelum ditambahkan/digabungkan
+ke daftar item final. Kalau jumlah box cuma 1, tidak perlu dikali. Kalau ada
+beberapa kelompok box berbeda, hitung tiap kelompok sendiri-sendiri lalu
+gabungkan rasa yang sama.
+
+PENTING soal nama rasa: field "rasa" WAJIB selalu SATU nama produk yang valid
+(persis sesuai daftar produk), TIDAK BOLEH digabung jadi satu string aneh
+kalau ambigu (misal JANGAN tulis "Baso (Pork) (Ayam)"). Kalau nama yang
+disebut bisa berarti lebih dari satu varian (misal "Baso" polos bisa berarti
+"Baso (Ayam)" atau "Baso (Pork)"), pilih SATU yang paling masuk akal dan
+sebutkan di "catatan" bahwa ini ambigu & perlu dikonfirmasi ke customer.
 """
 
 EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT_BASE
