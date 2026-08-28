@@ -49,6 +49,20 @@ def _is_delivery_metode(metode):
     return "antar" in m or "kirim" in m
 
 
+_PEMISAH_NAMA = re.compile(r"\s*(?:,|&|\bdan\b|\bserta\b)\s*", re.IGNORECASE)
+
+
+def _split_nama_customer(nama_raw: str) -> list:
+    """Pecah teks nama customer yang mungkin berisi BEBERAPA nama sekaligus,
+    dipisah koma/'dan'/'&'/'serta' -- misal 'Franky, Kelvin' atau 'Franky
+    dan Kelvin' jadi ['Franky', 'Kelvin']. Kalau cuma 1 nama (nggak ada
+    pemisah), balikin list isi 1 elemen -- jadi pemanggilnya selalu bisa
+    treat hasilnya sebagai list, nggak perlu cek kondisi terpisah buat kasus
+    1-nama vs banyak-nama."""
+    parts = [p.strip() for p in _PEMISAH_NAMA.split(nama_raw) if p.strip()]
+    return parts or [nama_raw.strip()]
+
+
 def _tujuan_invoice(update):
     """(chat_id, message_thread_id) TUJUAN buat foto invoice customer.
     Ada 2 cara misahin, admin bebas pilih salah satu lewat env var Railway
@@ -404,32 +418,54 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # semula, gabungan SEMUA customer). Fitur ini cuma aktif kalau admin
     # EKSPLISIT minta pakai nama, jadi auto-recap terjadwal (scheduler_jobs.py)
     # nggak kesenggol sama sekali -- itu selalu manggil rekap() tanpa args.
+    #
+    # Boleh SATU nama atau BEBERAPA sekaligus dipisah "dan"/","/"&"/"serta"
+    # (misal '/rekap Franky, Kelvin' atau 'rekap produksi Franky dan Kelvin')
+    # -- daftar nama-nya dipecah lewat _split_nama_customer, tiap nama dicari
+    # order-nya sendiri-sendiri (dengan fallback ke minggu lama juga kalau
+    # perlu), baru digabung jadi 1 rekap.
     nama_customer_rekap = " ".join(context.args) if context.args else None
     if nama_customer_rekap:
+        daftar_nama = _split_nama_customer(nama_customer_rekap)
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
-        orders = sheets.get_pending_orders_by_customer_week(nama_customer_rekap, minggu_po)
-        if not orders:
-            orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama_customer_rekap)
-            if orders_fallback:
-                orders = orders_fallback
-                minggu_po = minggu_fallback
-        text_customer = documents.build_production_recap_customer(nama_customer_rekap, minggu_po, orders)
+
+        if len(daftar_nama) == 1:
+            nama_tunggal = daftar_nama[0]
+            orders = sheets.get_pending_orders_by_customer_week(nama_tunggal, minggu_po)
+            if not orders:
+                orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama_tunggal)
+                if orders_fallback:
+                    orders = orders_fallback
+                    minggu_po = minggu_fallback
+            text_customer = documents.build_production_recap_customer(nama_tunggal, minggu_po, orders)
+            judul_pdf = f"REKAP PRODUKSI — {nama_tunggal}"
+            subtitle_pdf = f"(Tanggal Kirim: {orders[0].get('Tanggal_Kirim') or minggu_po})" if orders else ""
+            filename_pdf = f"Rekap_Produksi_{nama_tunggal}.pdf"
+        else:
+            orders = []
+            for nama_satu in daftar_nama:
+                o = sheets.get_pending_orders_by_customer_week(nama_satu, minggu_po)
+                if not o:
+                    o, _ = sheets.get_orders_by_customer_any_week(nama_satu)
+                orders.extend(o)
+            text_customer = documents.build_production_recap_multi(daftar_nama, orders)
+            judul_pdf = f"REKAP PRODUKSI — {', '.join(daftar_nama)}"
+            subtitle_pdf = ""
+            filename_pdf = f"Rekap_Produksi_{len(daftar_nama)}_customer.pdf"
+
         tujuan_produksi = _tujuan_rekapproduksi(update)
         await _kirim_teks_ke(context, update, tujuan_produksi, text_customer)
 
         if orders:
             try:
-                tanggal_kirim = orders[0].get("Tanggal_Kirim") or minggu_po
                 pdf_buf = production_recap_pdf.generate_production_recap_pdf(
-                    f"REKAP PRODUKSI — {nama_customer_rekap}",
-                    f"(Tanggal Kirim: {tanggal_kirim})",
-                    orders,
+                    judul_pdf, subtitle_pdf, orders,
                 )
                 chat_id_produksi, thread_id_produksi = tujuan_produksi
                 await context.bot.send_document(
                     chat_id=chat_id_produksi, document=pdf_buf,
-                    filename=f"Rekap_Produksi_{nama_customer_rekap}.pdf",
+                    filename=filename_pdf,
                     caption="Versi PDF (siap print)", message_thread_id=thread_id_produksi,
                 )
             except Exception as e:
