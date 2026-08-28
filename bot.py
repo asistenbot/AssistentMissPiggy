@@ -4,6 +4,7 @@ Jalankan: python bot.py
 """
 
 import asyncio
+import json
 import logging
 import datetime
 import re
@@ -480,7 +481,15 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="Markdown")
         return
 
-    img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
+    box_groups = None
+    box_info_raw = orders[0].get("Box_Info")
+    if box_info_raw:
+        try:
+            box_groups = json.loads(box_info_raw)
+        except (json.JSONDecodeError, TypeError):
+            box_groups = None
+
+    img = receipt.generate_surat_jalan_image(nama, minggu_po, orders, box_groups=box_groups)
     await _kirim_foto_ke(
         context, update, _tujuan_suratjalan(update), img,
         "Surat jalan (siap print) — tap gambar → Share → app printer",
@@ -1163,7 +1172,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         orders = await asyncio.wait_for(
-            asyncio.to_thread(sheets.add_order_rows, order, minggu_po), timeout=30
+            asyncio.to_thread(sheets.add_order_rows, order, minggu_po, parsed.get("box_groups")), timeout=30
         )
     except asyncio.TimeoutError:
         await query.message.reply_text(
@@ -1419,6 +1428,8 @@ def _parse_tanggal_kirim(text):
     tz = date_helpers.get_timezone()
     today = datetime.datetime.now(tz).date()
 
+    if "hari ini" in lower or lower.strip() in ("sekarang", "hari ini juga"):
+        return today.strftime("%Y-%m-%d")
     if "besok" in lower:
         return (today + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
     if "lusa" in lower:
@@ -1495,7 +1506,7 @@ def _try_parse_field_correction(instruction):
     # TERAKHIR (semua field lain udah dicoba duluan) biar "besok" yang
     # nyempil di kalimat lain nggak salah kesedot jadi koreksi tanggal.
     if ("tanggal" in lower and "kirim" in lower) or "tgl kirim" in lower \
-            or "besok" in lower or "lusa" in lower:
+            or "besok" in lower or "lusa" in lower or "hari ini" in lower:
         tanggal = _parse_tanggal_kirim(text)
         if tanggal:
             return "tanggal_kirim", tanggal
