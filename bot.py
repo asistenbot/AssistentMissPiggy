@@ -458,13 +458,23 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
+    catatan_minggu_lama = None
+    if not orders:
+        orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+        if orders_fallback:
+            orders = orders_fallback
+            minggu_po = minggu_fallback
+            catatan_minggu_lama = minggu_fallback
     if not orders:
         text = documents.build_invoice(nama, minggu_po, orders)
         await update.message.reply_text(text, parse_mode="Markdown")
         return
 
     img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
-    await _kirim_foto_ke(context, update, _tujuan_invoice(update), img, "Invoice (siap kirim ke customer)")
+    caption = "Invoice (siap kirim ke customer)"
+    if catatan_minggu_lama:
+        caption += f"\n⚠️ Order dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang)."
+    await _kirim_foto_ke(context, update, _tujuan_invoice(update), img, caption)
 
 
 @owner_only
@@ -476,6 +486,13 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
+    catatan_minggu_lama = None
+    if not orders:
+        orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+        if orders_fallback:
+            orders = orders_fallback
+            minggu_po = minggu_fallback
+            catatan_minggu_lama = minggu_fallback
     if not orders:
         text = documents.build_surat_jalan(nama, minggu_po, orders)
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -490,9 +507,11 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             box_groups = None
 
     img = receipt.generate_surat_jalan_image(nama, minggu_po, orders, box_groups=box_groups)
+    caption = "Surat jalan (siap print) — tap gambar → Share → app printer"
+    if catatan_minggu_lama:
+        caption += f"\n⚠️ Order dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang)."
     await _kirim_foto_ke(
-        context, update, _tujuan_suratjalan(update), img,
-        "Surat jalan (siap print) — tap gambar → Share → app printer",
+        context, update, _tujuan_suratjalan(update), img, caption,
     )
 
 
@@ -838,8 +857,16 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minggu_po = date_helpers.current_po_week_thursday()
     orders = sheets.get_orders_by_customer_week(nama, minggu_po)
 
+    catatan_minggu_lama = None
     if not orders:
-        await update.message.reply_text(f"Nggak ada order atas nama {nama} untuk minggu ini.")
+        orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+        if orders_fallback:
+            orders = orders_fallback
+            minggu_po = minggu_fallback
+            catatan_minggu_lama = minggu_fallback
+
+    if not orders:
+        await update.message.reply_text(f"Nggak ada order atas nama {nama} sama sekali.")
         return
 
     item_list_text = "\n".join(f"  - {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}" for o in orders)
@@ -858,8 +885,12 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
     }
 
+    peringatan_minggu = (
+        f"⚠️ Order ini dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang) -- "
+        f"dilanjut edit di minggu itu ya.\n\n" if catatan_minggu_lama else ""
+    )
     await update.message.reply_text(
-        f"*Order {nama} saat ini:*\n{item_list_text}\n\n"
+        f"{peringatan_minggu}*Order {nama} saat ini:*\n{item_list_text}\n\n"
         f"Ketik perubahannya (bebas), contoh:\n"
         f"- Item: 'tambah donat gula 5, ham cheese jadi 20 pcs'\n"
         f"- No HP: 'no hp nya salah, benerin jadi 081234567890'\n"
@@ -981,9 +1012,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
         orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+        if not orders:
+            orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+            if orders_fallback:
+                orders = orders_fallback
+                minggu_po = minggu_fallback
 
         if not orders:
-            await update.message.reply_text(f"Nggak ada order atas nama {nama} untuk minggu ini.")
+            await update.message.reply_text(f"Nggak ada order atas nama {nama} sama sekali.")
             return
 
         context.user_data["editing_order"] = {
