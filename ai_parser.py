@@ -28,7 +28,7 @@ Struktur JSON:
   "no_hp": "nomor hp atau null",
   "alamat": "alamat atau null",
   "metode": "Kirim" atau "Ambil" atau null kalau tidak jelas,
-  "items": [
+  "items_non_box": [
     {"kategori": "...", "rasa": "...", "qty": 0}
   ],
   "box_groups": [
@@ -48,43 +48,41 @@ ATURAN KHUSUS SATUAN "BOX": kadang pesanan ditulis pakai satuan "box"/"dus"/
 "paket"/"pax"/"bungkus" (semua ini sinonim, artinya sama) -- ada angka jumlah
 box duluan, lalu daftar rasa dengan qty PER BOX.
 
-Untuk field "items" (dipakai buat hitung harga & simpan ke sistem), qty final
-tiap rasa = qty per box DIKALI jumlah box. Contoh: "22 box isi baso ayam 1,
-piscok 1, ham cheese 3" -> qty final di "items": baso ayam 22, piscok 22, ham
-cheese 66 (BUKAN 1, 1, 3). Kalau ada beberapa kelompok box berbeda dalam satu
-pesan, hitung tiap kelompok sendiri-sendiri dulu, baru JUMLAHKAN rasa yang
-sama jadi satu baris di "items". Kalau qty ditulis TANPA keterangan box sama
-sekali, itu sudah qty final apa adanya, masukkan langsung ke "items" tanpa
-dikalikan, dan JANGAN dimasukkan ke "box_groups" (biarkan "box_groups" cuma
-berisi kelompok yang beneran pakai satuan box).
+PENTING BANGET -- JANGAN NGITUNG/NGALIKAN/NJUMLAHIN APAPUN SENDIRI. Tugasmu
+CUMA laporin data MENTAH apa adanya ke 2 field terpisah, biar perkalian &
+penjumlahannya dihitung SISTEM (bukan kamu) -- ini SENGAJA biar nggak ada
+salah hitung:
 
-Untuk field "box_groups" (dipakai buat cetak rincian ke invoice/surat jalan,
-BUKAN untuk hitung harga): tulis ULANG setiap kelompok box, dipecah per
-kelompok SATU per SATU (jangan digabung/dijumlahkan lintas kelompok di sini,
-biarkan qty_per_box tetap qty ASLI per box, JANGAN dikalikan jumlah box).
-Kalau order ini sama sekali tidak pakai satuan box, "box_groups" harus
-berupa array kosong [] (bukan null).
+1. "items_non_box" -- item yang ditulis TANPA keterangan box/dus/paket/pax/
+   bungkus sama sekali (qty-nya udah final apa adanya, nggak perlu dikali).
+   Contoh: "roti coklat 5" (tanpa box) -> masuk sini apa adanya: qty 5.
 
-PENTING: field "rasa" di dalam "box_groups" HARUS ikutin ATURAN YANG SAMA
-PERSIS kayak field "rasa" di "items" (lihat aturan pencocokan produk di
-bawah) -- yaitu WAJIB SATU nama produk yang valid dari daftar, TIDAK BOLEH
-gabungan/kombinasi beberapa nama (misal JANGAN tulis "Baso (Pork) (Ayam)").
-Kalau item itu ambigu (misal "baso" polos bisa "Baso (Ayam)" atau "Baso
-(Pork)"), pakai nama yang SAMA PERSIS dengan tebakan yang udah kamu pilih di
-"items" buat item itu -- JANGAN nulis ulang teks mentah dari customer di sini,
-JANGAN improvisasi nama baru yang beda dari yang udah dipakai di "items".
+2. "box_groups" -- SEMUA kelompok yang pakai satuan box, ditulis APA ADANYA
+   PERSIS kayak yang disebutkan customer, SATU per SATU per kelompok. qty_per_box
+   itu angka ASLI per box (JANGAN dikalikan jumlah box, JANGAN dijumlahkan
+   lintas kelompok, JANGAN diapa-apain -- tulis mentah aja). Kalau ada 3
+   kelompok box yang beda, hasilnya 3 entry terpisah di "box_groups", titik.
+   Kalau order ini sama sekali tidak pakai satuan box, "box_groups" harus
+   berupa array kosong [] (bukan null).
 
-Contoh lengkap: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham
-cheese 3" dan "3 box isi charsiu 2, baso ayam 2" dan juga tambahan "roti
-coklat 5" (tanpa box), maka:
-- "items" (final, sudah dikali+dijumlah): baso ayam 22+6=28, piscok 22, ham
-  cheese 66, charsiu 6, roti coklat 5 (roti coklat TIDAK dikali karena tanpa
-  keterangan box).
+Field "rasa" di "items_non_box" MAUPUN di dalam "box_groups" WAJIB SATU nama
+produk yang valid dari daftar (lihat aturan pencocokan produk di bawah),
+TIDAK BOLEH gabungan/kombinasi beberapa nama (misal JANGAN tulis "Baso
+(Pork) (Ayam)"). Kalau ambigu, pilih SATU tebakan paling masuk akal dan
+PAKAI NAMA YANG SAMA itu di semua tempat item itu muncul (baik di
+items_non_box maupun di semua box_groups yang menyebutnya) -- jangan
+improvisasi nama beda-beda di tempat berbeda buat item yang sama.
+
+Contoh: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham cheese
+3" dan "3 box isi charsiu 2, baso ayam 2" dan juga tambahan "roti coklat 5"
+(tanpa box), maka:
+- "items_non_box": [{"kategori":"Roti","rasa":"Coklat","qty":5}]
 - "box_groups": [
     {"jumlah_box": 22, "items": [{"kategori":"Roti","rasa":"Baso ( Ayam )","qty_per_box":1}, {"kategori":"Roti","rasa":"Piscok","qty_per_box":1}, {"kategori":"Roti","rasa":"Ham Cheese","qty_per_box":3}]},
     {"jumlah_box": 3, "items": [{"kategori":"Roti","rasa":"Charsiu","qty_per_box":2}, {"kategori":"Roti","rasa":"Baso ( Ayam )","qty_per_box":2}]}
   ]
-  (item "roti coklat 5" TIDAK masuk box_groups karena bukan bagian box manapun)
+(Sistem yang bakal ngitung otomatis: baso ayam total 22+6=28, piscok 22, ham
+cheese 66, charsiu 6, coklat 5 -- kamu TIDAK perlu ngitung ini sama sekali.)
 """
 
 PARSE_CATALOG_INSTRUCTION = """
@@ -173,6 +171,58 @@ def _empty_parse_result(catatan):
         "nama": None, "no_hp": None, "alamat": None, "metode": None,
         "items": [], "box_groups": [], "catatan": catatan, "kelengkapan": "kurang_lengkap",
     }
+
+
+def _compute_final_items(items_non_box, box_groups):
+    """Hitung field "items" FINAL (qty per box dikali jumlah box, digabung
+    lintas kelompok) di sini, PAKAI PYTHON -- BUKAN diserahkan ke AI kayak
+    sebelumnya. Ini yang bikin qty selalu akurat 100%, soalnya perkalian &
+    penjumlahan biasa nggak pernah salah kalau dihitung kode, beda sama AI
+    yang kadang keliru pas harus mikirin banyak hal sekaligus (pernah
+    kejadian: 3 kelompok box, salah satu rasa muncul di 3 kelompok, hasil
+    akhirnya AI keliru jumlahin -- padahal breakdown per kelompoknya sendiri
+    udah bener di penjelasan dia).
+
+    items_non_box = [{"kategori":.., "rasa":.., "qty":..}, ...] (qty final apa adanya)
+    box_groups = [{"jumlah_box":.., "items":[{"kategori":.., "rasa":.., "qty_per_box":..}]}, ...]
+
+    Return: list [{"kategori":.., "rasa":.., "qty":..}, ...] siap dipakai
+    sama alur yang udah ada (preview, simpan ke Sheets, dst)."""
+    totals = {}  # {(kategori, rasa): qty}
+
+    for it in (items_non_box or []):
+        kategori = it.get("kategori")
+        rasa = it.get("rasa")
+        if not kategori or not rasa:
+            continue
+        try:
+            qty = int(it.get("qty") or 0)
+        except (ValueError, TypeError):
+            qty = 0
+        key = (kategori, rasa)
+        totals[key] = totals.get(key, 0) + qty
+
+    for grp in (box_groups or []):
+        try:
+            jumlah_box = int(grp.get("jumlah_box") or 0)
+        except (ValueError, TypeError):
+            jumlah_box = 0
+        for it in grp.get("items", []):
+            kategori = it.get("kategori")
+            rasa = it.get("rasa")
+            if not kategori or not rasa:
+                continue
+            try:
+                qty_per_box = int(it.get("qty_per_box") or 0)
+            except (ValueError, TypeError):
+                qty_per_box = 0
+            key = (kategori, rasa)
+            totals[key] = totals.get(key, 0) + (qty_per_box * jumlah_box)
+
+    return [
+        {"kategori": kategori, "rasa": rasa, "qty": qty}
+        for (kategori, rasa), qty in totals.items()
+    ]
 
 
 def _safe_json_loads(raw_text):
@@ -298,6 +348,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     if result is None:
         return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
+    result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
     return result
 
 
@@ -353,6 +404,7 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
     if result is None:
         return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
+    result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
     return result
 
 
