@@ -237,13 +237,18 @@ JSON valid tanpa teks lain, tanpa markdown code fence:
 {{
   "intent": salah satu dari "rekap_produksi", "laporan_bulanan", "pricelist", "edit_order", "invoice", "surat_jalan", "order_baru",
   "nama_customer": "nama customer yang disebut (kalau ada), atau null",
+  "tanggal_mulai_rekap": "format YYYY-MM-DD (hitung dari hari ini {today} kalau istilahnya relatif kayak 'hari ini'/'besok'/'lusa') KALAU intent-nya rekap_produksi DAN admin minta rekap untuk TANGGAL/RENTANG TANGGAL tertentu (misal 'rekap produksi besok', 'rekap produksi hari ini', 'rekap produksi sampe besok', 'rekap produksi hari ini dan besok') -- ini tanggal AWAL rentangnya (atau tanggal tunggal kalau cuma 1 hari). Kalau permintaannya rekap biasa TANPA tanggal spesifik, atau rekap by NAMA CUSTOMER, biarkan null.",
+  "tanggal_akhir_rekap": "format YYYY-MM-DD, isi HANYA kalau ada RENTANG tanggal (misal 'sampe besok' dari hari ini berarti tanggal_akhir_rekap = besok; 'hari ini dan besok' juga rentang 2 hari). Kalau cuma 1 hari tunggal, biarkan null (tanggal_mulai_rekap doang yang dipakai).",
   "bulan_mulai": "format YYYY-MM (pakai tahun {today} kalau nggak disebut eksplisit) kalau admin minta laporan bulanan buat 1 bulan tertentu ATAU ini bulan AWAL dari sebuah rentang (misal 'dari Januari sampai Agustus' -> bulan_mulai Januari), atau null kalau nggak disebut sama sekali / minta bulan ini",
   "bulan_akhir": "format YYYY-MM, isi HANYA kalau admin eksplisit minta RENTANG beberapa bulan (misal 'Januari sampai Agustus', 'Jan - Agustus', 'dari bulan 1 ke bulan 8') -- isi bulan AKHIR rentangnya. Kalau cuma minta 1 bulan doang (bukan rentang), biarkan null.",
   "instruksi_edit": "kalau intent-nya edit_order, tulis ulang instruksi perubahannya (item apa ditambah/dikurangi/dihapus dan jumlahnya), atau null"
 }}
 
 Panduan milih intent:
-- "minta rekap produksi", "rekap dong", "mau liat rekap", "udah berapa pesanan masuk" -> rekap_produksi (kalau ADA nama customer tertentu disebut bareng permintaan ini, misal "minta rekap produksi Ci Meyvany" atau "rekap produksi buat Budi", isi juga nama_customer dengan nama itu -- kalau nggak disebut nama, biarkan nama_customer null biar rekapnya tetap buat SEMUA customer minggu ini seperti biasa)
+- "minta rekap produksi", "rekap dong", "mau liat rekap", "udah berapa pesanan masuk" -> rekap_produksi. Ada 3 variasi:
+  1. Kalau ADA tanggal/rentang tanggal spesifik disebut (misal "rekap produksi besok", "rekap produksi sampe besok", "rekap produksi hari ini dan besok", "rekap produksi tanggal 29") -> isi tanggal_mulai_rekap (dan tanggal_akhir_rekap kalau rentang), JANGAN isi nama_customer.
+  2. Kalau ADA nama customer tertentu disebut (misal "minta rekap produksi Ci Meyvany") -> isi nama_customer, JANGAN isi tanggal_mulai_rekap.
+  3. Kalau nggak disebut tanggal maupun nama -> biarkan nama_customer dan tanggal_mulai_rekap dua-duanya null, rekapnya jadi gabungan minggu aktif seperti biasa.
 - "laporan bulanan", "rekap bulanan", "mau tau total bulan ini", "berapa yang harus dibayar ke supplier" -> laporan_bulanan (kalau admin sebut RENTANG bulan, misal "laporan bulanan dari Januari sampai Agustus", "laporan bulanan Jan - Agustus", "minta laporan bulan 1-3", "laporan bulan 1 sampai 3", isi bulan_mulai DAN bulan_akhir sesuai rentangnya -- ANGKA bulan (1=Januari, 2=Februari, dst sampai 12=Desember) harus dikonversi ke nomor bulan yang sama, cuma beda cara nulis; kalau cuma 1 bulan/nggak disebut, cukup isi bulan_mulai. Kalau TAHUN nggak disebut sama sekali (baik nama bulan maupun angka), pakai tahun {today} secara default -- JANGAN nebak tahun lain.)
 - "harga berapa", "price list", "liat catalog/katalog", "kirim daftar harga" -> pricelist
 - Kalau nyebut nama customer TERTENTU dan maksudnya ubah pesanan yang SUDAH ADA
@@ -382,7 +387,11 @@ def classify_intent(raw_text: str) -> dict:
     Return dict dengan key: intent, nama_customer, bulan, instruksi_edit.
     Kalau gagal/nggak yakin, default ke 'order_baru' (paling aman).
     """
-    default = {"intent": "order_baru", "nama_customer": None, "bulan_mulai": None, "bulan_akhir": None, "instruksi_edit": None}
+    default = {
+        "intent": "order_baru", "nama_customer": None,
+        "tanggal_mulai_rekap": None, "tanggal_akhir_rekap": None,
+        "bulan_mulai": None, "bulan_akhir": None, "instruksi_edit": None,
+    }
 
     try:
         tz = date_helpers.get_timezone()
