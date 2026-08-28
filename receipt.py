@@ -111,27 +111,25 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     lines.append(("-" * 22, FONT_SMALL, "center", 0))
     lines.append(("PESANAN:", FONT_BOLD, "left", 0))
 
-    total_qty = 0
-    for kategori, items in _group_by_category(orders):
-        lines.append((f"» {kategori}", FONT_HEADER, "left", 0))
-        for o in items:
-            qty = int(o["Qty"])
-            total_qty += qty
-            lines.append((f"{o['Rasa']}  x{qty}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
+    total_qty = sum(int(o["Qty"]) for o in orders)
 
-    # ---- Rincian Box (opsional, cuma muncul kalau order-nya pakai satuan box) ----
-    # Ditaruh SETELAH daftar per-kategori (yang dipakai buat packing/hitung
-    # per rasa) tapi SEBELUM total -- biar jadi referensi tambahan buat
-    # ngecek pembagian per box aslinya, tanpa ganggu alur baca utama.
     if box_groups:
-        lines.append(("-" * 22, FONT_SMALL, "center", 0))
-        lines.append(("RINCIAN BOX:", FONT_BOLD, "left", 0))
+        # Order ini pakai satuan box -- langsung tampilin rincian per box aja
+        # (BUKAN daftar per-kategori/rasa biasa), soalnya buat packing lebih
+        # jelas ngikutin pembagian box aslinya drpd total per rasa yang udah
+        # digabung. Total per rasa tetep bisa dicek di invoice kalau perlu.
         for grp in box_groups:
             jumlah = grp.get("jumlah_box", "?")
             desc = ", ".join(
                 f"{i.get('rasa', '?')} x{i.get('qty_per_box', '?')}" for i in grp.get("items", [])
             )
             lines.append((f"{jumlah} box: {desc}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
+    else:
+        for kategori, items in _group_by_category(orders):
+            lines.append((f"» {kategori}", FONT_HEADER, "left", 0))
+            for o in items:
+                qty = int(o["Qty"])
+                lines.append((f"{o['Rasa']}  x{qty}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
 
     lines.append(("-" * 22, FONT_SMALL, "center", 0))
     lines.append((f"Total item: {total_qty} pcs", FONT_BOLD, "left", 0))
