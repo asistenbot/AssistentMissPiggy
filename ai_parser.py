@@ -59,11 +59,20 @@ dikalikan, dan JANGAN dimasukkan ke "box_groups" (biarkan "box_groups" cuma
 berisi kelompok yang beneran pakai satuan box).
 
 Untuk field "box_groups" (dipakai buat cetak rincian ke invoice/surat jalan,
-BUKAN untuk hitung harga): tulis ULANG setiap kelompok box PERSIS seperti asal
-disebutkan customer, SATU per SATU (jangan digabung/dijumlahkan di sini,
-biarkan qty_per_box tetap qty ASLI per box, JANGAN dikalikan). Kalau order ini
-sama sekali tidak pakai satuan box, "box_groups" harus berupa array kosong []
-(bukan null).
+BUKAN untuk hitung harga): tulis ULANG setiap kelompok box, dipecah per
+kelompok SATU per SATU (jangan digabung/dijumlahkan lintas kelompok di sini,
+biarkan qty_per_box tetap qty ASLI per box, JANGAN dikalikan jumlah box).
+Kalau order ini sama sekali tidak pakai satuan box, "box_groups" harus
+berupa array kosong [] (bukan null).
+
+PENTING: field "rasa" di dalam "box_groups" HARUS ikutin ATURAN YANG SAMA
+PERSIS kayak field "rasa" di "items" (lihat aturan pencocokan produk di
+bawah) -- yaitu WAJIB SATU nama produk yang valid dari daftar, TIDAK BOLEH
+gabungan/kombinasi beberapa nama (misal JANGAN tulis "Baso (Pork) (Ayam)").
+Kalau item itu ambigu (misal "baso" polos bisa "Baso (Ayam)" atau "Baso
+(Pork)"), pakai nama yang SAMA PERSIS dengan tebakan yang udah kamu pilih di
+"items" buat item itu -- JANGAN nulis ulang teks mentah dari customer di sini,
+JANGAN improvisasi nama baru yang beda dari yang udah dipakai di "items".
 
 Contoh lengkap: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham
 cheese 3" dan "3 box isi charsiu 2, baso ayam 2" dan juga tambahan "roti
