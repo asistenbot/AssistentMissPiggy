@@ -90,13 +90,21 @@ class SheetsClient:
 
         return 0, rasa
 
-    def add_order_rows(self, order: dict, minggu_po: str):
+    def add_order_rows(self, order: dict, minggu_po: str, box_groups: list = None):
         """
         order = {
             "nama": str, "no_hp": str, "alamat": str, "metode": "Kirim"/"Ambil",
             "items": [{"kategori": str, "rasa": str, "qty": int}, ...],
             "ongkir": int
         }
+        box_groups = rincian pembagian per box (opsional) dari hasil parse AI,
+        misal [{"jumlah_box": 22, "items": [{"kategori":.., "rasa":.., "qty_per_box":..}]}].
+        Disimpen sebagai JSON di kolom Box_Info (SAMA di semua baris item order
+        ini, kayak pola Ongkir/Tanggal_Kirim yang juga diulang di tiap baris) --
+        biar kalau surat jalan/invoice di-generate ULANG belakangan (/suratjalan,
+        /invoice), rincian box-nya masih bisa dibaca lagi, nggak ilang kayak
+        sebelumnya (yang cuma numpang lewat sekali doang pas konfirmasi).
+
         Satu order bisa berisi banyak item -> tiap item jadi 1 baris,
         biar gampang di-rekap per rasa.
 
@@ -112,6 +120,7 @@ class SheetsClient:
         # minggu berjalan), jadi perilaku lama nggak berubah kalau fitur ini
         # nggak dipakai sama sekali.
         tanggal_kirim = order.get("tanggal_kirim") or minggu_po
+        box_info_json = json.dumps(box_groups, ensure_ascii=False) if box_groups else ""
         rows = []
         order_records = []
         for item in order["items"]:
@@ -134,6 +143,7 @@ class SheetsClient:
                 "Pending",
                 f"'{tanggal_kirim}",  # kolom BARU, sengaja PALING BELAKANG biar
                                        # nggak nggeser kolom lama yang udah ada
+                box_info_json,  # kolom BARU lagi, paling belakang setelah Tanggal_Kirim
             ])
             order_records.append({
                 "Kategori": item["kategori"],
@@ -145,6 +155,7 @@ class SheetsClient:
                 "Alamat": order["alamat"],
                 "Ongkir": order.get("ongkir", 0),
                 "Tanggal_Kirim": tanggal_kirim,
+                "Box_Info": box_info_json,
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
