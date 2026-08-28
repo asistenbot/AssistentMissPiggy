@@ -261,16 +261,22 @@ class SheetsClient:
 
     def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
         """
-        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 06:00 WIB PADA
+        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 08:00 WIB PADA
         HARI ITU SENDIRI otomatis dianggap udah kelar diproduksi & dikirim --
         Status-nya diubah dari 'Pending' jadi 'Terkirim'. Jadi order buat
-        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 06:00 pagi juga -- nggak
+        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 08:00 pagi juga -- nggak
         perlu nunggu lewat ganti hari.
+
+        Cutoff-nya sengaja jam 08:00 (bukan lebih pagi) biar ada waktu buat
+        order yang masuk tengah malam (misal jam 00:00) tetap kejaring di
+        rekap produksi paginya sebelum ke-flip -- kalau cutoff-nya lebih
+        mepet ke jam 00:00, order dini hari kayak gitu bisa keburu ke-flip
+        duluan sebelum admin sempet liat & produksi.
 
         Dipanggil otomatis dari get_pending_orders_by_week() tiap kali ada
         yang minta rekap produksi (jadi keupdate begitu direquest kapan aja
-        abis jam 6 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
-        harian jam 06:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
+        abis jam 8 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
+        harian jam 08:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
         keupdate walau nggak ada satupun yang minta rekap hari itu -- itu
         belum kepasang di sini karena scheduler_jobs.py belum ada.
 
@@ -299,9 +305,9 @@ class SheetsClient:
 
         tz = date_helpers.get_timezone()
         now = now or datetime.datetime.now(tz)
-        cutoff_hari_ini = now.replace(hour=6, minute=0, second=0, microsecond=0)
-        # Sebelum jam 6 pagi, "batas hari" efektifnya masih KEMARIN -- order
-        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 6 pagi
+        cutoff_hari_ini = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        # Sebelum jam 8 pagi, "batas hari" efektifnya masih KEMARIN -- order
+        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 8 pagi
         # bener-bener lewat.
         boundary = now.date() if now >= cutoff_hari_ini else (now - datetime.timedelta(days=1)).date()
 
@@ -340,7 +346,7 @@ class SheetsClient:
         Tandain SEMUA baris order milik nama_customer untuk minggu_po
         tertentu yang masih Status 'Pending' jadi 'Terkirim' -- dipakai buat
         /kirim, jaring pengaman MANUAL kalau admin mau langsung nandain SAAT
-        ITU JUGA (nggak nunggu cutoff otomatis jam 06:00 WIB di
+        ITU JUGA (nggak nunggu cutoff otomatis jam 08:00 WIB di
         rollover_delivered_orders).
 
         Return: jumlah baris yang barusan diubah.
