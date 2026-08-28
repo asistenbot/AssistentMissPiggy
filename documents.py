@@ -161,6 +161,47 @@ def build_production_recap_customer(nama_customer: str, minggu_po: str, orders: 
     return "\n".join(lines)
 
 
+def build_production_recap_tanggal(label: str, orders: list) -> str:
+    """Rekap produksi berdasarkan RENTANG TANGGAL KIRIM (BUKAN Minggu_PO) --
+    gabungan SEMUA customer yang tanggal kirimnya jatuh di rentang itu,
+    nggak peduli Minggu_PO-nya beda-beda. Dipanggil manual kalau admin minta
+    tanggal spesifik (misal '/rekap 2026-08-29' atau bahasa natural 'rekap
+    produksi besok'/'rekap produksi sampe besok').
+
+    Berguna khusus buat kasus tanggal kirim custom (besok/lusa) yang bikin
+    Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu nggak nongol
+    di rekap mingguan biasa (build_production_recap) ataupun rekap per-nama
+    (build_production_recap_customer) kalau nama-nya nggak disebut satu-satu,
+    tapi tetep kejaring di sini asal Tanggal_Kirim-nya masuk rentang.
+
+    label: teks buat judul, misal '2026-08-29' atau '2026-08-28 s/d 2026-08-29'."""
+    if not orders:
+        return f"Belum ada order untuk tanggal {label}."
+
+    recap = {}  # {(kategori, rasa): total_qty}
+    for o in orders:
+        key = (o["Kategori"], o["Rasa"])
+        recap[key] = recap.get(key, 0) + int(o["Qty"])
+
+    by_category = {}
+    for (kategori, rasa), qty in recap.items():
+        by_category.setdefault(kategori, []).append((rasa, qty))
+
+    lines = [f"*REKAP PRODUKSI — {label}*"]
+    grand_total = 0
+    for kategori, items in by_category.items():
+        lines.append(f"\n*{kategori}*")
+        subtotal_kategori = 0
+        for rasa, qty in sorted(items, key=lambda x: -x[1]):
+            lines.append(f"  {rasa}: {qty} pcs")
+            subtotal_kategori += qty
+        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
+        grand_total += subtotal_kategori
+
+    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
+    return "\n".join(lines)
+
+
 def _group_per_customer(orders: list) -> dict:
     """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
     diringkas jadi boolean 'ini pengiriman apa bukan' lewat
