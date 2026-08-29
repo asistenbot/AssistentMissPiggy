@@ -206,13 +206,16 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     month_results, grand_total_qty, grand_total_bayar = documents.aggregate_dough_by_month(orders, dough_price_map)
     if month_results:
-        pdf_buf = monthly_report_pdf.generate_monthly_report_pdf(
-            periode_label, month_results, grand_total_qty, grand_total_bayar
-        )
-        filename = f"Laporan_Bulanan_{year_start}{month_start:02d}-{year_end}{month_end:02d}.pdf"
-        await update.message.reply_document(
-            document=pdf_buf, filename=filename, caption="Versi PDF (siap print A4)"
-        )
+        try:
+            pdf_buf = monthly_report_pdf.generate_monthly_report_pdf(
+                periode_label, month_results, grand_total_qty, grand_total_bayar
+            )
+            filename = f"Laporan_Bulanan_{year_start}{month_start:02d}-{year_end}{month_end:02d}.pdf"
+            await update.message.reply_document(
+                document=pdf_buf, filename=filename, caption="Versi PDF (siap print A4)"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Gagal bikin file PDF-nya: {e}\nVersi teks di atas tetap valid kok.")
 
 
 @owner_only
