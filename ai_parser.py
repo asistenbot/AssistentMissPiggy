@@ -1,435 +1,477 @@
 """
-Parsing chat/foto order customer (dan input PO ke supplier) jadi data
-terstruktur, pakai Claude. Hasil parse-nya SELALU ditunjukin ke admin dulu
-buat dikonfirmasi sebelum disimpen ke Sheets -- supaya kalau AI salah baca,
-gampang dikoreksi (lihat handle_confirm / handle_pending_correction di
-bot.py).
+Pakai Claude buat ubah chat customer yang berantakan jadi data order terstruktur.
 """
 
-import base64
 import json
-import re
-
+import base64
+import datetime
 import anthropic
 
 import config
+import date_helpers
 
-_client = None
+client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=30.0)
+
+PARSE_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
+Tugasmu HANYA satu: ubah chat customer (yang sering berantakan, tidak lengkap,
+atau dicampur basa-basi) menjadi data order terstruktur dalam format JSON.
+
+Balas HANYA dengan JSON valid, TANPA teks lain apapun -- tanpa penjelasan,
+tanpa perhitungan yang ditulis keluar, tanpa markdown code fence. Kalau perlu
+menghitung sesuatu (misal perkalian box, lihat aturan di bawah), lakukan
+perhitungan itu di dalam kepalamu saja dan langsung tulis HASIL AKHIRNYA ke
+field yang sesuai -- JANGAN tulis proses hitungnya sebagai teks di luar JSON.
+
+Struktur JSON:
+{
+  "nama": "nama customer atau null kalau tidak disebut",
+  "no_hp": "nomor hp atau null",
+  "alamat": "alamat atau null",
+  "metode": "Kirim" atau "Ambil" atau null kalau tidak jelas,
+  "items_non_box": [
+    {"kategori": "...", "rasa": "...", "qty": 0}
+  ],
+  "box_groups": [
+    {"jumlah_box": 0, "items": [{"kategori": "...", "rasa": "...", "qty_per_box": 0}]}
+  ],
+  "ongkir": angka ongkir dalam rupiah kalau admin menyebutkannya (misal "ongkir 15rb" jadi 15000), atau null kalau tidak disebutkan,
+  "catatan": "hal lain yang perlu diperhatikan admin, atau null",
+  "kelengkapan": "lengkap" atau "kurang_lengkap"
+}
+
+Kalau ada informasi penting yang tidak disebutkan customer (nama, alamat kalau kirim,
+no hp, atau item pesanan kosong), set "kelengkapan" jadi "kurang_lengkap" dan sebutkan
+apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalangi
+"kelengkapan" jadi "lengkap" -- ongkir boleh diisi belakangan.
+
+ATURAN KHUSUS SATUAN "BOX": kadang pesanan ditulis pakai satuan "box"/"dus"/
+"paket"/"pax"/"bungkus" (semua ini sinonim, artinya sama) -- ada angka jumlah
+box duluan, lalu daftar rasa dengan qty PER BOX.
+
+PENTING BANGET -- JANGAN NGITUNG/NGALIKAN/NJUMLAHIN APAPUN SENDIRI. Tugasmu
+CUMA laporin data MENTAH apa adanya ke 2 field terpisah, biar perkalian &
+penjumlahannya dihitung SISTEM (bukan kamu) -- ini SENGAJA biar nggak ada
+salah hitung:
+
+1. "items_non_box" -- item yang ditulis TANPA keterangan box/dus/paket/pax/
+   bungkus sama sekali (qty-nya udah final apa adanya, nggak perlu dikali).
+   Contoh: "roti coklat 5" (tanpa box) -> masuk sini apa adanya: qty 5.
+
+2. "box_groups" -- SEMUA kelompok yang pakai satuan box, ditulis APA ADANYA
+   PERSIS kayak yang disebutkan customer, SATU per SATU per kelompok. qty_per_box
+   itu angka ASLI per box (JANGAN dikalikan jumlah box, JANGAN dijumlahkan
+   lintas kelompok, JANGAN diapa-apain -- tulis mentah aja). Kalau ada 3
+   kelompok box yang beda, hasilnya 3 entry terpisah di "box_groups", titik.
+   Kalau order ini sama sekali tidak pakai satuan box, "box_groups" harus
+   berupa array kosong [] (bukan null).
+
+Field "rasa" di "items_non_box" MAUPUN di dalam "box_groups" WAJIB SATU nama
+produk yang valid dari daftar (lihat aturan pencocokan produk di bawah),
+TIDAK BOLEH gabungan/kombinasi beberapa nama (misal JANGAN tulis "Baso
+(Pork) (Ayam)"). Kalau ambigu, pilih SATU tebakan paling masuk akal dan
+PAKAI NAMA YANG SAMA itu di semua tempat item itu muncul (baik di
+items_non_box maupun di semua box_groups yang menyebutnya) -- jangan
+improvisasi nama beda-beda di tempat berbeda buat item yang sama.
+
+Contoh: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham cheese
+3" dan "3 box isi charsiu 2, baso ayam 2" dan juga tambahan "roti coklat 5"
+(tanpa box), maka:
+- "items_non_box": [{"kategori":"Roti","rasa":"Coklat","qty":5}]
+- "box_groups": [
+    {"jumlah_box": 22, "items": [{"kategori":"Roti","rasa":"Baso ( Ayam )","qty_per_box":1}, {"kategori":"Roti","rasa":"Piscok","qty_per_box":1}, {"kategori":"Roti","rasa":"Ham Cheese","qty_per_box":3}]},
+    {"jumlah_box": 3, "items": [{"kategori":"Roti","rasa":"Charsiu","qty_per_box":2}, {"kategori":"Roti","rasa":"Baso ( Ayam )","qty_per_box":2}]}
+  ]
+(Sistem yang bakal ngitung otomatis: baso ayam total 22+6=28, piscok 22, ham
+cheese 66, charsiu 6, coklat 5 -- kamu TIDAK perlu ngitung ini sama sekali.)
+"""
+
+PARSE_CATALOG_INSTRUCTION = """
+
+Ini daftar produk yang BENERAN ADA di toko (format Kategori: daftar rasa):
+{catalog_text}
+
+ATURAN PENTING soal mencocokkan item pesanan ke daftar di atas:
+1. Cocokkan nama yang disebut customer ke rasa yang PERSIS ada di daftar (boleh
+   toleransi typo/ejaan kecil, misal "meses" cocok ke "Meises"). Ini juga
+   berlaku buat SINGKATAN umum, misal "piscok" cocok ke "Pisang Coklat" dan
+   "pisju"/"pisket" cocok ke "Pisang Keju" -- kategorinya (Roti atau Roti
+   Gandum) tetap ditentuin dari konteks sama kayak biasa (lihat aturan 2 di
+   bawah kalau nggak jelas kategorinya yang mana).
+2. Kalau nama yang disebut customer BISA COCOK ke lebih dari satu produk --
+   entah itu di kategori BERBEDA (misal "coklat" ada sebagai rasa di kategori
+   Roti DAN Roti Gandum yang harganya beda), ATAU beberapa VARIAN dalam
+   kategori yang SAMA (misal "Baso" polos tanpa keterangan bisa berarti
+   "Baso (Ayam)" ATAU "Baso (Pork)" yang sama-sama ada di kategori Roti) --
+   JANGAN ASAL TEBAK dan JANGAN PERNAH menggabungkan nama beberapa pilihan
+   jadi satu string aneh (misal JANGAN tulis "Baso (Pork) (Ayam)" atau
+   sejenisnya -- itu BUKAN nama produk yang valid dan tidak akan cocok ke
+   manapun di sistem). Field "rasa" WAJIB selalu berisi PERSIS SATU nama yang
+   ada di daftar produk, tidak boleh gabungan. Kalau ambigu: pilih SATU
+   kandidat yang paling masuk akal dari konteks sebagai tebakan, TAPI set
+   "kelengkapan" jadi "kurang_lengkap" dan di "catatan" sebutkan jelas: item
+   mana yang ambigu dan pilihan-pilihan yang ada apa aja, biar admin bisa
+   konfirmasi ulang ke customer.
+3. Kalau nama yang disebut customer TIDAK ADA sama sekali di daftar produk
+   (misal nyebut "Donat Coklat" padahal yang ada cuma "Donat Coklat Celup"),
+   tetap masukkan tebakan yang paling mendekati (SATU nama valid dari daftar,
+   bukan gabungan), TAPI set "kelengkapan" jadi "kurang_lengkap" dan jelaskan
+   di "catatan" bahwa nama itu tidak ada persis di daftar dan apa kemungkinan
+   yang dimaksud.
+4. Field "kategori" dan "rasa" di output HARUS ditulis PERSIS sama seperti di
+   daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas -- ini
+   berlaku juga untuk "kategori"/"rasa" di dalam "box_groups".
+{alias_text}"""
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    return _client
-
-
-def _extract_json(text):
-    """Claude kadang bungkus JSON dengan kalimat lain / code fence -- ambil
-    blok {...} pertama yang valid."""
-    text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    else:
-        brace = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace:
-            text = brace.group(0)
-    return json.loads(text)
-
-
-def _catalog_context(price_list):
-    lines = []
-    for row in price_list:
+def _build_alias_text():
+    aliases = getattr(config, "PRODUCT_ALIASES", None)
+    if not aliases:
+        return ""
+    lines = [
+        "\nATURAN TETAP (PRIORITAS PALING TINGGI, bukan kasus ambigu -- JANGAN "
+        "tandai kurang_lengkap atau minta konfirmasi buat kasus-kasus di bawah "
+        "ini, langsung terapkan):"
+    ]
+    for alias in aliases:
         lines.append(
-            f"- {row.get('Item_Code')} | {row.get('Nama')} | {row.get('Deskripsi')} | "
-            f"kategori {row.get('Kategori')} | satuan {row.get('Satuan')} | "
-            f"harga jual Rp{row.get('Harga_Jual')}"
+            f'- Kalau customer bilang "{alias["sebutan"]}", itu PASTI maksudnya '
+            f'kategori "{alias["kategori"]}" rasa "{alias["rasa"]}". Langsung '
+            f'pakai ini tanpa ragu.'
         )
     return "\n".join(lines)
 
+PARSE_SYSTEM_PROMPT = PARSE_SYSTEM_PROMPT_BASE
 
-ORDER_SYSTEM_PROMPT = """Kamu adalah asisten admin toko plastik "{business_name}".
-Tugas kamu: baca chat/foto order dari customer (biasanya berantakan, bahasa
-santai/nyingkat) dan ubah jadi data terstruktur JSON.
+# Instruksi tambahan KHUSUS dipasang di ATAS system prompt yang sama pas
+# input-nya GAMBAR (screenshot), bukan teks -- biar Claude tau harus "baca"
+# gambarnya dulu (OCR + pahami konteks chat-nya), baru diproses persis kayak
+# alur teks biasa (JSON output-nya format-nya SAMA PERSIS, nggak diubah).
+PARSE_IMAGE_PREFIX = """PENTING: input dari user kali ini berupa GAMBAR SCREENSHOT
+(bukan teks langsung) -- biasanya screenshot chat WhatsApp customer yang
+di-forward admin. Baca semua teks yang ada di gambar itu (nama, alamat, no HP,
+item pesanan, dst), lalu proses PERSIS sama kayak instruksi di bawah ini biar
+hasilnya konsisten sama alur order dari teks biasa.
 
-KATALOG PRODUK YANG VALID (HARUS dipakai buat cocokin item_code -- JANGAN
-pernah mengarang item_code atau harga yang gak ada di katalog ini):
-{catalog}
-
-CUSTOMER YANG SUDAH PERNAH ORDER (buat bantu cocokin nama, boleh juga nama
-baru kalau memang customer baru):
-{customers}
-
-Balikin HANYA JSON dengan struktur persis seperti ini, tanpa teks lain:
-{{
-  "nama_customer": "nama customer, judul huruf besar tiap kata",
-  "no_hp": "nomor HP kalau disebut, kalau tidak ada string kosong",
-  "alamat": "alamat kalau disebut, kalau tidak ada string kosong",
-  "metode": "Kirim" atau "Ambil" (tebak dari konteks, default \"Kirim\" kalau gak jelas),
-  "items": [
-    {{"item_code": "KODE_DARI_KATALOG", "nama_item": "nama sesuai katalog", "qty": angka}}
-  ],
-  "ongkir": 0,
-  "catatan": "catatan buat admin kalau ada yang ambigu/gak yakin, kalau tidak ada string kosong",
-  "perlu_konfirmasi_manual": false
-}}
-
-Aturan penting:
-- qty HARUS angka (number), bukan string.
-- Kalau ada item yang disebut tapi TIDAK ketemu di katalog / ambigu bisa lebih
-  dari 1 kandidat, tetap masukin item itu dengan item_code kosong ("") dan
-  nama_item = apa yang disebut customer, terus set perlu_konfirmasi_manual
-  jadi true dan jelasin di "catatan".
-- Ongkir default 0 kecuali disebutin jelas nominalnya.
-- Jangan hitung subtotal/total, itu dihitung sistem lain.
 """
 
 
-def parse_order_text(text, price_list, customer_names):
-    prompt = ORDER_SYSTEM_PROMPT.format(
-        business_name=config.BUSINESS_NAME,
-        catalog=_catalog_context(price_list),
-        customers=", ".join(customer_names) if customer_names else "(belum ada)",
-    )
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=2000,
-        system=prompt,
-        messages=[{"role": "user", "content": f"Chat order dari customer:\n\n{text}"}],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
+def _prepare_catalog_prompt(system_prompt, catalog):
+    if not catalog:
+        return system_prompt
+    by_kategori = {}
+    for kategori, rasa in catalog:
+        by_kategori.setdefault(kategori, []).append(rasa)
+    catalog_lines = [f"{k}: {', '.join(v)}" for k, v in by_kategori.items()]
+    catalog_text = "\n".join(catalog_lines)
+    return system_prompt + PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
 
 
-def parse_order_image(image_bytes, media_type, price_list, customer_names):
-    prompt = ORDER_SYSTEM_PROMPT.format(
-        business_name=config.BUSINESS_NAME,
-        catalog=_catalog_context(price_list),
-        customers=", ".join(customer_names) if customer_names else "(belum ada)",
-    )
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=2000,
-        system=prompt,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": b64},
-                },
-                {
-                    "type": "text",
-                    "text": "Ini foto/screenshot order dari customer. Baca isinya dan ubah jadi JSON sesuai instruksi.",
-                },
-            ],
-        }],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
+def _empty_parse_result(catatan):
+    return {
+        "nama": None, "no_hp": None, "alamat": None, "metode": None,
+        "items": [], "box_groups": [], "catatan": catatan, "kelengkapan": "kurang_lengkap",
+    }
 
 
-PO_SYSTEM_PROMPT = """Kamu adalah asisten admin toko plastik "{business_name}"
-yang lagi bikin Purchase Order (PO) BELANJA BAHAN ke supplier (bukan order
-dari customer). Baca teks dari admin dan ubah jadi JSON.
+def _compute_final_items(items_non_box, box_groups):
+    """Hitung field "items" FINAL (qty per box dikali jumlah box, digabung
+    lintas kelompok) di sini, PAKAI PYTHON -- BUKAN diserahkan ke AI kayak
+    sebelumnya. Ini yang bikin qty selalu akurat 100%, soalnya perkalian &
+    penjumlahan biasa nggak pernah salah kalau dihitung kode, beda sama AI
+    yang kadang keliru pas harus mikirin banyak hal sekaligus (pernah
+    kejadian: 3 kelompok box, salah satu rasa muncul di 3 kelompok, hasil
+    akhirnya AI keliru jumlahin -- padahal breakdown per kelompoknya sendiri
+    udah bener di penjelasan dia).
 
-SUPPLIER YANG SUDAH PERNAH DIPAKAI:
-{suppliers}
+    items_non_box = [{"kategori":.., "rasa":.., "qty":..}, ...] (qty final apa adanya)
+    box_groups = [{"jumlah_box":.., "items":[{"kategori":.., "rasa":.., "qty_per_box":..}]}, ...]
 
-Balikin HANYA JSON dengan struktur persis seperti ini, tanpa teks lain:
+    Return: list [{"kategori":.., "rasa":.., "qty":..}, ...] siap dipakai
+    sama alur yang udah ada (preview, simpan ke Sheets, dst)."""
+    totals = {}  # {(kategori, rasa): qty}
+
+    for it in (items_non_box or []):
+        kategori = it.get("kategori")
+        rasa = it.get("rasa")
+        if not kategori or not rasa:
+            continue
+        try:
+            qty = int(it.get("qty") or 0)
+        except (ValueError, TypeError):
+            qty = 0
+        key = (kategori, rasa)
+        totals[key] = totals.get(key, 0) + qty
+
+    for grp in (box_groups or []):
+        try:
+            jumlah_box = int(grp.get("jumlah_box") or 0)
+        except (ValueError, TypeError):
+            jumlah_box = 0
+        for it in grp.get("items", []):
+            kategori = it.get("kategori")
+            rasa = it.get("rasa")
+            if not kategori or not rasa:
+                continue
+            try:
+                qty_per_box = int(it.get("qty_per_box") or 0)
+            except (ValueError, TypeError):
+                qty_per_box = 0
+            key = (kategori, rasa)
+            totals[key] = totals.get(key, 0) + (qty_per_box * jumlah_box)
+
+    return [
+        {"kategori": kategori, "rasa": rasa, "qty": qty}
+        for (kategori, rasa), qty in totals.items()
+    ]
+
+
+def _safe_json_loads(raw_text):
+    """Parse JSON dari balasan AI dengan toleransi ekstra. Kadang model
+    (apalagi kalau instruksinya minta dia "mikir" dulu, misal ngitung box)
+    tetap nyempilin teks di luar JSON walau udah diminta jangan -- daripada
+    langsung gagal total, coba ekstrak blok JSON-nya aja (dari '{' pertama
+    sampai '}' terakhir) sebelum menyerah. Return None kalau tetap gagal."""
+    text = raw_text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+EDIT_SYSTEM_PROMPT_BASE = """Kamu adalah asisten admin toko roti "Miss Piggy".
+Customer punya order yang SUDAH ADA, dan sekarang admin mau UBAH order itu
+(nambah item, ngurangin qty, hapus item, ganti item, atau ubah ongkir).
+
+Tugasmu: hitung ulang dan hasilkan DAFTAR ITEM FINAL (versi lengkap SETELAH
+perubahan diterapkan) -- bukan cuma daftar perubahannya doang.
+
+Balas HANYA dengan JSON valid, TANPA teks lain apapun -- tanpa penjelasan,
+tanpa perhitungan yang ditulis keluar, tanpa markdown code fence:
+
+{
+  "items": [{"kategori": "...", "rasa": "...", "qty": 0}],
+  "ongkir": angka ongkir baru dalam rupiah KALAU admin menyebutkan mau ubah ongkir, atau null kalau ongkir tidak disinggung sama sekali (biar dipertahankan nilai lama),
+  "catatan": "ringkasan perubahan yang dilakukan, singkat dan jelas -- kalau ada item yang namanya ambigu (cocok ke lebih dari satu produk beda kategori/harga), sebutkan jelas pilihannya di sini"
+}
+
+Kalau instruksinya "hapus X" atau qty item di-set jadi 0, JANGAN masukkan item itu
+ke daftar final. Item yang tidak disebut sama sekali dalam instruksi TETAP dipertahankan
+qty aslinya (jangan dihapus kalau tidak diminta).
+
+ATURAN KHUSUS SATUAN "BOX": kalau instruksi menyebutkan pola "X box/pax/bungkus
+isi rasa qty, rasa qty" (jumlah box duluan, qty PER BOX -- "box"/"dus"/"paket"/
+"pax"/"bungkus" semua sinonim), kalikan qty tiap rasa dengan jumlah box-nya
+(hitung diam-diam, jangan ditulis prosesnya) sebelum ditambahkan/digabungkan
+ke daftar item final. Kalau jumlah box cuma 1, tidak perlu dikali. Kalau ada
+beberapa kelompok box berbeda, hitung tiap kelompok sendiri-sendiri lalu
+gabungkan rasa yang sama.
+
+PENTING soal nama rasa: field "rasa" WAJIB selalu SATU nama produk yang valid
+(persis sesuai daftar produk), TIDAK BOLEH digabung jadi satu string aneh
+kalau ambigu (misal JANGAN tulis "Baso (Pork) (Ayam)"). Kalau nama yang
+disebut bisa berarti lebih dari satu varian (misal "Baso" polos bisa berarti
+"Baso (Ayam)" atau "Baso (Pork)"), pilih SATU yang paling masuk akal dan
+sebutkan di "catatan" bahwa ini ambigu & perlu dikonfirmasi ke customer.
+"""
+
+EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT_BASE
+
+INTENT_SYSTEM_PROMPT = """Kamu adalah router perintah untuk bot admin toko roti "Miss Piggy".
+Hari ini tanggal: {today}.
+
+Baca pesan dari ADMIN (bukan dari customer), tentukan MAKSUD admin, balas HANYA
+JSON valid tanpa teks lain, tanpa markdown code fence:
+
 {{
-  "nama_supplier": "nama supplier, judul huruf besar tiap kata",
-  "items": [
-    {{"nama_item": "nama barang yang dibeli", "qty": angka, "satuan": "KG/Piece/dll", "harga_satuan": angka harga beli per satuan}}
-  ],
-  "catatan": "catatan kalau ada yang ambigu, kalau tidak ada string kosong"
+  "intent": salah satu dari "rekap_produksi", "laporan_bulanan", "pricelist", "edit_order", "invoice", "surat_jalan", "order_baru",
+  "nama_customer": "nama customer yang disebut (kalau ada), atau null",
+  "tanggal_mulai_rekap": "format YYYY-MM-DD (hitung dari hari ini {today} kalau istilahnya relatif kayak 'hari ini'/'besok'/'lusa') KALAU intent-nya rekap_produksi DAN admin minta rekap untuk TANGGAL/RENTANG TANGGAL tertentu (misal 'rekap produksi besok', 'rekap produksi hari ini', 'rekap produksi sampe besok', 'rekap produksi hari ini dan besok') -- ini tanggal AWAL rentangnya (atau tanggal tunggal kalau cuma 1 hari). Kalau permintaannya rekap biasa TANPA tanggal spesifik, atau rekap by NAMA CUSTOMER, biarkan null.",
+  "tanggal_akhir_rekap": "format YYYY-MM-DD, isi HANYA kalau ada RENTANG tanggal (misal 'sampe besok' dari hari ini berarti tanggal_akhir_rekap = besok; 'hari ini dan besok' juga rentang 2 hari). Kalau cuma 1 hari tunggal, biarkan null (tanggal_mulai_rekap doang yang dipakai).",
+  "bulan_mulai": "format YYYY-MM (pakai tahun {today} kalau nggak disebut eksplisit) kalau admin minta laporan bulanan buat 1 bulan tertentu ATAU ini bulan AWAL dari sebuah rentang (misal 'dari Januari sampai Agustus' -> bulan_mulai Januari), atau null kalau nggak disebut sama sekali / minta bulan ini",
+  "bulan_akhir": "format YYYY-MM, isi HANYA kalau admin eksplisit minta RENTANG beberapa bulan (misal 'Januari sampai Agustus', 'Jan - Agustus', 'dari bulan 1 ke bulan 8') -- isi bulan AKHIR rentangnya. Kalau cuma minta 1 bulan doang (bukan rentang), biarkan null.",
+  "instruksi_edit": "kalau intent-nya edit_order, tulis ulang instruksi perubahannya (item apa ditambah/dikurangi/dihapus dan jumlahnya), atau null"
 }}
 
-Aturan: qty dan harga_satuan HARUS angka. Kalau harga gak disebutin, isi 0
-dan jelasin di catatan supaya admin isi manual.
+Panduan milih intent:
+- "minta rekap produksi", "rekap dong", "mau liat rekap", "udah berapa pesanan masuk" -> rekap_produksi. Ada 3 variasi:
+  1. Kalau ADA tanggal/rentang tanggal spesifik disebut (misal "rekap produksi besok", "rekap produksi sampe besok", "rekap produksi hari ini dan besok", "rekap produksi tanggal 29") -> isi tanggal_mulai_rekap (dan tanggal_akhir_rekap kalau rentang), JANGAN isi nama_customer.
+  2. Kalau ADA nama customer tertentu disebut (misal "minta rekap produksi Ci Meyvany") -> isi nama_customer, JANGAN isi tanggal_mulai_rekap. Kalau disebut LEBIH DARI SATU nama sekaligus (misal "rekap produksi Franky dan Kelvin"), isi nama_customer dengan SEMUA nama itu dipisah koma (contoh: "Franky, Kelvin") -- jangan cuma ambil satu nama doang.
+  3. Kalau nggak disebut tanggal maupun nama -> biarkan nama_customer dan tanggal_mulai_rekap dua-duanya null, rekapnya jadi gabungan minggu aktif seperti biasa.
+- "laporan bulanan", "rekap bulanan", "mau tau total bulan ini", "berapa yang harus dibayar ke supplier" -> laporan_bulanan (kalau admin sebut RENTANG bulan, misal "laporan bulanan dari Januari sampai Agustus", "laporan bulanan Jan - Agustus", "minta laporan bulan 1-3", "laporan bulan 1 sampai 3", isi bulan_mulai DAN bulan_akhir sesuai rentangnya -- ANGKA bulan (1=Januari, 2=Februari, dst sampai 12=Desember) harus dikonversi ke nomor bulan yang sama, cuma beda cara nulis; kalau cuma 1 bulan/nggak disebut, cukup isi bulan_mulai. Kalau TAHUN nggak disebut sama sekali (baik nama bulan maupun angka), pakai tahun {today} secara default -- JANGAN nebak tahun lain.)
+- "harga berapa", "price list", "liat catalog/katalog", "kirim daftar harga" -> pricelist
+- Kalau nyebut nama customer TERTENTU dan maksudnya ubah pesanan yang SUDAH ADA
+  (kata kunci: tambah, nambah, kurang, kurangin, hapus, ganti, ubah, edit, jadi) -> edit_order
+- "invoice buat X", "minta invoice X", "invoice-nya X mana" -> invoice (isi nama_customer)
+- "surat jalan X", "suratjalan buat X" -> surat_jalan (isi nama_customer) -- PENTING: kata yang PERSIS muncul setelah "surat jalan"/"suratjalan"/"invoice" itu HAMPIR SELALU nama customer, WALAUPUN kebetulan sama kayak nama bulan (Januari-Desember) atau kata umum lainnya. Contoh: "surat jalan juni" -> intent surat_jalan, nama_customer "Juni" (BUKAN merujuk ke bulan Juni, itu nama orang). Jangan biarkan kemiripan sama nama bulan bikin nama_customer jadi kosong/null.
+- Nyebut nama customer TERTENTU dan cuma mau NGELIAT/NGECEK pesanan dia
+  (bukan ubah), kayak "lihat orderan X", "liat order X", "orderan X apa aja",
+  "cek pesanan X", "orderannya X mana" -> invoice (isi nama_customer) --
+  soalnya invoice udah nampilin rincian lengkap order customer itu (item,
+  qty, alamat, metode, total)
+- Kalau pesan itu isinya DATA PESANAN BARU (nama, alamat, item pesanan dari customer
+  yang baru mau order, biasanya di-copy-paste dari chat customer) -> order_baru
+- Kalau nggak jelas / cuma basa-basi / ambigu -> order_baru (paling aman, tetap
+  diproses dan admin bisa lihat hasilnya)
 """
 
 
-def parse_po_text(text, supplier_names):
-    prompt = PO_SYSTEM_PROMPT.format(
-        business_name=config.BUSINESS_NAME,
-        suppliers=", ".join(supplier_names) if supplier_names else "(belum ada)",
-    )
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=1500,
-        system=prompt,
-        messages=[{"role": "user", "content": text}],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
+def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
+    """
+    catalog = list of (kategori, rasa) yang beneran ada di PriceList, opsional.
+    Kalau dikasih, AI bakal cocokin item pesanan ke produk asli & nandain
+    kalau ada yang ambigu -- jauh lebih akurat daripada nebak generik.
+    """
+    system_prompt = _prepare_catalog_prompt(PARSE_SYSTEM_PROMPT_BASE, catalog)
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=1500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": raw_text}],
+        )
+    except Exception as e:
+        return _empty_parse_result(f"Gagal hubungi AI: {e}. Coba kirim ulang.")
+
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
+        return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
+    result.setdefault("box_groups", [])
+    result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
+    return result
 
 
-INTENT_SYSTEM_PROMPT = """Kamu router pesan buat bot admin toko plastik
-"{business_name}". Setiap pesan teks bebas yang diketik admin (BUKAN
-command yang diawali "/") harus kamu klasifikasikan mau ngapain, supaya
-admin gak perlu apal command kaku -- boleh nanya sesantai apapun.
+def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg",
+                               caption: str = None, catalog: list = None) -> dict:
+    """
+    Sama kayak parse_customer_chat, TAPI input-nya SCREENSHOT (misal admin
+    forward/kirim screenshot chat WA customer langsung ke bot, bukan
+    copy-paste teksnya). Claude yang "baca" isi gambarnya (nama, alamat, no
+    HP, item pesanan, dst), lalu diproses lewat system prompt YANG SAMA
+    persis kayak alur teks -- jadi hasil JSON-nya konsisten & bisa langsung
+    dipakai di alur preview/konfirmasi yang udah ada, nggak perlu kode
+    terpisah di bot.py buat nanganin hasilnya.
 
-Balikin HANYA JSON persis struktur ini, tanpa teks lain:
-{{
-  "intent": salah satu dari daftar di bawah,
-  "target": "nama customer/supplier atau nomor invoice yang disebut, string kosong kalau gak ada",
-  "bulan": "format YYYY-MM kalau ada bulan/tahun disebut (mis. 'bulan lalu', 'Juli 2026'), string kosong kalau gak disebut -> berarti bulan berjalan",
-  "jumlah": angka nominal uang yang disebut (buat bayar utang), 0 kalau gak ada
-}}
+    media_type: MIME type gambarnya -- Telegram selalu ngirim foto sebagai
+    JPEG (bahkan kalau aslinya PNG/screenshot), jadi "image/jpeg" aman
+    dipakai sebagai default.
+    caption: teks tambahan yang mungkin ditulis admin BARENG foto-nya (kalau
+    ada) -- ikut dikirim ke AI biar info yang kepisah antara gambar & caption
+    (misal "ongkir 15rb" ditulis di caption, bukan kelihatan di screenshot)
+    nggak ilang.
+    """
+    system_prompt = _prepare_catalog_prompt(PARSE_SYSTEM_PROMPT_BASE, catalog)
 
-Daftar intent yang valid:
-- "order" -- ini order/pesanan dari CUSTOMER (beli barang dari kita)
-- "po" -- ini niat BELANJA/PO ke SUPPLIER SEKARANG (kita yang mau beli bahan,
-  nyebut barang + QTY yang mau dibeli), biasanya ada kata "PO", "belanja ke",
-  "order ke supplier", "stok dari <nama supplier> <qty barang>". Kalau CUMA
-  ngasih tau/masukin daftar harga dari supplier TANPA qty barang yang mau
-  dibeli, itu bukan "po" -- itu "update_harga" (lihat di bawah).
-- "report_piutang" -- nanya piutang / tagihan customer yang belum dibayar
-- "report_utang" -- nanya utang ke supplier yang belum dibayar
-- "report_kas_bulanan" -- nanya laporan kas / laba rugi / untung rugi bulanan
-- "report_pricelist" -- nanya daftar harga produk
-- "mark_lunas" -- bilang customer tertentu udah bayar / lunas
-- "bayar_utang" -- bilang udah bayar/cicil ke supplier tertentu
-- "lihat_invoice" -- minta liat/cetak ulang invoice customer tertentu
-- "lihat_suratjalan" -- minta liat/cetak ulang surat jalan customer tertentu
-- "edit_order" -- admin mau NGOREKSI/BETULIN data order/invoice yang SUDAH
-  kesimpen (misal salah ketik nama customer, salah alamat, salah no HP),
-  BUKAN bikin order baru. Ciri-cirinya: diawali kata "edit", "ganti",
-  "betulin", "koreksi", "salah tadi", dsb, dan TIDAK nyebutin barang/qty
-  yang dibeli sama sekali. Kalau pesannya cuma nyebut 1-2 kata nama orang
-  atau tempat tanpa daftar barang (misal cuma "edit Grandia Hotel"), itu
-  edit_order, BUKAN order.
-- "batal_order" -- admin mau BATALIN/HAPUS SELURUH order/invoice yang SUDAH
-  kesimpen (misal order test yang mau dibuang, atau customer batal jadi
-  beli), BUKAN betulin satu-dua data yang salah ketik (itu edit_order).
-  Ciri-cirinya: kata "hapus", "batalin", "cancel", "gak jadi", diikuti
-  referensi ke order/invoice/customer tertentu, TANPA nyebut field
-  spesifik apa yang mau diganti isinya.
-- "update_harga" -- admin mau UBAH HARGA JUAL dan/atau HARGA BELI produk di
-  katalog/PriceList (bukan order dari customer, bukan PO/belanja ke
-  supplier). Ciri-cirinya: nyebut nama/kode barang + harga/angka rupiah,
-  pakai kata kayak "harga", "naikin", "turunin", "sekarang", "ganti harga",
-  "update harga", "masukin harga/price list", dan TIDAK nyebut QTY barang
-  yang lagi mau DIBELI/dipesan sekarang. PENTING: nyebut nama SUPPLIER itu
-  BOLEH dan TETEP update_harga selama cuma sebagai SUMBER/ASAL data harga
-  (misal "harga dari supplier X, tolong masukin", "update harga beli dari
-  price list Y", foto daftar harga dengan caption nyebut nama tokonya) --
-  yang bikin ini JADI "po" adalah kalau ada QTY barang yang mau dibeli
-  sekarang (lihat penjelasan "po" di atas). Contoh update_harga: "harga
-  tulip naik jadi 17000", "PP bening 40x60 sekarang 30rb", "update harga
-  TUL-01 jadi 16500", "harga dari supplier CSB 087853077492, tolong
-  masukin, harga beli yg di kolom include", foto price list dengan caption
-  "daftar harga supplier baru, masukin ya".
-- "lainnya" -- basa-basi / gak jelas maksudnya / gak masuk kategori manapun
+    instruksi = PARSE_IMAGE_PREFIX
+    if caption:
+        instruksi += f'Catatan tambahan yang ditulis admin bareng foto ini: "{caption}"\n\n'
+    instruksi += "Baca gambar di atas dan ubah jadi data order terstruktur sesuai format yang diminta."
 
-Kalau ragu antara "order" dan intent lain, PILIH "order" (lebih aman salah
-nanya balik daripada order customer keskip) -- KECUALI kalau pesannya
-diawali kata edit/ganti/betulin/koreksi dan gak nyebut barang (itu
-edit_order), diawali hapus/batalin/cancel tanpa nyebut field spesifik
-(itu batal_order), atau nyebut barang/daftar harga + kata "masukin"/
-"update"/"harga" TANPA qty barang yang mau dibeli sekarang (itu
-update_harga, WALAUPUN ada nama supplier disebut sebagai sumber datanya).
-Kalau pesan cuma sapaan atau gak jelas sama sekali, pilih "lainnya".
-"""
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            },
+        },
+        {"type": "text", "text": instruksi},
+    ]
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=1500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as e:
+        return _empty_parse_result(f"Gagal hubungi AI: {e}. Coba kirim ulang.")
+
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
+        return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
+    result.setdefault("box_groups", [])
+    result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
+    return result
 
 
-def classify_intent(text):
-    prompt = INTENT_SYSTEM_PROMPT.format(business_name=config.BUSINESS_NAME)
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=300,
-        system=prompt,
-        messages=[{"role": "user", "content": text}],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
+def parse_order_edit(existing_items: list, instruction: str, catalog: list = None) -> dict:
+    """
+    existing_items = [{"kategori": str, "rasa": str, "qty": int}, ...]
+    instruction = teks bebas dari admin, misal "tambah donat gula 5, ham cheese jadi 20"
+    catalog = list of (kategori, rasa) yang beneran ada di PriceList, opsional.
+
+    Return: {"items": [...daftar final...], "catatan": "ringkasan perubahan"}
+    """
+    existing_text = "\n".join(
+        f"- {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in existing_items
+    ) or "(kosong)"
+
+    user_message = f"Order yang sudah ada:\n{existing_text}\n\nInstruksi perubahan:\n{instruction}"
+
+    system_prompt = _prepare_catalog_prompt(EDIT_SYSTEM_PROMPT_BASE, catalog)
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=1500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except Exception as e:
+        return {"items": existing_items, "catatan": f"Gagal hubungi AI: {e}. Coba lagi."}
+
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
+        return {"items": existing_items, "catatan": "Gagal parsing perubahan, coba lagi dengan kalimat lebih jelas."}
+    if "items" not in result:
+        result["items"] = existing_items
+    return result
 
 
-EDIT_ORDER_SYSTEM_PROMPT = """Kamu asisten admin toko plastik "{business_name}".
-Admin barusan mau NGOREKSI/BETULIN salah satu data di order yang SUDAH
-kesimpen (bukan bikin order baru, bukan batalin/hapus order -- kalau
-instruksinya "hapus"/"batalin"/"cancel" TANPA nyebut field yang mau
-diganti, itu BUKAN urusan kamu, biarin semua field kosong). Data order
-yang mau dikoreksi saat ini:
+def classify_intent(raw_text: str) -> dict:
+    """
+    Tebak maksud admin dari kalimat bebas, biar nggak wajib pakai command '/'.
+    Return dict dengan key: intent, nama_customer, bulan, instruksi_edit.
+    Kalau gagal/nggak yakin, default ke 'order_baru' (paling aman).
+    """
+    default = {
+        "intent": "order_baru", "nama_customer": None,
+        "tanggal_mulai_rekap": None, "tanggal_akhir_rekap": None,
+        "bulan_mulai": None, "bulan_akhir": None, "instruksi_edit": None,
+    }
 
-{current}
+    try:
+        tz = date_helpers.get_timezone()
+        today_str = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+        system_prompt = INTENT_SYSTEM_PROMPT.format(today=today_str)
 
-Baca instruksi koreksi dari admin, terus balikin HANYA JSON persis struktur
-ini, tanpa teks lain:
-{{
-  "nama_customer": "nilai baru kalau nama customer mau diganti, string kosong kalau TIDAK diganti",
-  "no_hp": "nilai baru kalau no HP mau diganti, string kosong kalau TIDAK diganti",
-  "alamat": "nilai baru kalau alamat mau diganti, string kosong kalau TIDAK diganti",
-  "metode": "'Kirim' atau 'Ambil' kalau metode mau diganti, string kosong kalau TIDAK diganti",
-  "items": [
-    {{
-      "item_code": "kode item (dari daftar ITEM DI ORDER INI di atas) yang mau diganti",
-      "qty_baru": angka qty baru, 0 kalau qty item ini TIDAK diganti,
-      "harga_satuan_baru": angka harga satuan BARU khusus buat order ini aja, 0 kalau TIDAK diganti
-    }}
-  ]
-}}
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=300,
+            system=system_prompt,
+            messages=[{"role": "user", "content": raw_text}],
+        )
+    except Exception:
+        return default
 
-Aturan penting:
-- Kalau instruksinya cuma nyebut satu-dua kata nama/tempat tanpa penjelasan
-  lain (misal admin cuma ngetik "edit Grandia Hotel"), itu HAMPIR PASTI
-  maksudnya mau ganti NAMA CUSTOMER jadi nama itu -- bukan field lain.
-- JANGAN mengarang perubahan buat field yang gak disebut sama sekali,
-  biarin string kosong / array kosong.
-- KHUSUS nama_customer: kalau nilai baru yang dimaksud admin SAMA PERSIS
-  (case-insensitive) dengan nama customer yang udah kesimpen sekarang,
-  berarti gak ada yang perlu diubah -- biarin nama_customer string kosong,
-  JANGAN balikin nilai yang sama sebagai "perubahan".
-- "items" cuma diisi kalau admin EKSPLISIT minta ganti QTY dan/atau HARGA
-  SATUAN salah satu barang yang UDAH ada di order ini (misal "qty jadi
-  25kg", "yang tulip jadi 10 pack aja", "harganya jadi 18000",
-  "plastik sampah harganya di update jadi 16000"). Kalau order cuma punya
-  1 macam barang dan admin nyebut qty/harga baru tanpa nama barang, itu
-  barang itu yang dimaksud. JANGAN nambah barang baru atau hapus barang
-  yang gak disebut. "harga_satuan_baru" di sini CUMA ngubah harga di order
-  INI SAJA (buat invoice-nya), BUKAN ngubah harga jual permanen di
-  katalog/PriceList (itu urusan lain, di luar tugas kamu).
-- PENTING: kalau admin nyebut "harganya di update" / "harganya berubah"
-  TAPI GAK NYEBUT ANGKA BARUNYA SAMA SEKALI, JANGAN NEBAK angkanya --
-  biarin harga_satuan_baru 0 (gak diganti) buat item itu, biar admin
-  diminta nyebutin angkanya secara eksplisit.
-"""
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
+        return default
 
-
-def parse_order_correction(instruction_text, current_order_desc):
-    prompt = EDIT_ORDER_SYSTEM_PROMPT.format(
-        business_name=config.BUSINESS_NAME,
-        current=current_order_desc,
-    )
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=300,
-        system=prompt,
-        messages=[{"role": "user", "content": instruction_text}],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
-
-
-PRICE_UPDATE_SYSTEM_PROMPT = """Kamu asisten admin toko plastik "{business_name}".
-Admin mau UPDATE HARGA JUAL dan/atau HARGA BELI satu atau beberapa produk di
-katalog (PriceList) -- BUKAN order dari customer, BUKAN PO ke supplier.
-
-KATALOG PRODUK SAAT INI:
-{catalog}
-
-Baca instruksi dari admin, balikin HANYA JSON persis struktur ini, tanpa
-teks lain:
-{{
-  "items": [
-    {{
-      "item_code": "KODE_DARI_KATALOG kalau ketemu jelas, string kosong kalau item gak ketemu/ambigu",
-      "nama_disebut": "nama barang persis seperti disebut admin",
-      "harga_jual": angka harga jual BARU, 0 kalau harga jual TIDAK disebut/diubah,
-      "harga_beli": angka harga beli BARU, 0 kalau harga beli TIDAK disebut/diubah
-    }}
-  ]
-}}
-
-Aturan:
-- Kalau admin cuma nyebut satu angka harga tanpa bilang itu harga
-  beli/modal/dari supplier, anggap itu HARGA JUAL (harga ke customer).
-- Boleh lebih dari 1 item dalam 1 pesan (misal admin bilang "tulip sama
-  sampah naik semua 2000").
-- Kalau nama barang yang disebut gak ketemu jelas di katalog (atau
-  ambigu, bisa lebih dari 1 kandidat), tetap masukin ke items dengan
-  item_code kosong ("") biar admin dikasih tau gak ketemu -- jangan
-  mengarang item_code.
-"""
-
-
-def parse_price_update(text, price_list):
-    prompt = PRICE_UPDATE_SYSTEM_PROMPT.format(
-        business_name=config.BUSINESS_NAME,
-        catalog=_catalog_context(price_list),
-    )
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=1000,
-        system=prompt,
-        messages=[{"role": "user", "content": text}],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
-
-
-PRICE_UPDATE_IMAGE_SYSTEM_PROMPT = """Kamu asisten admin toko plastik "{business_name}".
-Admin barusan kirim FOTO daftar harga dari SUPPLIER (bukan order dari
-customer, bukan daftar harga jual kita sendiri). Tugas kamu: baca foto ini
-baris per baris, cocokin tiap barang ke katalog produk kita, terus tentuin
-HARGA BELI (harga modal, dari supplier ke kita) yang baru buat tiap barang.
-Kalau di foto ada nama perusahaan/toko supplier-nya (biasanya di bagian
-atas/kop surat foto), catat juga nama itu.
-
-KATALOG PRODUK KITA SAAT INI:
-{catalog}
-
-Balikin HANYA JSON persis struktur ini, tanpa teks lain:
-{{
-  "nama_supplier": "nama perusahaan/toko supplier yang tertulis di foto (kop/header), string kosong kalau gak keliatan jelas",
-  "items": [
-    {{
-      "item_code": "KODE_DARI_KATALOG kalau ketemu jelas, string kosong kalau item gak ketemu/ambigu",
-      "nama_disebut": "nama barang persis seperti tertulis di foto",
-      "harga_jual": 0,
-      "harga_beli": angka harga beli/modal yang tertulis di foto buat barang ini
-    }}
-  ]
-}}
-
-Aturan:
-- Harga yang tertulis di foto daftar harga supplier ini SELALU dianggap
-  HARGA BELI (harga_beli) -- harga_jual SELALU 0 di sini, JANGAN diisi,
-  itu urusan admin nentuin sendiri nanti.
-- Baca SEMUA baris/item yang kebaca di foto, jangan cuma yang pertama.
-- Cocokin tiap baris ke item_code yang paling sesuai di katalog kita
-  (berdasarkan nama/ukuran/kategori). Kalau ada barang di foto yang gak
-  ketemu jelas di katalog kita (atau ambigu), tetap masukin ke items
-  dengan item_code kosong ("") biar admin dikasih tau -- jangan mengarang
-  item_code.
-- JANGAN mengarang nama_supplier kalau emang gak keliatan jelas di foto,
-  biarin string kosong.
-"""
-
-
-def parse_price_update_image(image_bytes, media_type, price_list):
-    prompt = PRICE_UPDATE_IMAGE_SYSTEM_PROMPT.format(
-        business_name=config.BUSINESS_NAME,
-        catalog=_catalog_context(price_list),
-    )
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=1500,
-        system=prompt,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": b64},
-                },
-                {
-                    "type": "text",
-                    "text": "Ini foto daftar harga dari supplier. Baca isinya dan ubah jadi JSON sesuai instruksi.",
-                },
-            ],
-        }],
-    )
-    raw = "".join(block.text for block in resp.content if block.type == "text")
-    return _extract_json(raw)
+    for key, val in default.items():
+        result.setdefault(key, val)
+    return result

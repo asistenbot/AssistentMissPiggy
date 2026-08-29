@@ -1,645 +1,604 @@
 """
-Semua fungsi baca/tulis ke Google Sheets ada di sini.
-Sheet ini "database" utama sistem -- 7 tab:
-  PriceList, Customers, Orders, Suppliers, PurchaseOrders, UtangSupplier, Kas
-
-Bot ini SELF-PROVISIONING: begitu pertama kali jalan, kalau tab-tab di atas
-belum ada di spreadsheet, bot otomatis bikinin (termasuk header kolom &
-ngisi PriceList/Customers dari SEED_PRODUCTS/SEED_CUSTOMERS di config.py).
-Jadi Riky cuma perlu bikin 1 spreadsheet KOSONG & share ke service account
--- sisanya otomatis.
+Semua interaksi dengan Google Sheets ada di sini.
+Pakai gspread + service account.
 """
 
-import datetime
 import json
-import threading
-
+import datetime
+import difflib
+import re
 import gspread
 from google.oauth2.service_account import Credentials
 
 import config
+import date_helpers
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
 ]
-
-# ---- definisi skema: nama tab -> header kolom ----
-SCHEMA = {
-    config.SHEET_PRICELIST: [
-        "Item_Code", "Nama", "Deskripsi", "Kategori", "Satuan",
-        "Harga_Jual", "Harga_Beli",
-    ],
-    config.SHEET_CUSTOMERS: ["Nama", "No_HP", "Alamat"],
-    config.SHEET_ORDERS: [
-        "Timestamp", "No_Invoice", "Nama_Customer", "No_HP", "Alamat",
-        "Metode", "Item_Code", "Nama_Item", "Kategori", "Qty", "Satuan",
-        "Harga_Satuan", "Subtotal", "Ongkir", "Status", "Tanggal_Bayar",
-    ],
-    config.SHEET_SUPPLIERS: ["Nama_Supplier", "No_HP", "Barang", "Alamat"],
-    config.SHEET_PURCHASE_ORDERS: [
-        "Timestamp", "No_PO", "Nama_Supplier", "Item", "Qty", "Satuan",
-        "Harga_Satuan", "Subtotal", "Status", "Tanggal_Lunas",
-    ],
-    config.SHEET_UTANG_SUPPLIER: [
-        "Tanggal", "Nama_Supplier", "No_PO", "Jenis", "Jumlah",
-        "Saldo_Berjalan", "Catatan",
-    ],
-    config.SHEET_KAS: [
-        "Tanggal", "Jenis", "Kategori", "Jumlah", "Keterangan", "Ref",
-    ],
-}
-
-
-def _today_str():
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)  # WIB
-    return now.strftime("%Y-%m-%d")
-
-
-def _now_str():
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
-    return now.strftime("%Y-%m-%d %H:%M:%S")
 
 
 class SheetsClient:
     def __init__(self):
         if config.GOOGLE_SERVICE_ACCOUNT_JSON:
+            # Dipakai pas deploy di Railway/Render: kredensial disimpen sebagai
+            # environment variable (isi JSON dalam 1 baris), bukan file.
             info = json.loads(config.GOOGLE_SERVICE_ACCOUNT_JSON)
             creds = Credentials.from_service_account_info(info, scopes=SCOPES)
         else:
+            # Dipakai pas jalan di komputer lokal: baca dari file JSON.
             creds = Credentials.from_service_account_file(
                 config.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=SCOPES
             )
         self.gc = gspread.authorize(creds)
-        self.sh = self.gc.open_by_key(config.GOOGLE_SHEET_ID)
-        self._lock = threading.Lock()
-        self._ensure_schema()
+        self.sheet = self.gc.open_by_key(config.GOOGLE_SHEET_ID)
 
-    # ---------------- SETUP OTOMATIS ----------------
+    # ---------- ORDERS ----------
 
-    def _ensure_schema(self):
-        existing = {ws.title: ws for ws in self.sh.worksheets()}
-        for name, headers in SCHEMA.items():
-            if name not in existing:
-                ws = self.sh.add_worksheet(title=name, rows=200, cols=max(len(headers), 8))
-                ws.append_row(headers, value_input_option="RAW")
-            else:
-                ws = existing[name]
-                first_row = ws.row_values(1)
-                if not first_row:
-                    ws.append_row(headers, value_input_option="RAW")
+    def _normalize_records(self, ws):
+        """
+        Ambil semua baris dari sebuah worksheet, tapi "normalisasi" nama
+        kolomnya dulu (spasi jadi underscore, dll) -- biar nggak masalah
+        walau header di Sheets ditulis 'Minggu PO' atau 'Minggu_PO', dua-duanya
+        tetap kebaca sebagai field yang sama oleh kode ini.
+        """
+        records = ws.get_all_records()
+        normalized = []
+        for r in records:
+            new_r = {}
+            for k, v in r.items():
+                key_norm = k.strip().replace(" ", "_")
+                new_r[key_norm] = v
+            normalized.append(new_r)
+        return normalized
 
-        # kalau spreadsheet baru dibuat gspread nyisain tab default "Sheet1"
-        # kosong -- hapus biar rapi (aman diabaikan kalau gagal/gak ada).
-        try:
-            default_ws = self.sh.worksheet("Sheet1")
-            if not default_ws.get_all_values():
-                self.sh.del_worksheet(default_ws)
-        except gspread.exceptions.WorksheetNotFound:
-            pass
+    @staticmethod
+    def _loose_key(s):
+        """Ubah nama kolom jadi bentuk paling polos buat dibandingin
+        (buang semua spasi/underscore, huruf kecil semua). Biar 'Harga Dough
+        per Unit', 'Harga_Dough_Per_Unit', 'harga dough perunit' dianggap sama."""
+        return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
-        self._seed_pricelist_if_empty()
-        self._seed_customers_if_empty()
+    def _get_field(self, record, target_name, default=None):
+        """Cari value dari dict record berdasarkan nama kolom yang PALING MIRIP
+        sama target_name (toleran beda kapitalisasi/spasi/underscore)."""
+        target_loose = self._loose_key(target_name)
+        for k, v in record.items():
+            if self._loose_key(k) == target_loose:
+                return v
+        return default
 
-    def _seed_pricelist_if_empty(self):
-        ws = self.sh.worksheet(config.SHEET_PRICELIST)
-        rows = ws.get_all_values()
-        if len(rows) <= 1:  # cuma header / kosong total
-            data = [
-                [
-                    p["item_code"], p["nama"], p["deskripsi"], p["kategori"],
-                    p["satuan"], p["harga_jual"], p["harga_beli"],
-                ]
-                for p in config.SEED_PRODUCTS
-            ]
-            if data:
-                ws.append_rows(data, value_input_option="RAW")
+    def _find_price(self, price_map, kategori, rasa):
+        """
+        Cari harga untuk (kategori, rasa). Kalau nama rasa-nya nggak persis sama
+        (misal chat customer bilang 'Meses' tapi di PriceList tertulis 'Meises'),
+        cari yang paling MIRIP dalam kategori yang sama, bukan langsung anggap Rp0.
+        Return: (harga, nama_rasa_yang_dipakai_buat_disimpan)
+        """
+        kategori = kategori.strip()
+        rasa = rasa.strip()
+        key = (kategori, rasa)
+        if key in price_map:
+            return price_map[key], rasa
 
-    def _seed_customers_if_empty(self):
-        ws = self.sh.worksheet(config.SHEET_CUSTOMERS)
-        rows = ws.get_all_values()
-        if len(rows) <= 1:
-            data = [[nama, "", ""] for nama in config.SEED_CUSTOMERS]
-            if data:
-                ws.append_rows(data, value_input_option="RAW")
+        kandidat = [r for (k, r) in price_map.keys() if k == kategori]
+        mirip = difflib.get_close_matches(rasa, kandidat, n=1, cutoff=0.6)
+        if mirip:
+            rasa_cocok = mirip[0]
+            return price_map[(kategori, rasa_cocok)], rasa_cocok
 
-    def _ws(self, name):
-        return self.sh.worksheet(name)
+        return 0, rasa
 
-    # kolom yang isinya BISA kelihatan angka murni (no HP, kode item) tapi
-    # harus tetap dibaca sebagai teks -- kalau enggak, gspread otomatis
-    # nyoba convert ke number dan ngilangin angka 0 di depan (mis. No_HP
-    # "0812xxx" jadi 812).
-    _TEXT_ONLY_COLUMNS = {"No_HP", "Item_Code"}
+    @staticmethod
+    def _safe_text(val):
+        """Paksa value disimpen sebagai TEKS murni di Sheets, BUKAN kena
+        interpretasi jadi rumus -- ini yang bikin No HP Kelvin muncul jadi
+        '#ERROR!' di Sheets (kalau nomornya kebetulan diawali karakter kayak
+        '+' atau '=', Google Sheets ngira itu rumus, bukan teks biasa).
+        Nempelin apostrof di depan kalau perlu -- pola yang sama kayak yang
+        udah dipakai buat Minggu_PO/Tanggal_Kirim, sekarang diperluas buat
+        semua field teks bebas (No HP, Nama, Alamat) yang diisi customer/AI
+        dan berpotensi kebetulan diawali karakter pemicu rumus."""
+        s = str(val) if val is not None else ""
+        if s[:1] in ("=", "+", "-", "@"):
+            return f"'{s}"
+        return s
 
-    @classmethod
-    def _numericise_ignore_for(cls, headers):
-        ignore = []
-        for i, h in enumerate(headers, start=1):
-            if h in cls._TEXT_ONLY_COLUMNS:
-                ignore.append(i)
-        return ignore
+    @staticmethod
+    def _clean_phone(no_hp):
+        """Rapiin nomor HP -- buang semua spasi/strip/tanda baca, TAPI
+        pertahanin tanda '+' di depan kalau ada (buat nomor luar negeri kayak
+        '+31 6 85118794' -> '+31685118794'). Nomor kosong/'-' dibiarin apa
+        adanya. Dipanggil sekali di sini biar berlaku SAMA buat semua jalur
+        order masuk (web ATAU chat Telegram yang di-AI-parse), nggak perlu
+        dibersihin manual satu-satu di /edit."""
+        s = str(no_hp or "").strip()
+        if not s or s == "-":
+            return s
+        prefix = "+" if s.startswith("+") else ""
+        digits = re.sub(r"[^\d]", "", s)
+        return prefix + digits if digits else s
 
-    def _records(self, ws):
-        """get_all_records, tapi kolom No_HP/Item_Code selalu dipaksa jadi
-        teks (lihat _TEXT_ONLY_COLUMNS) biar angka 0 di depan gak ilang."""
-        headers = SCHEMA.get(ws.title) or ws.row_values(1)
-        ignore = self._numericise_ignore_for(headers)
-        return ws.get_all_records(default_blank="", numericise_ignore=ignore)
+    def add_order_rows(self, order: dict, minggu_po: str, box_groups: list = None):
+        """
+        order = {
+            "nama": str, "no_hp": str, "alamat": str, "metode": "Kirim"/"Ambil",
+            "items": [{"kategori": str, "rasa": str, "qty": int}, ...],
+            "ongkir": int
+        }
+        box_groups = rincian pembagian per box (opsional) dari hasil parse AI,
+        misal [{"jumlah_box": 22, "items": [{"kategori":.., "rasa":.., "qty_per_box":..}]}].
+        Disimpen sebagai JSON di kolom Box_Info (SAMA di semua baris item order
+        ini, kayak pola Ongkir/Tanggal_Kirim yang juga diulang di tiap baris) --
+        biar kalau surat jalan/invoice di-generate ULANG belakangan (/suratjalan,
+        /invoice), rincian box-nya masih bisa dibaca lagi, nggak ilang kayak
+        sebelumnya (yang cuma numpang lewat sekali doang pas konfirmasi).
 
-    # ---------------- PRICELIST ----------------
+        Satu order bisa berisi banyak item -> tiap item jadi 1 baris,
+        biar gampang di-rekap per rasa.
 
-    def get_price_list(self):
-        return self._records(self._ws(config.SHEET_PRICELIST))
-
-    def get_price_map(self):
-        """dict item_code (upper) -> row produk"""
-        out = {}
-        for row in self.get_price_list():
-            code = str(row.get("Item_Code", "")).strip().upper()
-            if code:
-                out[code] = row
-        return out
-
-    def find_product(self, query):
-        """Cari produk berdasarkan Item_Code (persis) atau nama/kategori
-        (loose contains, case-insensitive). Balikin row pertama yang cocok,
-        atau None."""
-        query = (query or "").strip().lower()
-        if not query:
-            return None
-        price_list = self.get_price_list()
-        for row in price_list:
-            if str(row.get("Item_Code", "")).strip().lower() == query:
-                return row
-        candidates = []
-        for row in price_list:
-            haystack = " ".join([
-                str(row.get("Nama", "")), str(row.get("Kategori", "")),
-                str(row.get("Deskripsi", "")),
-            ]).lower()
-            if query in haystack:
-                candidates.append(row)
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            # ambil yang nama-nya paling mirip (paling pendek = paling spesifik)
-            candidates.sort(key=lambda r: len(str(r.get("Nama", ""))))
-            return candidates[0]
-        return None
-
-    def update_price(self, item_code, harga_jual=None, harga_beli=None):
-        """Update Harga_Jual dan/atau Harga_Beli buat 1 produk di PriceList
-        (dicari by Item_Code, persis). Cuma field yang dikasih (bukan None)
-        yang diupdate. Balikin True kalau item_code ketemu & keupdate,
-        False kalau item_code gak ada di katalog."""
-        ws = self._ws(config.SHEET_PRICELIST)
-        headers = ws.row_values(1)
-        col_code = headers.index("Item_Code") + 1
-        col_jual = headers.index("Harga_Jual") + 1
-        col_beli = headers.index("Harga_Beli") + 1
-        target = (item_code or "").strip().upper()
-        if not target:
-            return False
-        all_values = ws.get_all_values()
-        for idx, row in enumerate(all_values[1:], start=2):
-            if len(row) < col_code:
-                continue
-            if row[col_code - 1].strip().upper() != target:
-                continue
-            if harga_jual is not None:
-                ws.update_cell(idx, col_jual, harga_jual)
-            if harga_beli is not None:
-                ws.update_cell(idx, col_beli, harga_beli)
-            return True
-        return False
-
-    def get_pricelist_text(self):
-        rows = self.get_price_list()
-        by_kategori = {}
-        for r in rows:
-            by_kategori.setdefault(r.get("Kategori", "Lainnya"), []).append(r)
-        lines = []
-        for kategori, items in by_kategori.items():
-            lines.append(f"*{kategori}*")
-            for it in items:
-                harga = f"Rp{int(it['Harga_Jual']):,}".replace(",", ".")
-                ket = f" ({it['Deskripsi']})" if it.get("Deskripsi") else ""
-                lines.append(f"  {it['Item_Code']} - {it['Nama']}{ket}: {harga}/{it['Satuan']}")
-            lines.append("")
-        return "\n".join(lines).strip()
-
-    # ---------------- CUSTOMERS ----------------
-
-    def get_customers(self):
-        return self._records(self._ws(config.SHEET_CUSTOMERS))
-
-    def get_customer_names(self):
-        return [str(r.get("Nama", "")).strip() for r in self.get_customers() if r.get("Nama")]
-
-    def add_customer_if_new(self, nama, no_hp="", alamat=""):
-        nama = (nama or "").strip()
-        if not nama:
-            return
-        existing_lower = [n.lower() for n in self.get_customer_names()]
-        if nama.lower() not in existing_lower:
-            self._ws(config.SHEET_CUSTOMERS).append_row(
-                [nama, no_hp, alamat], value_input_option="RAW"
-            )
-
-    # ---------------- NOMOR DOKUMEN ----------------
-
-    def _next_number(self, prefix, existing_numbers):
-        today = _today_str().replace("-", "")
-        today_prefix = f"{prefix}-{today}-"
-        seq = 1
-        used = [n for n in existing_numbers if n.startswith(today_prefix)]
-        if used:
-            nums = []
-            for n in used:
-                try:
-                    nums.append(int(n.split("-")[-1]))
-                except ValueError:
-                    pass
-            if nums:
-                seq = max(nums) + 1
-        return f"{today_prefix}{seq:03d}"
-
-    def next_invoice_number(self):
-        existing = [str(r.get("No_Invoice", "")) for r in self.get_all_orders()]
-        return self._next_number(config.INVOICE_PREFIX, existing)
-
-    def next_po_number(self):
-        existing = [str(r.get("No_PO", "")) for r in self.get_all_pos()]
-        return self._next_number(config.PO_PREFIX, existing)
-
-    # ---------------- ORDERS ----------------
+        Return: list of dict record item yang baru disimpan (dipakai langsung
+        buat generate invoice/surat jalan tanpa perlu baca ulang ke Sheets,
+        karena baca-langsung-setelah-tulis kadang belum "settle" di Google Sheets).
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        price_map = self.get_price_map()
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Tanggal_Kirim itu OPSIONAL -- kalau admin nggak nentuin tanggal
+        # custom (misal 'besok'), defaultnya sama kayak minggu_po (Kamis PO
+        # minggu berjalan), jadi perilaku lama nggak berubah kalau fitur ini
+        # nggak dipakai sama sekali.
+        tanggal_kirim = order.get("tanggal_kirim") or minggu_po
+        box_info_json = json.dumps(box_groups, ensure_ascii=False) if box_groups else ""
+        rows = []
+        order_records = []
+        for item in order["items"]:
+            harga, rasa_cocok = self._find_price(price_map, item["kategori"], item["rasa"])
+            subtotal = harga * item["qty"]
+            rows.append([
+                timestamp,
+                f"'{minggu_po}",  # apostrof di depan = paksa Sheets simpen sebagai teks,
+                                   # biar nggak otomatis diubah jadi format Date sendiri
+                self._safe_text(order["nama"]),
+                self._safe_text(self._clean_phone(order["no_hp"])),
+                self._safe_text(order["alamat"]),
+                order["metode"],
+                item["kategori"],
+                rasa_cocok,
+                item["qty"],
+                harga,
+                subtotal,
+                order.get("ongkir", 0),
+                "Pending",
+                f"'{tanggal_kirim}",  # kolom BARU, sengaja PALING BELAKANG biar
+                                       # nggak nggeser kolom lama yang udah ada
+                box_info_json,  # kolom BARU lagi, paling belakang setelah Tanggal_Kirim
+            ])
+            order_records.append({
+                "Kategori": item["kategori"],
+                "Rasa": rasa_cocok,
+                "Qty": item["qty"],
+                "Harga_Satuan": harga,
+                "Metode": order["metode"],
+                "No_HP": self._clean_phone(order["no_hp"]),
+                "Alamat": order["alamat"],
+                "Ongkir": order.get("ongkir", 0),
+                "Tanggal_Kirim": tanggal_kirim,
+                "Box_Info": box_info_json,
+            })
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        return order_records
 
     def get_all_orders(self):
-        return self._records(self._ws(config.SHEET_ORDERS))
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        return self._normalize_records(ws)
 
-    def add_order(self, nama_customer, no_hp, alamat, metode, items, ongkir=0):
-        """items: list of dict {item_code, nama_item, kategori, qty, satuan,
-        harga_satuan}. Nulis 1 baris per item, semuanya share No_Invoice yang
-        sama. Balikin no_invoice yang dipakai."""
-        with self._lock:
-            no_invoice = self.next_invoice_number()
-            ts = _now_str()
-            ws = self._ws(config.SHEET_ORDERS)
-            rows = []
-            for idx, it in enumerate(items):
-                subtotal = float(it["qty"]) * float(it["harga_satuan"])
-                rows.append([
-                    ts, no_invoice, nama_customer, no_hp, alamat, metode,
-                    it.get("item_code", ""), it["nama_item"], it.get("kategori", ""),
-                    it["qty"], it.get("satuan", ""), it["harga_satuan"], subtotal,
-                    ongkir if idx == 0 else 0,  # ongkir cuma dicatat 1x di baris pertama
-                    "Pending", "",
-                ])
-            ws.append_rows(rows, value_input_option="RAW")
-            self.add_customer_if_new(nama_customer, no_hp, alamat)
-        return no_invoice
+    def get_orders_by_week(self, minggu_po: str):
+        return [o for o in self.get_all_orders() if self._minggu_po_cocok(o.get("Minggu_PO"), minggu_po)]
 
-    def get_order_items(self, no_invoice):
-        return [r for r in self.get_all_orders() if str(r.get("No_Invoice", "")) == no_invoice]
-
-    def get_orders_by_customer(self, nama_customer, status=None):
-        nama_lower = (nama_customer or "").strip().lower()
-        out = []
-        for r in self.get_all_orders():
-            if str(r.get("Nama_Customer", "")).strip().lower() != nama_lower:
-                continue
-            if status and str(r.get("Status", "")) != status:
-                continue
-            out.append(r)
-        return out
-
-    def get_latest_invoice_for_customer(self, nama_customer):
-        orders = self.get_orders_by_customer(nama_customer)
-        if not orders:
-            return None
-        return sorted(orders, key=lambda r: str(r.get("Timestamp", "")))[-1].get("No_Invoice")
-
-    def mark_order_lunas(self, no_invoice):
-        """Tandai semua baris dengan No_Invoice ini jadi Lunas. Balikin total
-        (subtotal + ongkir) buat dicatat ke Kas."""
-        ws = self._ws(config.SHEET_ORDERS)
-        headers = ws.row_values(1)
-        col_invoice = headers.index("No_Invoice") + 1
-        col_status = headers.index("Status") + 1
-        col_tgl = headers.index("Tanggal_Bayar") + 1
-        col_subtotal = headers.index("Subtotal") + 1
-        col_ongkir = headers.index("Ongkir") + 1
-
-        all_values = ws.get_all_values()
-        total = 0.0
-        found = False
-        updates = []
-        for idx, row in enumerate(all_values[1:], start=2):
-            if len(row) < col_invoice:
-                continue
-            if row[col_invoice - 1] != no_invoice:
-                continue
-            found = True
-            try:
-                total += float(row[col_subtotal - 1] or 0)
-            except ValueError:
-                pass
-            try:
-                total += float(row[col_ongkir - 1] or 0)
-            except ValueError:
-                pass
-            updates.append((idx, col_status, "Lunas"))
-            updates.append((idx, col_tgl, _today_str()))
-        if not found:
-            return None
-        for r, c, v in updates:
-            ws.update_cell(r, c, v)
-        return total
-
-    def edit_order_header(self, no_invoice, updates):
-        """Betulin data header order yang SUDAH kesimpen (nama customer, no
-        HP, alamat, dan/atau metode) -- BUKAN item/qty/harga. `updates` dict
-        subset dari {nama_customer, no_hp, alamat, metode} -> nilai baru,
-        cuma field yang ada isinya yang diupdate. Update semua baris yang
-        share No_Invoice ini (1 order = beberapa baris, 1 per item).
-        Balikin True kalau invoice ketemu & keupdate, False kalau enggak
-        ketemu."""
-        field_to_col = {
-            "nama_customer": "Nama_Customer",
-            "no_hp": "No_HP",
-            "alamat": "Alamat",
-            "metode": "Metode",
-        }
-        ws = self._ws(config.SHEET_ORDERS)
-        headers = ws.row_values(1)
-        col_invoice = headers.index("No_Invoice") + 1
-        col_map = {}
-        for key, col_name in field_to_col.items():
-            val = (updates.get(key) or "").strip()
-            if val:
-                col_map[key] = (headers.index(col_name) + 1, val)
-
-        if not col_map:
-            return False
-
-        all_values = ws.get_all_values()
-        found = False
-        cell_updates = []
-        for idx, row in enumerate(all_values[1:], start=2):
-            if len(row) < col_invoice or row[col_invoice - 1] != no_invoice:
-                continue
-            found = True
-            for col, val in col_map.values():
-                cell_updates.append((idx, col, val))
-        if not found:
-            return False
-        for r, c, v in cell_updates:
-            ws.update_cell(r, c, v)
-        if "nama_customer" in updates and (updates.get("nama_customer") or "").strip():
-            self.add_customer_if_new(updates["nama_customer"].strip())
-        return True
-
-    def edit_order_item_qty(self, no_invoice, item_code, qty_baru=None, harga_baru=None):
-        """Ganti Qty dan/atau Harga_Satuan (Subtotal dihitung ulang otomatis
-        dari nilai final keduanya) buat 1 item di dalam order tertentu.
-        Field yang dikasih None dibiarin sama kayak sebelumnya. Balikin
-        True kalau baris item ketemu & keupdate, False kalau enggak (atau
-        kalau qty_baru & harga_baru dua-duanya None -- gak ada yang mau
-        diubah)."""
-        if qty_baru is None and harga_baru is None:
-            return False
-        ws = self._ws(config.SHEET_ORDERS)
-        headers = ws.row_values(1)
-        col_invoice = headers.index("No_Invoice") + 1
-        col_item_code = headers.index("Item_Code") + 1
-        col_qty = headers.index("Qty") + 1
-        col_harga = headers.index("Harga_Satuan") + 1
-        col_subtotal = headers.index("Subtotal") + 1
-        target_code = (item_code or "").strip().upper()
-        if not target_code:
-            return False
-        all_values = ws.get_all_values()
-        for idx, row in enumerate(all_values[1:], start=2):
-            if len(row) < col_item_code:
-                continue
-            if row[col_invoice - 1] != no_invoice:
-                continue
-            if row[col_item_code - 1].strip().upper() != target_code:
-                continue
-            try:
-                qty_val = float(qty_baru) if qty_baru is not None else float(row[col_qty - 1] or 0)
-                harga_val = float(harga_baru) if harga_baru is not None else float(row[col_harga - 1] or 0)
-            except (TypeError, ValueError):
-                return False
-            if qty_baru is not None:
-                ws.update_cell(idx, col_qty, qty_val)
-            if harga_baru is not None:
-                ws.update_cell(idx, col_harga, harga_val)
-            ws.update_cell(idx, col_subtotal, qty_val * harga_val)
+    def _minggu_po_cocok(self, nilai_di_sheet, minggu_po):
+        teks = str(nilai_di_sheet).strip()
+        if teks == minggu_po:
             return True
+        # Coba beberapa format lain, jaga-jaga Google Sheets ubah formatnya sendiri
+        for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                d = datetime.datetime.strptime(teks, fmt)
+                if d.strftime("%Y-%m-%d") == minggu_po:
+                    return True
+            except ValueError:
+                continue
         return False
 
-    def cancel_order(self, no_invoice):
-        """Tandai semua baris dengan No_Invoice ini Status='Batal' -- order
-        DIHAPUS/DIBATALIN secara logis (datanya tetep ada buat histori,
-        tapi otomatis keluar dari piutang karena get_pending_orders cuma
-        ngitung yang Status-nya Pending). Balikin True kalau ketemu, False
-        kalau enggak."""
-        ws = self._ws(config.SHEET_ORDERS)
-        headers = ws.row_values(1)
-        col_invoice = headers.index("No_Invoice") + 1
-        col_status = headers.index("Status") + 1
+    def delete_customer_week_rows(self, nama_customer: str, minggu_po: str) -> int:
+        """
+        Hapus SEMUA baris order milik nama_customer untuk minggu_po tertentu.
+        Dipakai buat fitur edit order: hapus yang lama dulu, baru ditulis ulang
+        yang baru -- biar nggak dobel keitung di rekap produksi.
+
+        Return: jumlah baris yang dihapus.
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
         all_values = ws.get_all_values()
-        found = False
-        for idx, row in enumerate(all_values[1:], start=2):
-            if len(row) < col_invoice or row[col_invoice - 1] != no_invoice:
+        if len(all_values) < 2:
+            return 0
+
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_minggu = header.index("Minggu_PO")
+            idx_nama = header.index("Nama_Customer")
+        except ValueError:
+            # Kolom nggak ketemu sama sekali -- jangan hapus apa-apa, lebih aman diem
+            return 0
+
+        nama_target = nama_customer.strip().lower()
+        rows_to_delete = []
+        for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header, gspread 1-indexed
+            if len(row) <= max(idx_minggu, idx_nama):
                 continue
-            found = True
-            ws.update_cell(idx, col_status, "Batal")
-        return found
+            row_nama = row[idx_nama].strip().lower()
+            row_minggu = row[idx_minggu]
+            if row_nama == nama_target and self._minggu_po_cocok(row_minggu, minggu_po):
+                rows_to_delete.append(i)
 
-    def get_pending_orders(self):
-        return [r for r in self.get_all_orders() if str(r.get("Status", "")) == "Pending"]
+        # Hapus dari baris PALING BAWAH dulu, biar nomor baris di atasnya nggak geser
+        for row_idx in sorted(rows_to_delete, reverse=True):
+            ws.delete_rows(row_idx)
 
-    def get_piutang_summary(self):
-        """dict nama_customer -> total belum lunas"""
-        out = {}
-        for r in self.get_pending_orders():
-            nama = r.get("Nama_Customer", "-")
+        return len(rows_to_delete)
+
+    def _parse_tanggal_fleksibel(self, tanggal_teks):
+        """Parse teks tanggal (format bebas, apa adanya dari Sheets) jadi
+        objek date, atau None kalau formatnya nggak dikenalin."""
+        teks = str(tanggal_teks).strip()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
             try:
-                subtotal = float(r.get("Subtotal", 0) or 0)
+                return datetime.datetime.strptime(teks, fmt).date()
             except ValueError:
-                subtotal = 0
-            try:
-                ongkir = float(r.get("Ongkir", 0) or 0)
-            except ValueError:
-                ongkir = 0
-            out[nama] = out.get(nama, 0) + subtotal + ongkir
-        return out
+                continue
+        return None
 
-    # ---------------- SUPPLIERS ----------------
+    def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
+        """
+        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 10:00 WIB PADA
+        HARI ITU SENDIRI otomatis dianggap udah kelar diproduksi & dikirim --
+        Status-nya diubah dari 'Pending' jadi 'Terkirim'. Jadi order buat
+        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 10:00 pagi juga -- nggak
+        perlu nunggu lewat ganti hari.
 
-    def get_suppliers(self):
-        return self._records(self._ws(config.SHEET_SUPPLIERS))
+        Cutoff-nya sengaja jam 10:00 (bukan lebih pagi) biar ada waktu buat
+        order yang masuk tengah malam (misal jam 00:00) tetap kejaring di
+        rekap produksi paginya sebelum ke-flip -- kalau cutoff-nya lebih
+        mepet ke jam 00:00, order dini hari kayak gitu bisa keburu ke-flip
+        duluan sebelum admin sempet liat & produksi.
 
-    def get_supplier_names(self):
-        return [str(r.get("Nama_Supplier", "")).strip() for r in self.get_suppliers() if r.get("Nama_Supplier")]
+        Dipanggil otomatis dari get_pending_orders_by_week() tiap kali ada
+        yang minta rekap produksi (jadi keupdate begitu direquest kapan aja
+        abis jam 10 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
+        harian jam 10:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
+        keupdate walau nggak ada satupun yang minta rekap hari itu -- itu
+        belum kepasang di sini karena scheduler_jobs.py belum ada.
 
-    def add_supplier_if_new(self, nama, no_hp="", barang="", alamat=""):
-        nama = (nama or "").strip()
-        if not nama:
-            return
-        existing_lower = [n.lower() for n in self.get_supplier_names()]
-        if nama.lower() not in existing_lower:
-            self._ws(config.SHEET_SUPPLIERS).append_row(
-                [nama, no_hp, barang, alamat], value_input_option="RAW"
-            )
-
-    # ---------------- PURCHASE ORDERS ----------------
-
-    def get_all_pos(self):
-        return self._records(self._ws(config.SHEET_PURCHASE_ORDERS))
-
-    def add_purchase_order(self, nama_supplier, items):
-        """items: list of dict {nama_item, qty, satuan, harga_satuan}.
-        Nulis 1 baris per item dgn No_PO yang sama, status Belum Lunas,
-        dan otomatis nambah entry 'Utang Baru' ke UtangSupplier.
-        Balikin (no_po, total)."""
-        with self._lock:
-            no_po = self.next_po_number()
-            ts = _now_str()
-            ws = self._ws(config.SHEET_PURCHASE_ORDERS)
-            rows = []
-            total = 0.0
-            for it in items:
-                subtotal = float(it["qty"]) * float(it["harga_satuan"])
-                total += subtotal
-                rows.append([
-                    ts, no_po, nama_supplier, it["nama_item"], it["qty"],
-                    it.get("satuan", ""), it["harga_satuan"], subtotal,
-                    "Belum Lunas", "",
-                ])
-            ws.append_rows(rows, value_input_option="RAW")
-            self.add_supplier_if_new(nama_supplier)
-            self._add_utang_entry(nama_supplier, no_po, "Utang Baru", total, "PO baru")
-        return no_po, total
-
-    def get_po_items(self, no_po):
-        return [r for r in self.get_all_pos() if str(r.get("No_PO", "")) == no_po]
-
-    def mark_po_lunas(self, no_po):
-        ws = self._ws(config.SHEET_PURCHASE_ORDERS)
-        headers = ws.row_values(1)
-        col_po = headers.index("No_PO") + 1
-        col_status = headers.index("Status") + 1
-        col_tgl = headers.index("Tanggal_Lunas") + 1
+        now: datetime.datetime timezone-aware, default waktu sekarang
+        (timezone bot).
+        Return: jumlah baris yang Status-nya barusan diubah.
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
         all_values = ws.get_all_values()
-        found = False
-        for idx, row in enumerate(all_values[1:], start=2):
-            if len(row) >= col_po and row[col_po - 1] == no_po:
-                found = True
-                ws.update_cell(idx, col_status, "Lunas")
-                ws.update_cell(idx, col_tgl, _today_str())
-        return found
+        if len(all_values) < 2:
+            return 0
 
-    # ---------------- UTANG SUPPLIER ----------------
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_status = header.index("Status")
+            idx_tanggal_kirim = header.index("Tanggal_Kirim")
+        except ValueError:
+            # Kolom Status/Tanggal_Kirim nggak ketemu (mis. header di Sheets
+            # belum lengkap) -- jangan ubah apa-apa, lebih aman diem drpd
+            # salah update kolom yang lain.
+            return 0
+        # Minggu_PO itu OPSIONAL buat fallback doang -- kalau nggak ketemu
+        # ya udah, order lama yang Tanggal_Kirim-nya kosong tetep diskip aja
+        # (nggak fatal, cuma nggak ke-rollover otomatis).
+        idx_minggu = header.index("Minggu_PO") if "Minggu_PO" in header else None
 
-    def _get_saldo_utang(self, nama_supplier):
-        total = 0.0
-        for r in self._records(self._ws(config.SHEET_UTANG_SUPPLIER)):
-            if str(r.get("Nama_Supplier", "")).strip().lower() != nama_supplier.strip().lower():
+        tz = date_helpers.get_timezone()
+        now = now or datetime.datetime.now(tz)
+        cutoff_hari_ini = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        # Sebelum jam 10 pagi, "batas hari" efektifnya masih KEMARIN -- order
+        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 10 pagi
+        # bener-bener lewat.
+        boundary = now.date() if now >= cutoff_hari_ini else (now - datetime.timedelta(days=1)).date()
+
+        rows_to_update = []
+        for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header
+            if len(row) <= idx_status:
+                continue
+            status = row[idx_status].strip()
+            if status.lower() != "pending":
+                continue
+
+            # Tanggal_Kirim itu kolom yang ditambahin BELAKANGAN -- order
+            # lama (sebelum kolom ini ada) bakal kosong di sini. Kalau
+            # kosong, balik ke Minggu_PO (Kamis PO minggu itu) sebagai
+            # tanggal kirim implisit -- SAMA PERSIS kayak fallback yang
+            # dipakai pas order itu pertama kali disimpen (add_order_rows).
+            # Tanpa ini, order lama bakal Pending selama-lamanya dan HARUS
+            # diubah manual satu-satu di Sheets.
+            tanggal_kirim = row[idx_tanggal_kirim].strip() if idx_tanggal_kirim < len(row) else ""
+            if not tanggal_kirim and idx_minggu is not None and idx_minggu < len(row):
+                tanggal_kirim = row[idx_minggu].strip()
+            if not tanggal_kirim:
+                continue
+
+            d = self._parse_tanggal_fleksibel(tanggal_kirim)
+            if d is not None and d <= boundary:
+                rows_to_update.append(i)
+
+        for row_idx in rows_to_update:
+            ws.update_cell(row_idx, idx_status + 1, "Terkirim")
+
+        return len(rows_to_update)
+
+    def mark_customer_delivered(self, nama_customer: str, minggu_po: str) -> int:
+        """
+        Tandain SEMUA baris order milik nama_customer untuk minggu_po
+        tertentu yang masih Status 'Pending' jadi 'Terkirim' -- dipakai buat
+        /kirim, jaring pengaman MANUAL kalau admin mau langsung nandain SAAT
+        ITU JUGA (nggak nunggu cutoff otomatis jam 10:00 WIB di
+        rollover_delivered_orders).
+
+        Return: jumlah baris yang barusan diubah.
+        """
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_status = header.index("Status")
+            idx_minggu = header.index("Minggu_PO")
+            idx_nama = header.index("Nama_Customer")
+        except ValueError:
+            return 0
+
+        nama_target = nama_customer.strip().lower()
+        rows_to_update = []
+        for i, row in enumerate(all_values[1:], start=2):
+            if len(row) <= max(idx_status, idx_minggu, idx_nama):
+                continue
+            row_nama = row[idx_nama].strip().lower()
+            row_minggu = row[idx_minggu]
+            row_status = row[idx_status].strip()
+            if row_nama == nama_target and row_status.lower() == "pending" \
+                    and self._minggu_po_cocok(row_minggu, minggu_po):
+                rows_to_update.append(i)
+
+        for row_idx in rows_to_update:
+            ws.update_cell(row_idx, idx_status + 1, "Terkirim")
+
+        return len(rows_to_update)
+
+    def get_pending_orders_by_week(self, minggu_po: str):
+        """Sama kayak get_orders_by_week, TAPI (1) jalanin
+        rollover_delivered_orders dulu (order yang tanggal kirimnya udah
+        lewat otomatis kepindah Status-nya), lalu (2) buang order yang
+        Status-nya udah 'Terkirim' dari hasilnya. KHUSUS dipakai buat REKAP
+        PRODUKSI, biar nggak keitung ulang order yang sebenernya udah kelar
+        diproduksi & dikirim.
+
+        SENGAJA dibikin method BARU, bukan ubah get_orders_by_week langsung
+        -- soalnya get_orders_by_week masih dipakai /invoice, /suratjalan,
+        /edit yang justru HARUS tetep bisa nemuin order biar admin bisa
+        cetak ulang / edit order yang udah kelar dikirim kalau perlu."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            # Kalau rollover gagal (mis. kolom belum lengkap di Sheets),
+            # tetep lanjut nampilin rekap apa adanya drpd bikin /rekap
+            # ikutan error gara-gara ini.
+            pass
+        return [
+            o for o in self.get_orders_by_week(minggu_po)
+            if str(o.get("Status", "")).strip().lower() != "terkirim"
+        ]
+
+    def get_pending_orders_by_tanggal_range(self, start_date: str, end_date: str):
+        """Rekap produksi berdasarkan TANGGAL_KIRIM (BUKAN Minggu_PO) dalam
+        rentang tanggal tertentu -- gabungan SEMUA customer yang tanggal
+        kirimnya jatuh di rentang itu, nggak peduli Minggu_PO-nya beda-beda.
+        Dipakai buat '/rekap 2026-08-29' atau '/rekap 2026-08-28:2026-08-29'.
+
+        Berguna banget buat kasus tanggal kirim custom (besok/lusa) yang
+        bikin Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu
+        nggak nongol di rekap mingguan biasa, tapi tetep kejaring di sini
+        selama Tanggal_Kirim-nya masuk rentang yang diminta.
+
+        start_date, end_date: string 'YYYY-MM-DD' (inklusif dua-duanya).
+        Sama kayak get_pending_orders_by_week: jalanin rollover dulu, baru
+        buang yang Status-nya udah 'Terkirim'."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            pass
+
+        try:
+            d_start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
+            d_end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            return []
+
+        result = []
+        for o in self.get_all_orders():
+            if str(o.get("Status", "")).strip().lower() == "terkirim":
+                continue
+            d = self._parse_tanggal_fleksibel(o.get("Tanggal_Kirim"))
+            if d is not None and d_start <= d <= d_end:
+                result.append(o)
+        return result
+
+    def get_pending_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
+        """Sama kayak get_orders_by_customer_week, TAPI (kalau ada campuran)
+        buang baris yang Status-nya udah 'Terkirim'. Dipakai KHUSUS oleh
+        /invoice & /suratjalan biar order BARU yang lagi mau di-invoice-in
+        nggak ke-mix diam-diam sama order LAIN (nggak berhubungan) dari
+        customer yang sama, yang KEBETULAN punya Minggu_PO yang sama juga
+        tapi udah kelar/Terkirim duluan.
+
+        TAPI kalau baris customer ini buat minggu itu TERNYATA semuanya
+        udah 'Terkirim' (nggak ada campuran, murni 1 order yang udah kelar
+        dikirim) -- balikin SEMUA baris apa adanya, biar kapabilitas REPRINT
+        invoice/surat jalan yang udah kelar (fitur lama) tetep jalan kayak
+        biasa. Cuma kasus CAMPURAN (sebagian Terkirim + sebagian Pending)
+        yang di-filter, soalnya di situ risiko ke-mix-nya."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            pass
+        semua = self.get_orders_by_customer_week(nama_customer, minggu_po)
+        belum_terkirim = [o for o in semua if str(o.get("Status", "")).strip().lower() != "terkirim"]
+        return belum_terkirim if belum_terkirim else semua
+
+    def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
+        return [
+            o for o in self.get_orders_by_week(minggu_po)
+            if o.get("Nama_Customer", "").strip().lower() == nama_customer.strip().lower()
+        ]
+
+    def get_orders_by_customer_any_week(self, nama_customer: str):
+        """Cari order customer ini di SEMUA Minggu_PO (bukan cuma minggu yang
+        lagi aktif) -- dipakai sebagai FALLBACK oleh /edit, /invoice,
+        /suratjalan kalau pencarian di minggu aktif nggak ketemu apa-apa.
+
+        Kejadian nyata yang bikin ini perlu: customer yang minta tanggal
+        kirim CUSTOM (misal 'besok') bisa aja Minggu_PO-nya udah kepindah ke
+        minggu berikutnya sama sistem, sementara admin masih mikirnya itu
+        "punya minggu ini" -- alhasil /edit dia nggak ketemu apa-apa padahal
+        datanya ada, cuma nyangkut di Minggu_PO yang beda.
+
+        Kalau customer ini ternyata punya order di BEBERAPA Minggu_PO
+        berbeda (kasus jarang tapi mungkin), ambil yang Minggu_PO-nya PALING
+        BARU aja -- across historical resiko ke-mix minggu lama yang udah
+        nggak relevan.
+
+        Return: (list_order, minggu_po_string) atau ([], None) kalau nggak
+        ketemu sama sekali."""
+        nama_target = nama_customer.strip().lower()
+        semua = [
+            o for o in self.get_all_orders()
+            if o.get("Nama_Customer", "").strip().lower() == nama_target
+        ]
+        if not semua:
+            return [], None
+
+        by_week = {}
+        for o in semua:
+            d = self._parse_tanggal_fleksibel(o.get("Minggu_PO"))
+            key = d or datetime.date.min
+            by_week.setdefault(key, []).append(o)
+
+        minggu_terbaru_key = max(by_week.keys())
+        orders_terbaru = by_week[minggu_terbaru_key]
+        minggu_po_str = str(orders_terbaru[0].get("Minggu_PO", "")).strip()
+        return orders_terbaru, minggu_po_str
+
+    def get_orders_by_month(self, year: int, month: int):
+        """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""
+        return self.get_orders_by_month_range(year, month, year, month)
+
+    def get_orders_by_month_range(self, year_start: int, month_start: int, year_end: int, month_end: int):
+        """Filter berdasarkan Minggu_PO yang jatuh di rentang bulan year_start-month_start
+        sampai year_end-month_end (inklusif). Buat laporan bulanan yang minta
+        beberapa bulan sekaligus, misal '2 bulan ke belakang' atau 'Juli-Agustus'."""
+        start_key = year_start * 100 + month_start
+        end_key = year_end * 100 + month_end
+        result = []
+        for o in self.get_all_orders():
+            teks = str(o.get("Minggu_PO")).strip()
+            d = None
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+                try:
+                    d = datetime.datetime.strptime(teks, fmt)
+                    break
+                except ValueError:
+                    continue
+            if d:
+                key = d.year * 100 + d.month
+                if start_key <= key <= end_key:
+                    result.append(o)
+        return result
+
+    # ---------- PRICE LIST ----------
+
+    def get_price_map(self):
+        """Return dict {(kategori, rasa): harga}"""
+        ws = self.sheet.worksheet(config.SHEET_PRICELIST)
+        records = self._normalize_records(ws)
+        result = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            rasa = self._get_field(r, "Rasa")
+            harga = self._get_field(r, "Harga")
+            if kategori is None or rasa is None or harga in (None, ""):
                 continue
             try:
-                jumlah = float(r.get("Jumlah", 0) or 0)
-            except ValueError:
-                jumlah = 0
-            if r.get("Jenis") == "Utang Baru":
-                total += jumlah
-            elif r.get("Jenis") == "Pembayaran":
-                total -= jumlah
-        return total
+                result[(str(kategori).strip(), str(rasa).strip())] = int(harga)
+            except (ValueError, TypeError):
+                continue
+        return result
 
-    def _add_utang_entry(self, nama_supplier, no_po, jenis, jumlah, catatan=""):
-        saldo = self._get_saldo_utang(nama_supplier)
-        saldo_baru = saldo + jumlah if jenis == "Utang Baru" else saldo - jumlah
-        self._ws(config.SHEET_UTANG_SUPPLIER).append_row(
-            [_today_str(), nama_supplier, no_po, jenis, jumlah, saldo_baru, catatan],
-            value_input_option="RAW",
-        )
-        return saldo_baru
+    def get_catalog_list(self):
+        """Return list of (kategori, rasa) yang BENERAN ada di PriceList.
+        Dipakai buat dikasih ke AI parsing biar dia cocokin item pesanan
+        ke produk asli, bukan asal nebak kategori."""
+        return sorted(self.get_price_map().keys())
 
-    def bayar_utang(self, nama_supplier, jumlah, catatan=""):
-        """Catat pembayaran ke supplier. Balikin sisa utang setelah dibayar."""
-        with self._lock:
-            saldo_baru = self._add_utang_entry(nama_supplier, "", "Pembayaran", jumlah, catatan)
-        return saldo_baru
+    def get_pricelist_text(self):
+        ws = self.sheet.worksheet(config.SHEET_PRICELIST)
+        records = self._normalize_records(ws)
+        by_category = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            rasa = self._get_field(r, "Rasa")
+            harga = self._get_field(r, "Harga")
+            if kategori is None or rasa is None or harga in (None, ""):
+                continue
+            by_category.setdefault(kategori, []).append((rasa, harga))
+        lines = []
+        for kategori, items in by_category.items():
+            lines.append(f"\n*{kategori}*")
+            for rasa, harga in items:
+                lines.append(f"  {rasa} — Rp{int(harga):,}".replace(",", "."))
+        return "\n".join(lines)
 
-    def get_utang_summary(self):
-        """dict nama_supplier -> sisa utang (cuma yang > 0)"""
-        names = set()
-        for r in self._records(self._ws(config.SHEET_UTANG_SUPPLIER)):
-            nama = str(r.get("Nama_Supplier", "")).strip()
-            if nama:
-                names.add(nama)
-        out = {}
-        for nama in names:
-            saldo = self._get_saldo_utang(nama)
-            if round(saldo) != 0:
-                out[nama] = saldo
-        return out
+    # ---------- SUPPLIER DOUGH PRICE ----------
 
-    # ---------------- KAS ----------------
-
-    def add_kas_entry(self, jenis, kategori, jumlah, keterangan="", ref="", tanggal=None):
-        """jenis: 'Masuk' atau 'Keluar'"""
-        self._ws(config.SHEET_KAS).append_row(
-            [tanggal or _today_str(), jenis, kategori, jumlah, keterangan, ref],
-            value_input_option="RAW",
-        )
-
-    def get_kas_entries(self, year=None, month=None):
-        rows = self._records(self._ws(config.SHEET_KAS))
-        if not year or not month:
-            return rows
-        prefix = f"{year:04d}-{month:02d}"
-        return [r for r in rows if str(r.get("Tanggal", "")).startswith(prefix)]
-
-    def get_laporan_bulanan(self, year, month):
-        entries = self.get_kas_entries(year, month)
-        masuk_by_kategori = {}
-        keluar_by_kategori = {}
-        total_masuk = 0.0
-        total_keluar = 0.0
-        for r in entries:
+    def get_dough_price_map(self):
+        """Return dict {kategori: harga_dough_per_unit}"""
+        ws = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
+        records = self._normalize_records(ws)
+        result = {}
+        for r in records:
+            kategori = self._get_field(r, "Kategori")
+            harga = self._get_field(r, "Harga_Dough_Per_Unit")
+            if kategori is None or harga in (None, ""):
+                continue
             try:
-                jumlah = float(r.get("Jumlah", 0) or 0)
-            except ValueError:
-                jumlah = 0
-            kategori = r.get("Kategori", "Lainnya") or "Lainnya"
-            if r.get("Jenis") == "Masuk":
-                masuk_by_kategori[kategori] = masuk_by_kategori.get(kategori, 0) + jumlah
-                total_masuk += jumlah
-            elif r.get("Jenis") == "Keluar":
-                keluar_by_kategori[kategori] = keluar_by_kategori.get(kategori, 0) + jumlah
-                total_keluar += jumlah
-        return {
-            "masuk_by_kategori": masuk_by_kategori,
-            "keluar_by_kategori": keluar_by_kategori,
-            "total_masuk": total_masuk,
-            "total_keluar": total_keluar,
-            "laba": total_masuk - total_keluar,
-        }
+                result[str(kategori).strip()] = int(harga)
+            except (ValueError, TypeError):
+                continue
+        return result
 
 
-_client = None
-_client_lock = threading.Lock()
+# Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
+# (proses autentikasi itu yang bikin lambat kalau diulang terus).
+_cached_client = None
 
 
 def get_sheets_client() -> "SheetsClient":
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = SheetsClient()
-    return _client
+    global _cached_client
+    if _cached_client is None:
+        _cached_client = SheetsClient()
+    return _cached_client
