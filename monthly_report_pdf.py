@@ -167,3 +167,4 @@ def generate_monthly_report_pdf(periode_label: str, month_results: list, grand_t
     doc.build(elements)
     buf.seek(0)
     return buf
+    
