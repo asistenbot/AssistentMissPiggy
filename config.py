@@ -1,6 +1,8 @@
 """
-Konfigurasi bisnis Miss Piggy.
-SEMUA nilai di bawah ini WAJIB dicek/diganti sesuai data asli lo sebelum deploy.
+Konfigurasi bisnis Anugerah Sejahtera Sentosa.
+SEMUA nilai di bawah ini WAJIB dicek/diganti sesuai data asli sebelum deploy.
+Yang keliatan "TODO" belum diisi Riky pas awal setup -- edit langsung di sini
+atau tinggal minta tolong Claude Code buat ganti.
 """
 
 import os
@@ -10,119 +12,96 @@ load_dotenv()
 
 # ==== TELEGRAM ====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# Bisa lebih dari 1 admin -- isi OWNER_TELEGRAM_IDS di .env dipisah koma,
-# misal: OWNER_TELEGRAM_IDS=123456789,987654321
-# (OWNER_TELEGRAM_ID lama masih didukung buat yang cuma 1 admin)
 _owner_ids_raw = os.getenv("OWNER_TELEGRAM_IDS") or os.getenv("OWNER_TELEGRAM_ID", "0")
 OWNER_TELEGRAM_IDS = [int(x.strip()) for x in _owner_ids_raw.split(",") if x.strip()]
 
-# Opsional: kalau diisi, auto-recap Rabu & laporan bulanan dikirim ke GRUP ini
-# (1x doang, semua admin di grup itu liat bareng), bukan ke tiap admin
-# terpisah. ID grup Telegram biasanya angka NEGATIF, contoh: -1001234567890
+# Opsional: kalau diisi, order/invoice/dll dikirim ke GRUP ini juga (bukan cuma DM admin).
 # Cara ambil ID grup: tambahin bot ke grup, ketik /groupid di grup itu.
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID") or None
-
-# ==== TOPIC ID PER KATEGORI (opsional, isi lewat Railway env var) ====
-# Kalau diisi, kategori itu dikirim ke TOPIC tertentu di dalam GROUP_CHAT_ID
-# (grup forum Telegram yang sama). Kalau mau grup TERPISAH sama sekali buat
-# 1 kategori, isi GROUP_CHAT_ID_xxx di bawah (bukan TOPIC_ID_xxx).
-def _topic_id(env_name):
-    val = os.getenv(env_name)
-    return int(val) if val else None
-TOPIC_ID_ORDER = _topic_id("TOPIC_ID_ORDER")
-TOPIC_ID_INVOICE = _topic_id("TOPIC_ID_INVOICE")
-TOPIC_ID_SURATJALAN = _topic_id("TOPIC_ID_SURATJALAN")
-TOPIC_ID_REKAPPRODUKSI = _topic_id("TOPIC_ID_REKAPPRODUKSI")
-TOPIC_ID_LAPORANBULANAN = _topic_id("TOPIC_ID_LAPORANBULANAN")
-
-GROUP_CHAT_ID_ORDER = os.getenv("GROUP_CHAT_ID_ORDER") or None
-
 
 # ==== ANTHROPIC ====
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = "claude-sonnet-4-6"
 
 # ==== GOOGLE SHEETS ====
-# Untuk deploy di Railway/Render: isi GOOGLE_SERVICE_ACCOUNT_JSON (isi lengkap
-# file service_account.json, di-paste sebagai 1 baris) di Environment Variables.
-# Untuk jalan di komputer lokal: taruh file service_account.json di folder ini,
-# biarin GOOGLE_SERVICE_ACCOUNT_JSON kosong.
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 SHEET_ORDERS = "Orders"
 SHEET_PRICELIST = "PriceList"
-SHEET_SUPPLIER_DOUGH = "SupplierDough"
+SHEET_CUSTOMERS = "Customers"
+SHEET_SUPPLIERS = "Suppliers"
+SHEET_PURCHASE_ORDERS = "PurchaseOrders"
+SHEET_UTANG_SUPPLIER = "UtangSupplier"
+SHEET_KAS = "Kas"
 
 # ==== TIMEZONE ====
 TIMEZONE = "Asia/Jakarta"
 
-# ==== JADWAL BISNIS ====
-# Hari buka PO: Sabtu s.d Rabu. Cutoff input ke produksi: Rabu jam 18:00.
-PO_CUTOFF_DAY = "wed"      # Rabu
-PO_CUTOFF_HOUR = 18
-PO_CUTOFF_MINUTE = 0
+# ==== IDENTITAS USAHA (buat kop Invoice / Surat Jalan / PO) ====
+BUSINESS_NAME = "Anugerah Sejahtera Sentosa"
 
-# Pengiriman: Kamis jam 14:00 - 15:00 dari lokasi Miss Piggy
-DELIVERY_DAY = "thu"
-DELIVERY_WINDOW = "14:00 - 15:00"
-
-# ==== JADWAL AUTO REKAP PRODUKSI (tiap Rabu) ====
-# Format 24 jam, WIB
-AUTO_RECAP_TIMES = [
-    (15, 0),
-    (16, 0),
-    (19, 0),
-]
-
-# ==== JADWAL AUTO LAPORAN BULANAN ====
-# Tanggal berapa tiap bulan, jam berapa. Default: tanggal 1, jam 09:00,
-# ngerekap bulan SEBELUMNYA.
-MONTHLY_REPORT_DAY = 1
-MONTHLY_REPORT_HOUR = 9
-MONTHLY_REPORT_MINUTE = 0
+# TODO: Riky belum kasih alamat usaha -- isi di sini biar muncul di kop invoice
+# & surat jalan. Kalau ada 2 lokasi (misal gudang vs alamat pengiriman/pickup),
+# boleh dibedain juga.
+BUSINESS_ADDRESS = "TODO: isi alamat usaha di sini"
+PICKUP_ADDRESS = "TODO: isi alamat pickup/gudang di sini (kalau beda dari BUSINESS_ADDRESS)"
 
 # ==== INFO PEMBAYARAN (buat invoice customer) ====
 BANK_NAME = "BCA"
-BANK_ACCOUNT_NUMBER = "3791233052"
-BANK_ACCOUNT_NAME = "Merina"
-
-# ==== LOKASI PICKUP ====
-PICKUP_ADDRESS = "Babakan Jeruk IIIB No. 25 (akan diinfo jika sudah bisa diambil, biasanya jam 14.00-15.00)"
+BANK_ACCOUNT_NUMBER = "5170260998"
+BANK_ACCOUNT_NAME = "Riky Kurniawan"
 
 # ==== KATEGORI PRODUK ====
-# Dipakai buat validasi & buat laporan bulanan ke supplier.
-# Harga dough per kategori sebenarnya diambil dari tab SupplierDough di Sheets,
-# list ini cuma buat referensi/validasi kategori yang valid.
 CATEGORIES = [
-    "Roti",
-    "Roti Gandum",
-    "Donat",
-    "Roti Tawar",
-    "Bun Polos",
-    "Roti Tawar Loaf",
+    "TULIP",
+    "SAMPAH",
+    "PP",
+    "PE",
+    "PILLOW CAKE",
 ]
 
-BUSINESS_NAME = "Miss Piggy"
+# ==== SATUAN YANG VALID ====
+UNITS = ["KG", "Piece", "Pax"]
 
-# ==== ALIAS / SINONIM PRODUK YANG PASTI ====
-# Kalau customer nyebut nama di 'sebutan', itu SELALU dianggap SAMA DENGAN
-# kategori+rasa yang ditentukan, TANPA perlu konfirmasi ke admin lagi.
-# Beda dari kasus yang beneran ambigu (misal "Ham Cheese" bisa Roti atau Roti
-# Gandum) yang emang harus ditanya dulu -- alias ini untuk kasus yang UDAH PASTI
-# menurut bisnis lo, cuma istilahnya beda dari nama resmi di PriceList.
-#
-# Tambahin baris baru di sini kapan aja kalau nemu kasus serupa, format:
-# {"sebutan": "penjelasan kapan alias ini berlaku", "kategori": "...", "rasa": "..."}
-PRODUCT_ALIASES = [
-    {
-        "sebutan": "Donat Coklat (disebut tanpa kata lain seperti 'celup')",
-        "kategori": "Donat",
-        "rasa": "Meises",
-    },
+# ==== KATALOG AWAL (di-seed otomatis ke tab PriceList kalau tab-nya masih kosong) ====
+# Kalau mau ubah harga sehari-hari, GAK PERLU edit di sini -- cukup edit
+# langsung di tab PriceList di Google Sheets, bot selalu baca dari situ.
+# List ini cuma dipakai SEKALI waktu bot pertama kali jalan (buat isi awal).
+SEED_PRODUCTS = [
+    {"item_code": "PS91", "nama": "Plastik Tulip Putih 15", "deskripsi": "POLOS", "kategori": "TULIP", "satuan": "Pax", "harga_jual": 17000, "harga_beli": 0},
+    {"item_code": "T30", "nama": "Tulip Putih UK 30", "deskripsi": "POLOS", "kategori": "TULIP", "satuan": "KG", "harga_jual": 28000, "harga_beli": 26000},
+    {"item_code": "PS60", "nama": "Plastik Sampah 60x100x05", "deskripsi": "POLOS", "kategori": "SAMPAH", "satuan": "KG", "harga_jual": 20000, "harga_beli": 18165},
+    {"item_code": "T40", "nama": "Tulip Putih UK 40", "deskripsi": "POLOS", "kategori": "TULIP", "satuan": "KG", "harga_jual": 28000, "harga_beli": 26000},
+    {"item_code": "PCB", "nama": "Pillow Cake Plong", "deskripsi": "SABLON 1 SISI", "kategori": "PILLOW CAKE", "satuan": "Piece", "harga_jual": 1000, "harga_beli": 710},
+    {"item_code": "PP12", "nama": "PP Bening 12x25", "deskripsi": "POLOS", "kategori": "PP", "satuan": "KG", "harga_jual": 33000, "harga_beli": 28050},
+    {"item_code": "PP40", "nama": "PP Bening 40x60", "deskripsi": "POLOS", "kategori": "PP", "satuan": "KG", "harga_jual": 33000, "harga_beli": 28050},
+    {"item_code": "PS90", "nama": "Plastik Sampah 90x120x06", "deskripsi": "POLOS", "kategori": "SAMPAH", "satuan": "KG", "harga_jual": 21500, "harga_beli": 18165},
+    {"item_code": "PP35", "nama": "PP Bening 35x50", "deskripsi": "POLOS", "kategori": "PP", "satuan": "KG", "harga_jual": 34500, "harga_beli": 28050},
+    {"item_code": "PE15", "nama": "PE Bening UK 15", "deskripsi": "POLOS", "kategori": "PE", "satuan": "Piece", "harga_jual": 375, "harga_beli": 125},
+    {"item_code": "PE28", "nama": "PE Bening UK 28", "deskripsi": "POLOS", "kategori": "PE", "satuan": "Piece", "harga_jual": 700, "harga_beli": 365},
+    {"item_code": "PCT", "nama": "Pillow Cake XL", "deskripsi": "SABLON 1 SISI", "kategori": "PILLOW CAKE", "satuan": "Piece", "harga_jual": 1600, "harga_beli": 1380},
+    {"item_code": "BY24", "nama": "Baso Yen UK 24", "deskripsi": "SABLON 1 SISI", "kategori": "TULIP", "satuan": "Piece", "harga_jual": 935, "harga_beli": 400},
+    {"item_code": "PS80", "nama": "Plastik Sampah 80x120x06", "deskripsi": "POLOS", "kategori": "SAMPAH", "satuan": "KG", "harga_jual": 20000, "harga_beli": 18165},
+    {"item_code": "PP26", "nama": "PP Bening 26x40", "deskripsi": "POLOS", "kategori": "PP", "satuan": "KG", "harga_jual": 34500, "harga_beli": 28050},
+    {"item_code": "PCG", "nama": "Pillow Cake L", "deskripsi": "SABLON 1 SISI", "kategori": "PILLOW CAKE", "satuan": "Piece", "harga_jual": 915, "harga_beli": 505},
 ]
-GROUP_CHAT_ID_INVOICE = os.getenv("GROUP_CHAT_ID_INVOICE") or None
-GROUP_CHAT_ID_SURATJALAN = os.getenv("GROUP_CHAT_ID_SURATJALAN") or None
-GROUP_CHAT_ID_REKAPPRODUKSI = os.getenv("GROUP_CHAT_ID_REKAPPRODUKSI") or None
-GROUP_CHAT_ID_LAPORANBULANAN = os.getenv("GROUP_CHAT_ID_LAPORANBULANAN") or None
+
+# ==== CUSTOMER AWAL (di-seed otomatis ke tab Customers kalau masih kosong) ====
+SEED_CUSTOMERS = [
+    "GRANDIA HOTEL",
+    "Baso Yen",
+    "KURO KOFFEE",
+    "SHU GUO YIN XIANG",
+    "PILLOW CAKE",
+]
+
+# ==== NOMOR DOKUMEN ====
+# Format nomor invoice / surat jalan / PO. {seq} diganti nomor urut per hari.
+INVOICE_PREFIX = "INV"
+SURAT_JALAN_PREFIX = "SJ"
+PO_PREFIX = "PO"
+
+# ==== KATEGORI KAS (buat /kas manual & laporan bulanan) ====
+KAS_KELUAR_KATEGORI = ["Bayar Supplier", "Operasional", "Gaji", "Lainnya"]

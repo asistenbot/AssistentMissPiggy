@@ -1,424 +1,347 @@
 """
-Generate teks Invoice, Surat Jalan, Rekap Produksi, dan Laporan Bulanan.
-Semua dalam format teks rapi (Markdown Telegram) biar gampang di-forward/copas.
+Generate Invoice, Surat Jalan, dan Purchase Order sebagai GAMBAR (PNG, buat
+preview cepet & gampang di-forward lewat chat) SEKALIGUS PDF (buat di-print
+rapi di kertas A4). Tiap fungsi generate_*_image balikin tuple
+(png_buffer, pdf_buffer).
 """
 
+import io
+import os
 import datetime
+
+from PIL import Image, ImageDraw, ImageFont
 
 import config
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_DIR = os.path.join(BASE_DIR, "fonts")
+LOGO_PATH = os.path.join(BASE_DIR, "logo.jpg")
+
+WIDTH = 1000
+MARGIN = 50
+INK = (30, 35, 33)
+MUTED = (110, 122, 114)
+ACCENT = (15, 123, 108)
+LINE = (220, 225, 219)
+BG = (255, 255, 255)
+SOFT_BG = (240, 244, 241)
+
+
+def _font(name, size):
+    path = os.path.join(FONT_DIR, name)
+    return ImageFont.truetype(path, size)
+
+
+def F_TITLE(size=34):
+    return _font("DejaVuSans-Bold.ttf", size)
+
+
+def F_BOLD(size=18):
+    return _font("DejaVuSans-Bold.ttf", size)
+
+
+def F_REG(size=17):
+    return _font("DejaVuSans.ttf", size)
+
+
+def F_SMALL(size=14):
+    return _font("DejaVuSans.ttf", size)
+
+
+def _pdf_from_image(img, page_width_in=7.48):
+    """Ubah 1 gambar dokumen (invoice/surat jalan/PO) jadi PDF 1 halaman,
+    diskalain biar lebar dokumennya ~190mm (7.48in) -- pas dicetak di
+    kertas A4 (210mm) masih nyisa margin kiri-kanan yang wajar. Tingginya
+    ngikutin proporsi gambar aslinya (dokumen kita ketinggiannya emang
+    variabel tergantung jumlah item, bukan dipaksa pas A4 -- kalau order-nya
+    pendek ya PDF-nya pendek, printer/PDF reader yang urus \"fit to page\"
+    kalau perlu)."""
+    resolution = img.width / page_width_in
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PDF", resolution=resolution)
+    buf.seek(0)
+    return buf
+
 
 def rupiah(n):
-    return "Rp" + f"{int(n):,}".replace(",", ".")
+    try:
+        n = int(round(float(n)))
+    except (TypeError, ValueError):
+        n = 0
+    return "Rp" + f"{n:,}".replace(",", ".")
 
 
-def _is_delivery_metode(metode):
-    """True kalau metode-nya berarti 'dikirim' -- ada 2 istilah yang beredar
-    di sistem ini: order dari halaman web pakai 'Diantar', tapi order yang
-    di-AI parse dari chat manual (ai_parser.py) pakai 'Kirim'. Disamain sama
-    helper versi bot.py/web_order_server.py/receipt.py (dicek berbasis
-    substring biar dua-duanya, dan variasi kayak 'Dikirim', kena) -- SEBELUM
-    ini, fungsi-fungsi di bawah nyocokin metode pake '== \"Kirim\"' persis,
-    jadi order dari web ('Diantar') ke-skip diam-diam dari daftar kurir
-    (kejadian di order Ratna: kehitung di rekap produksi tapi ilang dari
-    'DIKIRIM KURIR')."""
-    m = (metode or "").strip().lower()
-    return "antar" in m or "kirim" in m
-
-
-def build_invoice(nama_customer: str, minggu_po: str, orders: list) -> str:
-    if not orders:
-        return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
-
+def _wrap_text(draw, text, font, max_width):
+    text = str(text)
+    words = text.split()
     lines = []
-    lines.append(f"*INVOICE — {config.BUSINESS_NAME}*")
-    lines.append(f"Kepada: {nama_customer}")
-    lines.append(f"Tanggal Kirim/Ambil: {minggu_po}")
-    lines.append(f"Metode: {orders[0].get('Metode', '-')}")
-    lines.append("")
-    lines.append("Rincian Pesanan:")
+    current = ""
+    for w in words:
+        trial = f"{current} {w}".strip()
+        if draw.textlength(trial, font=font) <= max_width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = w
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def _load_logo(max_size=90):
+    if not os.path.exists(LOGO_PATH):
+        return None
+    logo = Image.open(LOGO_PATH).convert("RGBA")
+    logo.thumbnail((max_size, max_size))
+    return logo
+
+
+def _header(draw, img, doc_title, doc_number, tanggal):
+    logo = _load_logo()
+    x = MARGIN
+    if logo is not None:
+        img.paste(logo, (x, MARGIN), logo)
+        x += logo.width + 20
+    draw.text((x, MARGIN), config.BUSINESS_NAME, font=F_BOLD(22), fill=INK)
+    addr_lines = _wrap_text(draw, config.BUSINESS_ADDRESS, F_SMALL(14), 380)
+    y = MARGIN + 30
+    for line in addr_lines[:2]:
+        draw.text((x, y), line, font=F_SMALL(14), fill=MUTED)
+        y += 19
+
+    # kanan atas: judul dokumen + nomor + tanggal
+    title_w = draw.textlength(doc_title, font=F_TITLE(30))
+    draw.text((WIDTH - MARGIN - title_w, MARGIN), doc_title, font=F_TITLE(30), fill=ACCENT)
+    num_text = f"No. {doc_number}"
+    num_w = draw.textlength(num_text, font=F_BOLD(16))
+    draw.text((WIDTH - MARGIN - num_w, MARGIN + 42), num_text, font=F_BOLD(16), fill=INK)
+    tgl_text = tanggal
+    tgl_w = draw.textlength(tgl_text, font=F_SMALL(14))
+    draw.text((WIDTH - MARGIN - tgl_w, MARGIN + 64), tgl_text, font=F_SMALL(14), fill=MUTED)
+
+    line_y = MARGIN + 110
+    draw.line([(MARGIN, line_y), (WIDTH - MARGIN, line_y)], fill=LINE, width=2)
+    return line_y + 24
+
+
+def _footer_note(draw, y, lines):
+    for line in lines:
+        draw.text((MARGIN, y), line, font=F_SMALL(13), fill=MUTED)
+        y += 18
+    return y
+
+
+def _table_header(draw, y, columns):
+    """columns: list of (label, x, width, align)"""
+    draw.rectangle([(MARGIN, y), (WIDTH - MARGIN, y + 34)], fill=SOFT_BG)
+    for label, x, w, align in columns:
+        tw = draw.textlength(label, font=F_BOLD(14))
+        tx = x + (w - tw if align == "right" else 0)
+        draw.text((tx, y + 9), label, font=F_BOLD(14), fill=INK)
+    return y + 34
+
+
+def _now_tanggal():
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+    hari = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"][now.weekday()]
+    return f"{hari}, {now.day} {['','Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'][now.month]} {now.year}"
+
+
+def generate_invoice_image(no_invoice, nama_customer, no_hp, alamat, metode, items, ongkir=0):
+    """items: list of dict {nama_item, qty, satuan, harga_satuan, subtotal}"""
+    row_h = 30
+    header_extra = 90  # info customer
+    height = 300 + header_extra + row_h * (len(items) + 1) + 160
+    img = Image.new("RGB", (WIDTH, int(height)), BG)
+    draw = ImageDraw.Draw(img)
+
+    y = _header(draw, img, "INVOICE", no_invoice, _now_tanggal())
+
+    draw.text((MARGIN, y), "Ditagihkan kepada:", font=F_SMALL(13), fill=MUTED)
+    y += 20
+    draw.text((MARGIN, y), nama_customer, font=F_BOLD(19), fill=INK)
+    y += 26
+    if no_hp:
+        draw.text((MARGIN, y), f"HP: {no_hp}", font=F_REG(14), fill=MUTED)
+        y += 19
+    if alamat:
+        for line in _wrap_text(draw, alamat, F_REG(14), 500):
+            draw.text((MARGIN, y), line, font=F_REG(14), fill=MUTED)
+            y += 19
+    draw.text((MARGIN, y), f"Metode: {metode}", font=F_REG(14), fill=MUTED)
+    y += 30
+
+    columns = [
+        ("ITEM", MARGIN + 10, 380, "left"),
+        ("QTY", MARGIN + 400, 90, "right"),
+        ("HARGA", MARGIN + 520, 150, "right"),
+        ("SUBTOTAL", MARGIN + 690, WIDTH - MARGIN - 10 - (MARGIN + 690), "right"),
+    ]
+    y = _table_header(draw, y, columns)
 
     total = 0
-    for o in orders:
-        qty = int(o["Qty"])
-        harga = int(o["Harga_Satuan"])
-        subtotal = qty * harga
+    for it in items:
+        subtotal = float(it["qty"]) * float(it["harga_satuan"])
         total += subtotal
-        lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{qty} @ {rupiah(harga)} = {rupiah(subtotal)}")
-
-    ongkir = int(orders[0].get("Ongkir", 0) or 0)
-    grand_total = total + ongkir
-
-    lines.append("")
-    lines.append(f"Subtotal: {rupiah(total)}")
-    lines.append(f"Ongkir: {rupiah(ongkir)}")
-    lines.append(f"*Total: {rupiah(grand_total)}*")
-    lines.append("")
-    lines.append("Pembayaran transfer ke:")
-    lines.append(f"{config.BANK_NAME} — {config.BANK_ACCOUNT_NUMBER}")
-    lines.append(f"a.n. {config.BANK_ACCOUNT_NAME}")
-    lines.append("")
-    lines.append("Terima kasih sudah pesan di Miss Piggy 🐷🍞")
-
-    return "\n".join(lines)
-
-
-def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
-    if not orders:
-        return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
-
-    lines = []
-    lines.append(f"*SURAT JALAN — {config.BUSINESS_NAME}*")
-    lines.append(f"Tanggal Kirim: {minggu_po} ({config.DELIVERY_WINDOW})")
-    lines.append(f"Nama: {nama_customer}")
-    lines.append(f"No HP: {orders[0].get('No_HP', '-')}")
-    lines.append(f"Metode: {orders[0].get('Metode', '-')}")
-    # DULU: `if orders[0].get("Metode") == "Kirim"` -- exact match doang,
-    # jadi order dari web ("Diantar") kena cabang ELSE dan alamatnya nggak
-    # ketulis (malah nongol alamat toko buat ambil sendiri, padahal harusnya
-    # dikirim ke alamat customer). Sekarang disamain pake _is_delivery_metode.
-    if _is_delivery_metode(orders[0].get("Metode")):
-        lines.append(f"Alamat: {orders[0].get('Alamat', '-')}")
-    else:
-        lines.append(f"Ambil di: {config.PICKUP_ADDRESS}")
-    lines.append("")
-    lines.append("Barang:")
-    for o in orders:
-        lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}")
-
-    return "\n".join(lines)
-
-
-def build_production_recap(minggu_po: str, orders: list) -> str:
-    """Total produksi per rasa aja (buat baking), tanpa pembagian kirim/ambil."""
-    if not orders:
-        return f"Belum ada order masuk untuk minggu PO {minggu_po}."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — Minggu PO {minggu_po}*"]
-    lines.append(f"(Kirim: {config.DELIVERY_DAY.upper()} {config.DELIVERY_WINDOW})")
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_customer(nama_customer: str, minggu_po: str, orders: list) -> str:
-    """Rekap produksi TAPI cuma buat 1 customer tertentu -- dipanggil manual
-    kalau admin EKSPLISIT minta (misal '/rekap Ci Meyvany' atau bahasa
-    natural 'minta rekap produksi Ci Meyvany'), BUKAN bagian dari rekap
-    mingguan otomatis (yang tetap gabungan semua customer seperti biasa,
-    lihat build_production_recap -- TIDAK diubah/disentuh sama sekali).
-
-    Berguna buat ngecek kebutuhan produksi 1 pesanan gede/khusus secara
-    terpisah, apalagi kalau tanggal kirimnya beda dari minggu PO biasa
-    (Tanggal_Kirim custom, misal order borongan yang mesti dikirim lebih
-    cepat/lambat dari Kamis PO biasa) -- makanya tanggal kirim customer ini
-    ditampilin jelas di baris kedua."""
-    if not orders:
-        return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
-
-    tanggal_kirim = orders[0].get("Tanggal_Kirim") or minggu_po
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {nama_customer}*"]
-    lines.append(f"(Tanggal Kirim: {tanggal_kirim})")
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_multi(nama_list: list, orders: list) -> str:
-    """Rekap produksi GABUNGAN buat BEBERAPA customer sekaligus -- dipanggil
-    kalau admin sebut lebih dari 1 nama dalam 1 permintaan (misal 'minta
-    rekap produksi Franky dan Kelvin' atau '/rekap Franky, Kelvin'). Total
-    per rasa digabung SEMUA customer yang disebut jadi satu angka, sama
-    kayak build_production_recap (mingguan) tapi scope-nya cuma nama-nama
-    yang diminta, bukan semua customer di minggu itu."""
-    label = ", ".join(nama_list)
-    if not orders:
-        return f"Nggak ada order atas nama {label}."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {label}*"]
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_tanggal(label: str, orders: list) -> str:
-    """Rekap produksi berdasarkan RENTANG TANGGAL KIRIM (BUKAN Minggu_PO) --
-    gabungan SEMUA customer yang tanggal kirimnya jatuh di rentang itu,
-    nggak peduli Minggu_PO-nya beda-beda. Dipanggil manual kalau admin minta
-    tanggal spesifik (misal '/rekap 2026-08-29' atau bahasa natural 'rekap
-    produksi besok'/'rekap produksi sampe besok').
-
-    Berguna khusus buat kasus tanggal kirim custom (besok/lusa) yang bikin
-    Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu nggak nongol
-    di rekap mingguan biasa (build_production_recap) ataupun rekap per-nama
-    (build_production_recap_customer) kalau nama-nya nggak disebut satu-satu,
-    tapi tetep kejaring di sini asal Tanggal_Kirim-nya masuk rentang.
-
-    label: teks buat judul, misal '2026-08-29' atau '2026-08-28 s/d 2026-08-29'."""
-    if not orders:
-        return f"Belum ada order untuk tanggal {label}."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {label}*"]
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def _group_per_customer(orders: list) -> dict:
-    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
-    diringkas jadi boolean 'ini pengiriman apa bukan' lewat
-    _is_delivery_metode -- BUKAN metode/nama literal apa adanya.
-
-    DULU key-nya `(metode, nama)` mentah, jadi 1 customer yang SAMA tapi
-    kebetulan punya order dari 2 SUMBER beda (web selalu nulis 'Diantar',
-    chat manual yang di-AI-parse kadang nulis 'Kirim') kepisah jadi 2 grup
-    beda -- muncul 2x di daftar kurir padahal orangnya sama (ini yang
-    kejadian ke Pupu: order Roti dari web 'Diantar' + order Donat manual
-    'Kirim' jadi 2 baris terpisah, padahal harusnya 1)."""
-    per_customer = {}
-    for o in orders:
-        nama = str(o.get("Nama_Customer", "-")).strip()
-        metode = o.get("Metode", "-")
-        key = (_is_delivery_metode(metode), nama.lower())
-        per_customer.setdefault(key, []).append(o)
-    return per_customer
-
-
-def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
-    """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
-    ke bagian gudang/kurir tanpa perlu crop screenshot."""
-    per_customer = _group_per_customer(orders)
-    kirim_entries = {k: v for k, v in per_customer.items() if k[0]}
-    if not kirim_entries:
-        return None
-
-    lines = [f"🛵 *DIKIRIM KURIR — Minggu PO {minggu_po}*\n"]
-    for (is_delivery, nama_key), items in kirim_entries.items():
-        nama = items[0].get("Nama_Customer", "-")
-        no_hp = items[0].get("No_HP", "-")
-        alamat = items[0].get("Alamat", "-")
-        lines.append(f"• {nama} — {alamat} — {no_hp}")
-    return "\n".join(lines)
-
-
-def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
-    """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
-    per_customer = _group_per_customer(orders)
-    ambil_entries = {k: v for k, v in per_customer.items() if not k[0]}
-    if not ambil_entries:
-        return None
-
-    lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
-    for (is_delivery, nama_key), items in ambil_entries.items():
-        nama = items[0].get("Nama_Customer", "-")
-        no_hp = items[0].get("No_HP", "-")
-        lines.append(f"• {nama} — {no_hp}")
-    return "\n".join(lines)
-
-
-_NAMA_BULAN_ID = {
-    1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
-    7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember",
-}
-
-
-def format_periode_label(year_start: int, month_start: int, year_end: int, month_end: int) -> str:
-    """Bikin label periode yang enak dibaca, entah cuma 1 bulan atau rentang
-    beberapa bulan. Contoh: 'Juli 2026' atau 'Juli - Agustus 2026' atau
-    'Desember 2026 - Januari 2027'."""
-    nama_mulai = _NAMA_BULAN_ID[month_start]
-    nama_akhir = _NAMA_BULAN_ID[month_end]
-
-    if year_start == year_end and month_start == month_end:
-        return f"{nama_mulai} {year_start}"
-    if year_start == year_end:
-        return f"{nama_mulai} - {nama_akhir} {year_start}"
-    return f"{nama_mulai} {year_start} - {nama_akhir} {year_end}"
-
-
-def aggregate_dough(orders: list, dough_price_map: dict):
-    """Hitung total qty & total bayar per kategori dari daftar order.
-    Return: (rows, grand_total_qty, grand_total_bayar)
-    rows = list of (kategori, qty, harga_dough, subtotal), cuma kategori yang qty>0.
-    Dipakai bareng buat versi teks (Telegram) dan versi PDF (print A4)."""
-    qty_per_category = {}
-    for o in orders:
-        kategori = o["Kategori"]
-        qty_per_category[kategori] = qty_per_category.get(kategori, 0) + int(o["Qty"])
-
-    rows = []
-    grand_total_qty = 0
-    grand_total_bayar = 0
-    for kategori in config.CATEGORIES:
-        qty = qty_per_category.get(kategori, 0)
-        if qty == 0:
-            continue
-        harga_dough = dough_price_map.get(kategori, 0)
-        bayar = qty * harga_dough
-        grand_total_qty += qty
-        grand_total_bayar += bayar
-        rows.append((kategori, qty, harga_dough, bayar))
-
-    return rows, grand_total_qty, grand_total_bayar
-
-
-def aggregate_dough_by_month(orders: list, dough_price_map: dict):
-    """Kelompokin orders per BULAN dulu (berdasarkan Minggu_PO), baru hitung
-    aggregate_dough masing-masing bulan secara terpisah. Dipakai buat laporan
-    yang rentangnya lebih dari 1 bulan, biar breakdown-nya jelas per bulan,
-    bukan digabung jadi satu angka doang.
-
-    Return: (month_results, grand_total_qty, grand_total_bayar)
-    month_results = list of (bulan_label, rows, bulan_qty, bulan_bayar),
-    urut dari bulan paling awal ke paling akhir.
-    """
-    by_month = {}
-    for o in orders:
-        teks = str(o.get("Minggu_PO")).strip()
-        d = None
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-            try:
-                d = datetime.datetime.strptime(teks, fmt)
-                break
-            except ValueError:
-                continue
-        if not d:
-            continue
-        by_month.setdefault((d.year, d.month), []).append(o)
-
-    month_results = []
-    grand_total_qty = 0
-    grand_total_bayar = 0
-    for (year, month) in sorted(by_month.keys()):
-        rows, qty, bayar = aggregate_dough(by_month[(year, month)], dough_price_map)
-        bulan_label = f"{_NAMA_BULAN_ID[month]} {year}"
-        month_results.append((bulan_label, rows, qty, bayar))
-        grand_total_qty += qty
-        grand_total_bayar += bayar
-
-    return month_results, grand_total_qty, grand_total_bayar
-
-
-def _grand_total_by_category(month_results):
-    """Gabungin semua bulan jadi total per KATEGORI aja (Roti semua bulan,
-    Donat semua bulan, dst) -- dipakai buat breakdown di bagian akhir laporan
-    yang rentangnya lebih dari 1 bulan.
-    Return: list of (kategori, total_qty, total_bayar), urut sesuai config.CATEGORIES."""
-    totals = {}
-    for bulan_label, rows, bulan_qty, bulan_bayar in month_results:
-        for kategori, qty, harga_dough, subtotal in rows:
-            if kategori not in totals:
-                totals[kategori] = [0, 0]
-            totals[kategori][0] += qty
-            totals[kategori][1] += subtotal
-
-    result = []
-    for kategori in config.CATEGORIES:
-        if kategori in totals:
-            qty, bayar = totals[kategori]
-            result.append((kategori, qty, bayar))
-    return result
-
-
-def build_monthly_supplier_report(periode_label: str, orders: list, dough_price_map: dict) -> str:
-    if not orders:
-        return f"Nggak ada data order untuk periode {periode_label}."
-
-    month_results, grand_total_qty, grand_total_bayar = aggregate_dough_by_month(orders, dough_price_map)
-
-    lines = [f"*LAPORAN BULANAN SUPPLIER — {periode_label}*"]
-    lines.append(f"({config.BUSINESS_NAME})")
-
-    for bulan_label, rows, bulan_qty, bulan_bayar in month_results:
-        lines.append(f"\n*{bulan_label}*")
-        for kategori, qty, harga_dough, bayar in rows:
-            lines.append(f"  {kategori}: {qty} pcs x {rupiah(harga_dough)} = {rupiah(bayar)}")
-        lines.append(f"  → Subtotal {bulan_label}: {rupiah(bulan_bayar)}")
-
-    # Kalau lebih dari 1 bulan, kasih breakdown total per kategori juga
-    # (Roti semua bulan, Donat semua bulan, dst) sebelum total akhir.
-    if len(month_results) > 1:
-        kategori_totals = _grand_total_by_category(month_results)
-        lines.append("\n" + "─" * 24)
-        lines.append("*TOTAL PER KATEGORI (SEMUA BULAN)*")
-        for kategori, qty, bayar in kategori_totals:
-            lines.append(f"  {kategori}: {qty} pcs = {rupiah(bayar)}")
-
-    lines.append("\n" + "─" * 24)
-    lines.append(f"Total Qty semua bulan: {grand_total_qty} pcs")
-    lines.append(f"*TOTAL BAYAR SEMUA BULAN: {rupiah(grand_total_bayar)}*")
-
-    return "\n".join(lines)
+        row_top = y
+        draw.text((MARGIN + 10, row_top + 6), str(it["nama_item"]), font=F_REG(15), fill=INK)
+        qty_text = f"{it['qty']:g} {it.get('satuan', '')}".strip()
+        qw = draw.textlength(qty_text, font=F_REG(15))
+        draw.text((MARGIN + 400 + 90 - qw, row_top + 6), qty_text, font=F_REG(15), fill=INK)
+        harga_text = rupiah(it["harga_satuan"])
+        hw = draw.textlength(harga_text, font=F_REG(15))
+        draw.text((MARGIN + 520 + 150 - hw, row_top + 6), harga_text, font=F_REG(15), fill=INK)
+        sub_text = rupiah(subtotal)
+        sw = draw.textlength(sub_text, font=F_REG(15))
+        col4_x, col4_w = MARGIN + 690, WIDTH - MARGIN - 10 - (MARGIN + 690)
+        draw.text((col4_x + col4_w - sw, row_top + 6), sub_text, font=F_REG(15), fill=INK)
+        y += row_h
+        draw.line([(MARGIN, y), (WIDTH - MARGIN, y)], fill=LINE, width=1)
+
+    y += 16
+    grand_total = total + float(ongkir or 0)
+    for label, val in [("Subtotal", total), ("Ongkir", ongkir), ("TOTAL", grand_total)]:
+        bold = label == "TOTAL"
+        font = F_BOLD(18) if bold else F_REG(15)
+        color = ACCENT if bold else INK
+        label_w = draw.textlength(label, font=font)
+        draw.text((WIDTH - MARGIN - 260, y), label, font=font, fill=color)
+        val_text = rupiah(val)
+        vw = draw.textlength(val_text, font=font)
+        draw.text((WIDTH - MARGIN - vw, y), val_text, font=font, fill=color)
+        y += 28 if bold else 22
+
+    y += 20
+    draw.line([(MARGIN, y), (WIDTH - MARGIN, y)], fill=LINE, width=1)
+    y += 16
+    draw.text((MARGIN, y), "Pembayaran transfer ke:", font=F_SMALL(13), fill=MUTED)
+    y += 20
+    draw.text(
+        (MARGIN, y),
+        f"{config.BANK_NAME} {config.BANK_ACCOUNT_NUMBER} a.n. {config.BANK_ACCOUNT_NAME}",
+        font=F_BOLD(16), fill=INK,
+    )
+    y += 32
+    draw.text((MARGIN, y), "Terima Kasih", font=F_SMALL(13), fill=MUTED)
+
+    png_buf = io.BytesIO()
+    img.save(png_buf, format="PNG")
+    png_buf.seek(0)
+    pdf_buf = _pdf_from_image(img)
+    return png_buf, pdf_buf
+
+
+def generate_surat_jalan_image(no_surat_jalan, nama_customer, no_hp, alamat, metode, items, no_invoice_ref=None):
+    """items: list of dict {nama_item, qty, satuan} -- TANPA harga, buat kurir."""
+    row_h = 32
+    height = 300 + row_h * (len(items) + 1) + 130
+    img = Image.new("RGB", (WIDTH, int(height)), BG)
+    draw = ImageDraw.Draw(img)
+
+    y = _header(draw, img, "SURAT JALAN", no_surat_jalan, _now_tanggal())
+
+    draw.text((MARGIN, y), "Kepada:", font=F_SMALL(13), fill=MUTED)
+    y += 20
+    draw.text((MARGIN, y), nama_customer, font=F_BOLD(19), fill=INK)
+    y += 26
+    if no_hp:
+        draw.text((MARGIN, y), f"HP: {no_hp}", font=F_REG(14), fill=MUTED)
+        y += 19
+    if alamat:
+        for line in _wrap_text(draw, alamat, F_REG(14), 500):
+            draw.text((MARGIN, y), line, font=F_REG(14), fill=MUTED)
+            y += 19
+    draw.text((MARGIN, y), f"Metode: {metode}", font=F_REG(14), fill=MUTED)
+    y += 20
+    if no_invoice_ref:
+        draw.text((MARGIN, y), f"Ref. Invoice: {no_invoice_ref}", font=F_REG(14), fill=MUTED)
+        y += 19
+    y += 10
+
+    columns = [
+        ("ITEM", MARGIN + 10, 700, "left"),
+        ("QTY", MARGIN + 720, WIDTH - MARGIN - 10 - (MARGIN + 720), "right"),
+    ]
+    y = _table_header(draw, y, columns)
+
+    for it in items:
+        row_top = y
+        draw.text((MARGIN + 10, row_top + 7), str(it["nama_item"]), font=F_REG(16), fill=INK)
+        qty_text = f"{it['qty']:g} {it.get('satuan', '')}".strip()
+        qw = draw.textlength(qty_text, font=F_REG(16))
+        col2_x, col2_w = MARGIN + 720, WIDTH - MARGIN - 10 - (MARGIN + 720)
+        draw.text((col2_x + col2_w - qw, row_top + 7), qty_text, font=F_REG(16), fill=INK)
+        y += row_h
+        draw.line([(MARGIN, y), (WIDTH - MARGIN, y)], fill=LINE, width=1)
+
+    y += 50
+    col_w = (WIDTH - 2 * MARGIN) // 2
+    draw.line([(MARGIN, y), (MARGIN + col_w - 30, y)], fill=INK, width=1)
+    draw.line([(MARGIN + col_w + 30, y), (WIDTH - MARGIN, y)], fill=INK, width=1)
+    draw.text((MARGIN, y + 8), "Dikirim oleh", font=F_SMALL(13), fill=MUTED)
+    draw.text((MARGIN + col_w + 30, y + 8), "Diterima oleh", font=F_SMALL(13), fill=MUTED)
+
+    png_buf = io.BytesIO()
+    img.save(png_buf, format="PNG")
+    png_buf.seek(0)
+    pdf_buf = _pdf_from_image(img)
+    return png_buf, pdf_buf
+
+
+def generate_po_image(no_po, nama_supplier, items):
+    """items: list of dict {nama_item, qty, satuan, harga_satuan}"""
+    row_h = 30
+    height = 300 + row_h * (len(items) + 1) + 110
+    img = Image.new("RGB", (WIDTH, int(height)), BG)
+    draw = ImageDraw.Draw(img)
+
+    y = _header(draw, img, "PURCHASE ORDER", no_po, _now_tanggal())
+
+    draw.text((MARGIN, y), "Kepada Supplier:", font=F_SMALL(13), fill=MUTED)
+    y += 20
+    draw.text((MARGIN, y), nama_supplier, font=F_BOLD(19), fill=INK)
+    y += 40
+
+    columns = [
+        ("ITEM", MARGIN + 10, 380, "left"),
+        ("QTY", MARGIN + 400, 90, "right"),
+        ("HARGA", MARGIN + 520, 150, "right"),
+        ("SUBTOTAL", MARGIN + 690, WIDTH - MARGIN - 10 - (MARGIN + 690), "right"),
+    ]
+    y = _table_header(draw, y, columns)
+
+    total = 0
+    for it in items:
+        subtotal = float(it["qty"]) * float(it["harga_satuan"])
+        total += subtotal
+        row_top = y
+        draw.text((MARGIN + 10, row_top + 6), str(it["nama_item"]), font=F_REG(15), fill=INK)
+        qty_text = f"{it['qty']:g} {it.get('satuan', '')}".strip()
+        qw = draw.textlength(qty_text, font=F_REG(15))
+        draw.text((MARGIN + 400 + 90 - qw, row_top + 6), qty_text, font=F_REG(15), fill=INK)
+        harga_text = rupiah(it["harga_satuan"])
+        hw = draw.textlength(harga_text, font=F_REG(15))
+        draw.text((MARGIN + 520 + 150 - hw, row_top + 6), harga_text, font=F_REG(15), fill=INK)
+        sub_text = rupiah(subtotal)
+        sw = draw.textlength(sub_text, font=F_REG(15))
+        col4_x, col4_w = MARGIN + 690, WIDTH - MARGIN - 10 - (MARGIN + 690)
+        draw.text((col4_x + col4_w - sw, row_top + 6), sub_text, font=F_REG(15), fill=INK)
+        y += row_h
+        draw.line([(MARGIN, y), (WIDTH - MARGIN, y)], fill=LINE, width=1)
+
+    y += 16
+    label = "TOTAL"
+    val_text = rupiah(total)
+    draw.text((WIDTH - MARGIN - 260, y), label, font=F_BOLD(18), fill=ACCENT)
+    vw = draw.textlength(val_text, font=F_BOLD(18))
+    draw.text((WIDTH - MARGIN - vw, y), val_text, font=F_BOLD(18), fill=ACCENT)
+    y += 40
+
+    draw.text((MARGIN, y), "Mohon konfirmasi ketersediaan barang. Terima kasih.", font=F_SMALL(13), fill=MUTED)
+
+    png_buf = io.BytesIO()
+    img.save(png_buf, format="PNG")
+    png_buf.seek(0)
+    pdf_buf = _pdf_from_image(img)
+    return png_buf, pdf_buf

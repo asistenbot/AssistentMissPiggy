@@ -1,148 +1,168 @@
-# Miss Piggy PO Assistant Bot
+# Asisten Plastik — Anugerah Sejahtera Sentosa
 
-Bot Telegram buat bantu admin (lo) ngerapihin chat order customer jadi:
-- Data tersimpan rapi di Google Sheets
-- Invoice otomatis (harga x qty + no rek)
+Bot Telegram buat bantu admin ngerapihin order plastik jadi:
+- Data tersimpan rapi di Google Sheets (order, produk, customer, supplier)
+- Invoice otomatis (harga x qty + info rekening)
 - Surat Jalan otomatis (tanpa harga, buat kurir)
-- Rekap produksi per rasa (on-demand + auto tiap Rabu jam 15:00, 16:00, 19:00 WIB)
-- Laporan bulanan buat bayar supplier (total qty per kategori x harga dough)
+- Purchase Order (PO) ke supplier + catatan utang otomatis
+- Semua dokumen (Invoice/Surat Jalan/PO) otomatis dalam 2 versi: gambar PNG
+  (preview cepat) dan **PDF siap print ukuran A4**
+- Pembukuan sederhana: kas masuk/keluar, piutang customer, utang supplier,
+  laporan laba rugi bulanan
 
-Bot ini **untuk lo sendiri (admin)**, bukan buat customer. Alurnya: lo paste/forward
-chat customer yang berantakan ke bot ini di Telegram, bot yang parse jadi data rapi.
-
----
-
-## 1. Yang Lo Butuhin Sebelum Jalanin Bot Ini
-
-| Kebutuhan | Buat Apa | Cara Dapetin |
-|---|---|---|
-| Telegram Bot Token | Bot-nya sendiri | Chat `@BotFather` di Telegram → `/newbot` → ikutin instruksi → dapet token |
-| Telegram User ID lo | Biar cuma lo yang bisa pake bot & terima auto-recap | Chat `@userinfobot` di Telegram, dia kasih tau ID lo |
-| Anthropic API Key | Buat parsing chat customer yang berantakan jadi data terstruktur | https://console.anthropic.com → API Keys |
-| Google Service Account JSON | Biar bot bisa baca/tulis ke Google Sheets lo | Google Cloud Console → aktifkan Sheets API + Drive API → buat Service Account → download JSON key |
-| Google Sheet | Tempat semua data disimpen | Bikin 1 spreadsheet baru, share ke email service account (ada di file JSON, `client_email`), kasih akses **Editor** |
-| Tempat hosting (buat 24/7) | Biar auto-recap jam 15:00/16:00/19:00 tetep jalan meski HP/laptop lo mati | Railway.app, Render.com, atau VPS kecil (semua ada free/murah tier) |
-
-**Penting:** Semua ini gua siapin kodenya, tapi bagian bikin akun/token di atas
-harus lo lakuin sendiri karena butuh akun pribadi lo. Kalau mau, gua bisa
-pandu step-by-step pas lo udah mulai.
+Order masuk **kapan aja langsung diproses** (gak ada siklus mingguan).
+Bot ini buat admin sendiri, alurnya: paste/forward chat order customer atau
+kirim fotonya ke bot ini, bot yang baca & rapihin.
 
 ---
 
-## 2. Isi Project
+## 1. Isi Project
 
 ```
-miss_piggy_bot/
-├── README.md              <- ini
-├── requirements.txt        <- daftar library python
-├── .env.example             <- template isian token/config (copy jadi .env)
-├── config.py                <- setting harga, kategori, no rek, jadwal, dll
-├── sheets_client.py          <- fungsi baca/tulis Google Sheets
-├── ai_parser.py               <- fungsi parsing chat customer pakai Claude
-├── documents.py                <- fungsi generate Invoice, Surat Jalan, Rekap
-├── scheduler_jobs.py            <- jadwal auto-kirim rekap Rabu & laporan bulanan
-└── bot.py                        <- file utama, jalanin ini
+asisten-plastik/
+├── README.md
+├── requirements.txt
+├── .env.example        <- template buat testing lokal
+├── config.py            <- identitas usaha, katalog awal, kategori
+├── sheets_client.py       <- baca/tulis Google Sheets (auto bikin tab kalau belum ada)
+├── ai_parser.py            <- parsing chat/foto order & PO pakai Claude
+├── documents.py              <- generate Invoice / Surat Jalan / PO sebagai gambar
+├── fonts/                     <- font buat render dokumen (DejaVu, open source)
+├── logo.jpg                    <- logo Anugerah Sejahtera Sentosa
+└── bot.py                       <- file utama, jalanin ini
 ```
 
----
+## 2. Setup Google Sheets — OTOMATIS
 
-## 3. Setup Google Sheets
+Beda dari versi lama (bot roti Miss Piggy), bot ini **self-provisioning**:
+begitu pertama kali jalan, kalau tab `PriceList`, `Customers`, `Orders`,
+`Suppliers`, `PurchaseOrders`, `UtangSupplier`, `Kas` belum ada di
+spreadsheet, bot otomatis bikinin sendiri (header kolom + isi awal
+PriceList & Customers dari `config.py`). Yang perlu disiapin manual cuma:
 
-Bikin 1 Google Sheet baru, kasih nama bebas (misal "Miss Piggy - Data PO"),
-lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
+1. Bikin 1 Google Sheet kosong
+2. Share spreadsheet itu ke email service account (`client_email` di file
+   JSON), kasih akses **Editor**
+3. Isi `GOOGLE_SHEET_ID` (ID-nya ada di URL sheet, antara `/d/` dan `/edit`)
 
-### Tab `Orders`
-| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
+Setelah itu tinggal jalanin bot sekali, tab-tabnya otomatis muncul.
 
-- `Minggu_PO` = tanggal pengiriman Kamis untuk PO minggu itu (format `YYYY-MM-DD`), otomatis diisi bot
-- `Metode` = `Kirim` atau `Ambil`
-- `Status` = `Pending` / `Lunas` (lo update manual di sheet kalau mau)
+## 3. Isi Data yang Masih Perlu Dilengkapi
 
-### Tab `PriceList`
-| Kategori | Rasa | Harga |
-|---|---|---|
-
-Isi ini manual dulu sesuai harga jual lo per rasa. Bot bakal baca harga dari
-sini tiap kali bikin invoice.
-
-### Tab `SupplierDough`
-| Kategori | Harga_Dough_Per_Unit |
-|---|---|
-
-Contoh isi:
-```
-Roti                 | 3500
-Roti Gandum          | 4000
-Donat                | 3000
-Roti Tawar           | 5000
-Bun Polos            | 2500
-Roti Tawar Loaf      | 6000
-```
-Ganti angka-angka di atas sesuai harga dough asli dari supplier lo.
-
-Setelah itu, share spreadsheet-nya ke `client_email` yang ada di file JSON
-service account, kasih akses **Editor**.
-
----
+Beberapa hal di `config.py` masih placeholder, tolong diisi:
+- `BUSINESS_ADDRESS` — alamat usaha (buat kop invoice/surat jalan)
+- `PICKUP_ADDRESS` — alamat pickup/gudang kalau beda dari di atas
+- Daftar supplier awal — boleh dikosongin, nanti keisi otomatis pas bikin
+  PO pertama kali (lewat `/po`), atau isi manual di tab `Suppliers`
 
 ## 4. Install & Jalanin (Lokal, buat testing)
 
 ```bash
-cd miss_piggy_bot
+cd asisten-plastik
 pip install -r requirements.txt
 cp .env.example .env
-# isi .env dengan token-token lo
+# isi .env dengan token-token
 python bot.py
 ```
 
-Kalau berhasil, chat bot lo di Telegram, ketik `/start`.
+Kalau berhasil, chat bot di Telegram, ketik `/start`.
 
----
+## 5. Deploy 24/7
 
-## 5. Deploy 24/7 (biar auto-recap jalan terus)
-
-Paling gampang pake **Railway.app** atau **Render.com** (background worker):
 1. Push folder ini ke GitHub repo
-2. Connect repo ke Railway/Render
-3. Set environment variables (isi dari `.env`) di dashboard mereka
-4. Deploy — mereka otomatis `pip install` dan jalanin `python bot.py`
+2. Connect repo ke Railway (atau Render/VPS kecil)
+3. Set semua environment variable dari `.env.example` di dashboard
+4. Deploy — otomatis `pip install` dan jalanin `python bot.py`
 
----
+## 6. Gak Wajib Pakai Command
 
-## 6. Command Bot
+Buat command yang cuma "nanya" (piutang, utang, laporan bulanan, daftar
+harga) atau aksi simpel (tandai lunas, catat bayar utang, cetak ulang
+invoice/surat jalan), admin **gak perlu ketik command** -- tinggal chat
+santai kayak "utang ke siapa aja", "si Grandia udah bayar belum",
+"kas bulan ini gimana". Bot nebak maksudnya pakai AI (`classify_intent` di
+`ai_parser.py`) dan rute ke fungsi yang sama kayak commandnya. Kalau bot
+ragu / gagal nebak, default-nya tetep dianggap ORDER customer (paling
+aman, biar order gak kelewat).
+
+**Salah ketik pas bikin order?** Tinggal chat lagi, misal "edit Grandia
+Hotel" (kalau nama customernya salah ketik) atau "alamatnya salah, harusnya
+Jl. Melati No. 5". Default-nya ngedit order yang PALING BARU dibikin di
+chat itu; kalau mau invoice lain, sebutin nomor invoice-nya. Bot bakal
+nunjukin dulu apa yang mau diganti + tombol konfirmasi sebelum kesimpen --
+begitu di-OK, invoice & surat jalannya otomatis dicetak ulang dengan data
+yang baru. Fitur ini cuma buat betulin data header (nama/HP/alamat/metode),
+bukan buat ganti barang/qty -- kalau barangnya salah, batalin aja ordernya
+sebelum dikonfirmasi pertama kali.
+
+**Mau update harga jual/beli produk di katalog?** Tinggal bilang, misal
+"harga tulip naik jadi 17000" atau "PP bening 40x60 sekarang 30rb, harga
+beli 26rb". Bot cocokin ke katalog, tunjukin harga lama → baru buat
+dikonfirmasi, begitu di-OK langsung keupdate di tab PriceList Google
+Sheets. Boleh beberapa produk sekaligus dalam 1 pesan.
+
+**Punya daftar harga dari supplier dalam bentuk FOTO?** Kirim fotonya
+dengan CAPTION yang jelas, misal "update harga beli dari foto ini" atau
+"daftar harga supplier baru" -- bot baca semua baris di foto sekaligus
+(dianggap harga BELI/modal), cocokin ke katalog, tunjukin preview buat
+dikonfirmasi. **Penting:** kalau foto dikirim TANPA caption / captionnya
+gak jelas, bot anggap itu ORDER customer (biar order gak kelewat) -- jadi
+selalu kasih caption yang jelas kalau maksudnya update harga.
+
+Kalau di foto daftar harga itu ada **nama perusahaan/toko supplier-nya**
+(biasanya di kop surat bagian atas foto), bot otomatis bacain juga dan
+begitu dikonfirmasi, nama supplier itu langsung kedaftar sendiri di tab
+`Suppliers` -- gak perlu diketik manual. Kalau nama suppliernya gak
+kebaca jelas di foto, bagian ini dilewatin aja (harga tetep keupdate
+seperti biasa), admin bisa isi manual belakangan di tab `Suppliers` kalau
+mau.
+
+**Mau betulin harga SATU item di SATU order tertentu** (misal harga
+berubah setelah order dibikin, sebelum invoice dikirim ke customer)?
+Sama kayak edit_order biasa: "harga tulip di order ini jadi 18000" --
+bedanya ini cuma ngubah invoice order itu doang, BUKAN harga permanen di
+katalog (buat itu pakai fitur update harga di atas).
+
+**Order-nya gak jadi / mau dihapus total?** Bilang "hapus order Grandia
+Hotel" atau "batalin invoice INV-20260828-001" -- bot nanya konfirmasi
+dulu (nunjukin nama customer & totalnya), begitu di-OK order ditandai
+*Batal* (datanya tetep ada di Sheets buat histori, tapi otomatis keluar
+dari perhitungan piutang).
+
+## 7. Command Bot (opsional, buat yang mau lebih pasti/cepat)
 
 | Command | Fungsi |
 |---|---|
-| `/start` | Salam pembuka + bantuan |
-| `/pricelist` | Tampilin price list dari Sheets |
-| (kirim/forward chat customer sebagai teks biasa) | Bot otomatis parse jadi order, minta konfirmasi, lalu simpan + generate Invoice & Surat Jalan |
-| `/rekap` | Rekap produksi per rasa untuk minggu PO berjalan (on-demand, kapan aja lo mau) |
-| `/invoice Nama Customer` | Generate ulang invoice customer tsb (minggu berjalan) |
-| `/suratjalan Nama Customer` | Generate ulang surat jalan customer tsb |
-| `/laporanbulanan` | Generate laporan bulanan buat bayar supplier (bulan berjalan) |
-| `/laporanbulanan 2026-07` | Generate laporan bulanan untuk bulan tertentu |
+| `/start` | Salam pembuka + daftar command |
+| `/pricelist` | Tampilin daftar harga dari Sheets |
+| (paste/forward chat customer, atau kirim foto) | Bot parse jadi order, minta konfirmasi, lalu simpan + generate Invoice & Surat Jalan |
+| `/invoice <no invoice / nama customer>` | Cetak ulang invoice |
+| `/suratjalan <no invoice / nama customer>` | Cetak ulang surat jalan |
+| `/lunas <no invoice / nama customer>` | Tandai order lunas, otomatis catat Kas Masuk |
+| `/piutang` | Rekap tagihan customer yang belum lunas |
+| `/po` | Mulai bikin Purchase Order ke supplier (otomatis nambah utang) |
+| `/bayarutang <nama supplier> <jumlah>` | Catat pembayaran/cicilan ke supplier |
+| `/utang` | Rekap utang ke semua supplier |
+| `/kas masuk <jumlah> <keterangan>` | Catat uang masuk di luar penjualan |
+| `/kas keluar <jumlah> <keterangan>` | Catat uang keluar (operasional, gaji, dll) |
+| `/laporanbulanan [YYYY-MM]` | Laporan kas & laba rugi bulanan |
+| `/batal` | Batalin order/PO yang lagi nunggu konfirmasi |
 
-Auto-terjadwal (tanpa lo minta):
-- **Tiap Rabu jam 15:00, 16:00, 19:00 WIB** → bot kirim rekap produksi otomatis ke lo
-- **Tanggal 1 tiap bulan jam 09:00 WIB** → bot kirim laporan bulanan bulan sebelumnya (bisa lo ganti tanggalnya di `config.py`)
+**Order dari customer dikirim dalam bentuk foto dokumen (misal foto PO dari
+customer, atau foto surat pesanan)?** Langsung aja forward/kirim fotonya ke
+bot **tanpa caption** (atau caption apa aja yang bukan soal update harga) --
+bot bakal baca isinya kayak baca chat order biasa, tunjukin hasil parse-nya
+buat dikonfirmasi sebelum disimpen. Ini alur yang sama kayak order dari foto
+struk/nota biasa, cuma sumbernya beda.
 
----
+## 8. Batasan Versi Ini
 
-## 7. Yang Masih Perlu Lo Isi/Sesuaikan di `config.py`
-
-- Nomor rekening & nama bank
-- Alamat pickup Miss Piggy
-- Jam & hari operasional (default udah sesuai: PO Sabtu-Rabu 18:00, kirim Kamis 14:00-15:00)
-- ID Telegram lo (biar cuma lo yang bisa akses bot & yang nerima auto-recap)
-
----
-
-## 8. Batasan Versi Ini (biar lo nggak kaget)
-
-- Invoice & Surat Jalan dikirim sebagai **teks rapi** di Telegram (gampang di-forward/copas ke customer/kurir). Kalau nanti mau versi PDF/gambar cantik, itu tinggal ditambahin — bilang aja.
-- Parsing chat customer pakai AI itu cukup pinter buat kalimat natural
-  ("mau pesen roti coklat 5, sourdough 2, dikirim ya, nama Budi..."), tapi
-  tetep bakal nunjukin hasil parse-nya dulu buat lo konfirmasi sebelum
-  disimpen — supaya nggak ada salah baca.
-- Ongkir masih manual (lo input pas konfirmasi), sesuai alur lo sekarang.
+- Invoice, Surat Jalan, dan PO dikirim dalam **2 bentuk**: gambar PNG (buat
+  preview cepat di chat) dan **file PDF** (siap di-print rapi ukuran A4) --
+  keduanya otomatis terkirim bareng, gak perlu diminta.
+- Parsing chat/foto order pakai AI itu cukup pinter buat kalimat natural,
+  tapi tetep nunjukin hasil parse-nya dulu buat dikonfirmasi sebelum
+  disimpen -- supaya gak ada salah baca.
+- Laporan laba rugi dihitung dari tab `Kas` (kas masuk dikategoriin
+  "Penjualan" begitu order ditandai lunas, kas keluar dikategoriin waktu
+  bayar utang supplier / catat manual lewat `/kas`).
