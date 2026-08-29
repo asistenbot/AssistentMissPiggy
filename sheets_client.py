@@ -11,7 +11,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 import config
-import date_helpers
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -90,51 +89,13 @@ class SheetsClient:
 
         return 0, rasa
 
-    @staticmethod
-    def _safe_text(val):
-        """Paksa value disimpen sebagai TEKS murni di Sheets, BUKAN kena
-        interpretasi jadi rumus -- ini yang bikin No HP Kelvin muncul jadi
-        '#ERROR!' di Sheets (kalau nomornya kebetulan diawali karakter kayak
-        '+' atau '=', Google Sheets ngira itu rumus, bukan teks biasa).
-        Nempelin apostrof di depan kalau perlu -- pola yang sama kayak yang
-        udah dipakai buat Minggu_PO/Tanggal_Kirim, sekarang diperluas buat
-        semua field teks bebas (No HP, Nama, Alamat) yang diisi customer/AI
-        dan berpotensi kebetulan diawali karakter pemicu rumus."""
-        s = str(val) if val is not None else ""
-        if s[:1] in ("=", "+", "-", "@"):
-            return f"'{s}"
-        return s
-
-    @staticmethod
-    def _clean_phone(no_hp):
-        """Rapiin nomor HP -- buang semua spasi/strip/tanda baca, TAPI
-        pertahanin tanda '+' di depan kalau ada (buat nomor luar negeri kayak
-        '+31 6 85118794' -> '+31685118794'). Nomor kosong/'-' dibiarin apa
-        adanya. Dipanggil sekali di sini biar berlaku SAMA buat semua jalur
-        order masuk (web ATAU chat Telegram yang di-AI-parse), nggak perlu
-        dibersihin manual satu-satu di /edit."""
-        s = str(no_hp or "").strip()
-        if not s or s == "-":
-            return s
-        prefix = "+" if s.startswith("+") else ""
-        digits = re.sub(r"[^\d]", "", s)
-        return prefix + digits if digits else s
-
-    def add_order_rows(self, order: dict, minggu_po: str, box_groups: list = None):
+    def add_order_rows(self, order: dict, minggu_po: str):
         """
         order = {
             "nama": str, "no_hp": str, "alamat": str, "metode": "Kirim"/"Ambil",
             "items": [{"kategori": str, "rasa": str, "qty": int}, ...],
             "ongkir": int
         }
-        box_groups = rincian pembagian per box (opsional) dari hasil parse AI,
-        misal [{"jumlah_box": 22, "items": [{"kategori":.., "rasa":.., "qty_per_box":..}]}].
-        Disimpen sebagai JSON di kolom Box_Info (SAMA di semua baris item order
-        ini, kayak pola Ongkir/Tanggal_Kirim yang juga diulang di tiap baris) --
-        biar kalau surat jalan/invoice di-generate ULANG belakangan (/suratjalan,
-        /invoice), rincian box-nya masih bisa dibaca lagi, nggak ilang kayak
-        sebelumnya (yang cuma numpang lewat sekali doang pas konfirmasi).
-
         Satu order bisa berisi banyak item -> tiap item jadi 1 baris,
         biar gampang di-rekap per rasa.
 
@@ -145,12 +106,6 @@ class SheetsClient:
         ws = self.sheet.worksheet(config.SHEET_ORDERS)
         price_map = self.get_price_map()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Tanggal_Kirim itu OPSIONAL -- kalau admin nggak nentuin tanggal
-        # custom (misal 'besok'), defaultnya sama kayak minggu_po (Kamis PO
-        # minggu berjalan), jadi perilaku lama nggak berubah kalau fitur ini
-        # nggak dipakai sama sekali.
-        tanggal_kirim = order.get("tanggal_kirim") or minggu_po
-        box_info_json = json.dumps(box_groups, ensure_ascii=False) if box_groups else ""
         rows = []
         order_records = []
         for item in order["items"]:
@@ -160,9 +115,9 @@ class SheetsClient:
                 timestamp,
                 f"'{minggu_po}",  # apostrof di depan = paksa Sheets simpen sebagai teks,
                                    # biar nggak otomatis diubah jadi format Date sendiri
-                self._safe_text(order["nama"]),
-                self._safe_text(self._clean_phone(order["no_hp"])),
-                self._safe_text(order["alamat"]),
+                order["nama"],
+                order["no_hp"],
+                order["alamat"],
                 order["metode"],
                 item["kategori"],
                 rasa_cocok,
@@ -171,9 +126,6 @@ class SheetsClient:
                 subtotal,
                 order.get("ongkir", 0),
                 "Pending",
-                f"'{tanggal_kirim}",  # kolom BARU, sengaja PALING BELAKANG biar
-                                       # nggak nggeser kolom lama yang udah ada
-                box_info_json,  # kolom BARU lagi, paling belakang setelah Tanggal_Kirim
             ])
             order_records.append({
                 "Kategori": item["kategori"],
@@ -181,11 +133,9 @@ class SheetsClient:
                 "Qty": item["qty"],
                 "Harga_Satuan": harga,
                 "Metode": order["metode"],
-                "No_HP": self._clean_phone(order["no_hp"]),
+                "No_HP": order["no_hp"],
                 "Alamat": order["alamat"],
                 "Ongkir": order.get("ongkir", 0),
-                "Tanggal_Kirim": tanggal_kirim,
-                "Box_Info": box_info_json,
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
@@ -248,261 +198,11 @@ class SheetsClient:
 
         return len(rows_to_delete)
 
-    def _parse_tanggal_fleksibel(self, tanggal_teks):
-        """Parse teks tanggal (format bebas, apa adanya dari Sheets) jadi
-        objek date, atau None kalau formatnya nggak dikenalin."""
-        teks = str(tanggal_teks).strip()
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-            try:
-                return datetime.datetime.strptime(teks, fmt).date()
-            except ValueError:
-                continue
-        return None
-
-    def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
-        """
-        Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 10:00 WIB PADA
-        HARI ITU SENDIRI otomatis dianggap udah kelar diproduksi & dikirim --
-        Status-nya diubah dari 'Pending' jadi 'Terkirim'. Jadi order buat
-        Kamis tgl 20 bakal keflip Kamis tgl 20 jam 10:00 pagi juga -- nggak
-        perlu nunggu lewat ganti hari.
-
-        Cutoff-nya sengaja jam 10:00 (bukan lebih pagi) biar ada waktu buat
-        order yang masuk tengah malam (misal jam 00:00) tetap kejaring di
-        rekap produksi paginya sebelum ke-flip -- kalau cutoff-nya lebih
-        mepet ke jam 00:00, order dini hari kayak gitu bisa keburu ke-flip
-        duluan sebelum admin sempet liat & produksi.
-
-        Dipanggil otomatis dari get_pending_orders_by_week() tiap kali ada
-        yang minta rekap produksi (jadi keupdate begitu direquest kapan aja
-        abis jam 10 pagi hari H). Idealnya dipanggil JUGA dari job terjadwal
-        harian jam 10:00 WIB (di scheduler_jobs.py) biar Sheets-nya sendiri
-        keupdate walau nggak ada satupun yang minta rekap hari itu -- itu
-        belum kepasang di sini karena scheduler_jobs.py belum ada.
-
-        now: datetime.datetime timezone-aware, default waktu sekarang
-        (timezone bot).
-        Return: jumlah baris yang Status-nya barusan diubah.
-        """
-        ws = self.sheet.worksheet(config.SHEET_ORDERS)
-        all_values = ws.get_all_values()
-        if len(all_values) < 2:
-            return 0
-
-        header = [h.strip().replace(" ", "_") for h in all_values[0]]
-        try:
-            idx_status = header.index("Status")
-            idx_tanggal_kirim = header.index("Tanggal_Kirim")
-        except ValueError:
-            # Kolom Status/Tanggal_Kirim nggak ketemu (mis. header di Sheets
-            # belum lengkap) -- jangan ubah apa-apa, lebih aman diem drpd
-            # salah update kolom yang lain.
-            return 0
-        # Minggu_PO itu OPSIONAL buat fallback doang -- kalau nggak ketemu
-        # ya udah, order lama yang Tanggal_Kirim-nya kosong tetep diskip aja
-        # (nggak fatal, cuma nggak ke-rollover otomatis).
-        idx_minggu = header.index("Minggu_PO") if "Minggu_PO" in header else None
-
-        tz = date_helpers.get_timezone()
-        now = now or datetime.datetime.now(tz)
-        cutoff_hari_ini = now.replace(hour=10, minute=0, second=0, microsecond=0)
-        # Sebelum jam 10 pagi, "batas hari" efektifnya masih KEMARIN -- order
-        # yang tanggal kirimnya HARI INI belum boleh keflip sampe jam 10 pagi
-        # bener-bener lewat.
-        boundary = now.date() if now >= cutoff_hari_ini else (now - datetime.timedelta(days=1)).date()
-
-        rows_to_update = []
-        for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header
-            if len(row) <= idx_status:
-                continue
-            status = row[idx_status].strip()
-            if status.lower() != "pending":
-                continue
-
-            # Tanggal_Kirim itu kolom yang ditambahin BELAKANGAN -- order
-            # lama (sebelum kolom ini ada) bakal kosong di sini. Kalau
-            # kosong, balik ke Minggu_PO (Kamis PO minggu itu) sebagai
-            # tanggal kirim implisit -- SAMA PERSIS kayak fallback yang
-            # dipakai pas order itu pertama kali disimpen (add_order_rows).
-            # Tanpa ini, order lama bakal Pending selama-lamanya dan HARUS
-            # diubah manual satu-satu di Sheets.
-            tanggal_kirim = row[idx_tanggal_kirim].strip() if idx_tanggal_kirim < len(row) else ""
-            if not tanggal_kirim and idx_minggu is not None and idx_minggu < len(row):
-                tanggal_kirim = row[idx_minggu].strip()
-            if not tanggal_kirim:
-                continue
-
-            d = self._parse_tanggal_fleksibel(tanggal_kirim)
-            if d is not None and d <= boundary:
-                rows_to_update.append(i)
-
-        for row_idx in rows_to_update:
-            ws.update_cell(row_idx, idx_status + 1, "Terkirim")
-
-        return len(rows_to_update)
-
-    def mark_customer_delivered(self, nama_customer: str, minggu_po: str) -> int:
-        """
-        Tandain SEMUA baris order milik nama_customer untuk minggu_po
-        tertentu yang masih Status 'Pending' jadi 'Terkirim' -- dipakai buat
-        /kirim, jaring pengaman MANUAL kalau admin mau langsung nandain SAAT
-        ITU JUGA (nggak nunggu cutoff otomatis jam 10:00 WIB di
-        rollover_delivered_orders).
-
-        Return: jumlah baris yang barusan diubah.
-        """
-        ws = self.sheet.worksheet(config.SHEET_ORDERS)
-        all_values = ws.get_all_values()
-        if len(all_values) < 2:
-            return 0
-
-        header = [h.strip().replace(" ", "_") for h in all_values[0]]
-        try:
-            idx_status = header.index("Status")
-            idx_minggu = header.index("Minggu_PO")
-            idx_nama = header.index("Nama_Customer")
-        except ValueError:
-            return 0
-
-        nama_target = nama_customer.strip().lower()
-        rows_to_update = []
-        for i, row in enumerate(all_values[1:], start=2):
-            if len(row) <= max(idx_status, idx_minggu, idx_nama):
-                continue
-            row_nama = row[idx_nama].strip().lower()
-            row_minggu = row[idx_minggu]
-            row_status = row[idx_status].strip()
-            if row_nama == nama_target and row_status.lower() == "pending" \
-                    and self._minggu_po_cocok(row_minggu, minggu_po):
-                rows_to_update.append(i)
-
-        for row_idx in rows_to_update:
-            ws.update_cell(row_idx, idx_status + 1, "Terkirim")
-
-        return len(rows_to_update)
-
-    def get_pending_orders_by_week(self, minggu_po: str):
-        """Sama kayak get_orders_by_week, TAPI (1) jalanin
-        rollover_delivered_orders dulu (order yang tanggal kirimnya udah
-        lewat otomatis kepindah Status-nya), lalu (2) buang order yang
-        Status-nya udah 'Terkirim' dari hasilnya. KHUSUS dipakai buat REKAP
-        PRODUKSI, biar nggak keitung ulang order yang sebenernya udah kelar
-        diproduksi & dikirim.
-
-        SENGAJA dibikin method BARU, bukan ubah get_orders_by_week langsung
-        -- soalnya get_orders_by_week masih dipakai /invoice, /suratjalan,
-        /edit yang justru HARUS tetep bisa nemuin order biar admin bisa
-        cetak ulang / edit order yang udah kelar dikirim kalau perlu."""
-        try:
-            self.rollover_delivered_orders()
-        except Exception:
-            # Kalau rollover gagal (mis. kolom belum lengkap di Sheets),
-            # tetep lanjut nampilin rekap apa adanya drpd bikin /rekap
-            # ikutan error gara-gara ini.
-            pass
-        return [
-            o for o in self.get_orders_by_week(minggu_po)
-            if str(o.get("Status", "")).strip().lower() != "terkirim"
-        ]
-
-    def get_pending_orders_by_tanggal_range(self, start_date: str, end_date: str):
-        """Rekap produksi berdasarkan TANGGAL_KIRIM (BUKAN Minggu_PO) dalam
-        rentang tanggal tertentu -- gabungan SEMUA customer yang tanggal
-        kirimnya jatuh di rentang itu, nggak peduli Minggu_PO-nya beda-beda.
-        Dipakai buat '/rekap 2026-08-29' atau '/rekap 2026-08-28:2026-08-29'.
-
-        Berguna banget buat kasus tanggal kirim custom (besok/lusa) yang
-        bikin Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu
-        nggak nongol di rekap mingguan biasa, tapi tetep kejaring di sini
-        selama Tanggal_Kirim-nya masuk rentang yang diminta.
-
-        start_date, end_date: string 'YYYY-MM-DD' (inklusif dua-duanya).
-        Sama kayak get_pending_orders_by_week: jalanin rollover dulu, baru
-        buang yang Status-nya udah 'Terkirim'."""
-        try:
-            self.rollover_delivered_orders()
-        except Exception:
-            pass
-
-        try:
-            d_start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
-            d_end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
-        except ValueError:
-            return []
-
-        result = []
-        for o in self.get_all_orders():
-            if str(o.get("Status", "")).strip().lower() == "terkirim":
-                continue
-            d = self._parse_tanggal_fleksibel(o.get("Tanggal_Kirim"))
-            if d is not None and d_start <= d <= d_end:
-                result.append(o)
-        return result
-
-    def get_pending_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
-        """Sama kayak get_orders_by_customer_week, TAPI (kalau ada campuran)
-        buang baris yang Status-nya udah 'Terkirim'. Dipakai KHUSUS oleh
-        /invoice & /suratjalan biar order BARU yang lagi mau di-invoice-in
-        nggak ke-mix diam-diam sama order LAIN (nggak berhubungan) dari
-        customer yang sama, yang KEBETULAN punya Minggu_PO yang sama juga
-        tapi udah kelar/Terkirim duluan.
-
-        TAPI kalau baris customer ini buat minggu itu TERNYATA semuanya
-        udah 'Terkirim' (nggak ada campuran, murni 1 order yang udah kelar
-        dikirim) -- balikin SEMUA baris apa adanya, biar kapabilitas REPRINT
-        invoice/surat jalan yang udah kelar (fitur lama) tetep jalan kayak
-        biasa. Cuma kasus CAMPURAN (sebagian Terkirim + sebagian Pending)
-        yang di-filter, soalnya di situ risiko ke-mix-nya."""
-        try:
-            self.rollover_delivered_orders()
-        except Exception:
-            pass
-        semua = self.get_orders_by_customer_week(nama_customer, minggu_po)
-        belum_terkirim = [o for o in semua if str(o.get("Status", "")).strip().lower() != "terkirim"]
-        return belum_terkirim if belum_terkirim else semua
-
     def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
         return [
             o for o in self.get_orders_by_week(minggu_po)
             if o.get("Nama_Customer", "").strip().lower() == nama_customer.strip().lower()
         ]
-
-    def get_orders_by_customer_any_week(self, nama_customer: str):
-        """Cari order customer ini di SEMUA Minggu_PO (bukan cuma minggu yang
-        lagi aktif) -- dipakai sebagai FALLBACK oleh /edit, /invoice,
-        /suratjalan kalau pencarian di minggu aktif nggak ketemu apa-apa.
-
-        Kejadian nyata yang bikin ini perlu: customer yang minta tanggal
-        kirim CUSTOM (misal 'besok') bisa aja Minggu_PO-nya udah kepindah ke
-        minggu berikutnya sama sistem, sementara admin masih mikirnya itu
-        "punya minggu ini" -- alhasil /edit dia nggak ketemu apa-apa padahal
-        datanya ada, cuma nyangkut di Minggu_PO yang beda.
-
-        Kalau customer ini ternyata punya order di BEBERAPA Minggu_PO
-        berbeda (kasus jarang tapi mungkin), ambil yang Minggu_PO-nya PALING
-        BARU aja -- across historical resiko ke-mix minggu lama yang udah
-        nggak relevan.
-
-        Return: (list_order, minggu_po_string) atau ([], None) kalau nggak
-        ketemu sama sekali."""
-        nama_target = nama_customer.strip().lower()
-        semua = [
-            o for o in self.get_all_orders()
-            if o.get("Nama_Customer", "").strip().lower() == nama_target
-        ]
-        if not semua:
-            return [], None
-
-        by_week = {}
-        for o in semua:
-            d = self._parse_tanggal_fleksibel(o.get("Minggu_PO"))
-            key = d or datetime.date.min
-            by_week.setdefault(key, []).append(o)
-
-        minggu_terbaru_key = max(by_week.keys())
-        orders_terbaru = by_week[minggu_terbaru_key]
-        minggu_po_str = str(orders_terbaru[0].get("Minggu_PO", "")).strip()
-        return orders_terbaru, minggu_po_str
 
     def get_orders_by_month(self, year: int, month: int):
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""

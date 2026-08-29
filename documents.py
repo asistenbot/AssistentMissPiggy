@@ -12,20 +12,6 @@ def rupiah(n):
     return "Rp" + f"{int(n):,}".replace(",", ".")
 
 
-def _is_delivery_metode(metode):
-    """True kalau metode-nya berarti 'dikirim' -- ada 2 istilah yang beredar
-    di sistem ini: order dari halaman web pakai 'Diantar', tapi order yang
-    di-AI parse dari chat manual (ai_parser.py) pakai 'Kirim'. Disamain sama
-    helper versi bot.py/web_order_server.py/receipt.py (dicek berbasis
-    substring biar dua-duanya, dan variasi kayak 'Dikirim', kena) -- SEBELUM
-    ini, fungsi-fungsi di bawah nyocokin metode pake '== \"Kirim\"' persis,
-    jadi order dari web ('Diantar') ke-skip diam-diam dari daftar kurir
-    (kejadian di order Ratna: kehitung di rekap produksi tapi ilang dari
-    'DIKIRIM KURIR')."""
-    m = (metode or "").strip().lower()
-    return "antar" in m or "kirim" in m
-
-
 def build_invoice(nama_customer: str, minggu_po: str, orders: list) -> str:
     if not orders:
         return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
@@ -73,11 +59,7 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
     lines.append(f"Nama: {nama_customer}")
     lines.append(f"No HP: {orders[0].get('No_HP', '-')}")
     lines.append(f"Metode: {orders[0].get('Metode', '-')}")
-    # DULU: `if orders[0].get("Metode") == "Kirim"` -- exact match doang,
-    # jadi order dari web ("Diantar") kena cabang ELSE dan alamatnya nggak
-    # ketulis (malah nongol alamat toko buat ambil sendiri, padahal harusnya
-    # dikirim ke alamat customer). Sekarang disamain pake _is_delivery_metode.
-    if _is_delivery_metode(orders[0].get("Metode")):
+    if orders[0].get("Metode") == "Kirim":
         lines.append(f"Alamat: {orders[0].get('Alamat', '-')}")
     else:
         lines.append(f"Ambil di: {config.PICKUP_ADDRESS}")
@@ -119,141 +101,12 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
     return "\n".join(lines)
 
 
-def build_production_recap_customer(nama_customer: str, minggu_po: str, orders: list) -> str:
-    """Rekap produksi TAPI cuma buat 1 customer tertentu -- dipanggil manual
-    kalau admin EKSPLISIT minta (misal '/rekap Ci Meyvany' atau bahasa
-    natural 'minta rekap produksi Ci Meyvany'), BUKAN bagian dari rekap
-    mingguan otomatis (yang tetap gabungan semua customer seperti biasa,
-    lihat build_production_recap -- TIDAK diubah/disentuh sama sekali).
-
-    Berguna buat ngecek kebutuhan produksi 1 pesanan gede/khusus secara
-    terpisah, apalagi kalau tanggal kirimnya beda dari minggu PO biasa
-    (Tanggal_Kirim custom, misal order borongan yang mesti dikirim lebih
-    cepat/lambat dari Kamis PO biasa) -- makanya tanggal kirim customer ini
-    ditampilin jelas di baris kedua."""
-    if not orders:
-        return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
-
-    tanggal_kirim = orders[0].get("Tanggal_Kirim") or minggu_po
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {nama_customer}*"]
-    lines.append(f"(Tanggal Kirim: {tanggal_kirim})")
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_multi(nama_list: list, orders: list) -> str:
-    """Rekap produksi GABUNGAN buat BEBERAPA customer sekaligus -- dipanggil
-    kalau admin sebut lebih dari 1 nama dalam 1 permintaan (misal 'minta
-    rekap produksi Franky dan Kelvin' atau '/rekap Franky, Kelvin'). Total
-    per rasa digabung SEMUA customer yang disebut jadi satu angka, sama
-    kayak build_production_recap (mingguan) tapi scope-nya cuma nama-nama
-    yang diminta, bukan semua customer di minggu itu."""
-    label = ", ".join(nama_list)
-    if not orders:
-        return f"Nggak ada order atas nama {label}."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {label}*"]
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_tanggal(label: str, orders: list) -> str:
-    """Rekap produksi berdasarkan RENTANG TANGGAL KIRIM (BUKAN Minggu_PO) --
-    gabungan SEMUA customer yang tanggal kirimnya jatuh di rentang itu,
-    nggak peduli Minggu_PO-nya beda-beda. Dipanggil manual kalau admin minta
-    tanggal spesifik (misal '/rekap 2026-08-29' atau bahasa natural 'rekap
-    produksi besok'/'rekap produksi sampe besok').
-
-    Berguna khusus buat kasus tanggal kirim custom (besok/lusa) yang bikin
-    Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu nggak nongol
-    di rekap mingguan biasa (build_production_recap) ataupun rekap per-nama
-    (build_production_recap_customer) kalau nama-nya nggak disebut satu-satu,
-    tapi tetep kejaring di sini asal Tanggal_Kirim-nya masuk rentang.
-
-    label: teks buat judul, misal '2026-08-29' atau '2026-08-28 s/d 2026-08-29'."""
-    if not orders:
-        return f"Belum ada order untuk tanggal {label}."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {label}*"]
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
 def _group_per_customer(orders: list) -> dict:
-    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
-    diringkas jadi boolean 'ini pengiriman apa bukan' lewat
-    _is_delivery_metode -- BUKAN metode/nama literal apa adanya.
-
-    DULU key-nya `(metode, nama)` mentah, jadi 1 customer yang SAMA tapi
-    kebetulan punya order dari 2 SUMBER beda (web selalu nulis 'Diantar',
-    chat manual yang di-AI-parse kadang nulis 'Kirim') kepisah jadi 2 grup
-    beda -- muncul 2x di daftar kurir padahal orangnya sama (ini yang
-    kejadian ke Pupu: order Roti dari web 'Diantar' + order Donat manual
-    'Kirim' jadi 2 baris terpisah, padahal harusnya 1)."""
     per_customer = {}
     for o in orders:
-        nama = str(o.get("Nama_Customer", "-")).strip()
+        nama = o.get("Nama_Customer", "-")
         metode = o.get("Metode", "-")
-        key = (_is_delivery_metode(metode), nama.lower())
-        per_customer.setdefault(key, []).append(o)
+        per_customer.setdefault((metode, nama), []).append(o)
     return per_customer
 
 
@@ -261,13 +114,12 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
     ke bagian gudang/kurir tanpa perlu crop screenshot."""
     per_customer = _group_per_customer(orders)
-    kirim_entries = {k: v for k, v in per_customer.items() if k[0]}
+    kirim_entries = {k: v for k, v in per_customer.items() if k[0] == "Kirim"}
     if not kirim_entries:
         return None
 
     lines = [f"🛵 *DIKIRIM KURIR — Minggu PO {minggu_po}*\n"]
-    for (is_delivery, nama_key), items in kirim_entries.items():
-        nama = items[0].get("Nama_Customer", "-")
+    for (metode, nama), items in kirim_entries.items():
         no_hp = items[0].get("No_HP", "-")
         alamat = items[0].get("Alamat", "-")
         lines.append(f"• {nama} — {alamat} — {no_hp}")
@@ -277,13 +129,12 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
 def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
     per_customer = _group_per_customer(orders)
-    ambil_entries = {k: v for k, v in per_customer.items() if not k[0]}
+    ambil_entries = {k: v for k, v in per_customer.items() if k[0] == "Ambil"}
     if not ambil_entries:
         return None
 
     lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
-    for (is_delivery, nama_key), items in ambil_entries.items():
-        nama = items[0].get("Nama_Customer", "-")
+    for (metode, nama), items in ambil_entries.items():
         no_hp = items[0].get("No_HP", "-")
         lines.append(f"• {nama} — {no_hp}")
     return "\n".join(lines)

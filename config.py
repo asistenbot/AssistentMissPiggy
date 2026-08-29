@@ -22,22 +22,6 @@ OWNER_TELEGRAM_IDS = [int(x.strip()) for x in _owner_ids_raw.split(",") if x.str
 # Cara ambil ID grup: tambahin bot ke grup, ketik /groupid di grup itu.
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID") or None
 
-# ==== TOPIC ID PER KATEGORI (opsional, isi lewat Railway env var) ====
-# Kalau diisi, kategori itu dikirim ke TOPIC tertentu di dalam GROUP_CHAT_ID
-# (grup forum Telegram yang sama). Kalau mau grup TERPISAH sama sekali buat
-# 1 kategori, isi GROUP_CHAT_ID_xxx di bawah (bukan TOPIC_ID_xxx).
-def _topic_id(env_name):
-    val = os.getenv(env_name)
-    return int(val) if val else None
-TOPIC_ID_ORDER = _topic_id("TOPIC_ID_ORDER")
-TOPIC_ID_INVOICE = _topic_id("TOPIC_ID_INVOICE")
-TOPIC_ID_SURATJALAN = _topic_id("TOPIC_ID_SURATJALAN")
-TOPIC_ID_REKAPPRODUKSI = _topic_id("TOPIC_ID_REKAPPRODUKSI")
-TOPIC_ID_LAPORANBULANAN = _topic_id("TOPIC_ID_LAPORANBULANAN")
-
-GROUP_CHAT_ID_ORDER = os.getenv("GROUP_CHAT_ID_ORDER") or None
-
-
 # ==== ANTHROPIC ====
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -122,7 +106,3 @@ PRODUCT_ALIASES = [
         "rasa": "Meises",
     },
 ]
-GROUP_CHAT_ID_INVOICE = os.getenv("GROUP_CHAT_ID_INVOICE") or None
-GROUP_CHAT_ID_SURATJALAN = os.getenv("GROUP_CHAT_ID_SURATJALAN") or None
-GROUP_CHAT_ID_REKAPPRODUKSI = os.getenv("GROUP_CHAT_ID_REKAPPRODUKSI") or None
-GROUP_CHAT_ID_LAPORANBULANAN = os.getenv("GROUP_CHAT_ID_LAPORANBULANAN") or None

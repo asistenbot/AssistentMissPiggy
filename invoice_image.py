@@ -51,56 +51,12 @@ def _dashed_line(draw, x1, y, x2, color, dash=5, gap=4, width=1):
         x += dash + gap
 
 
-def _wrap_text(text, font, max_width, draw):
-    """Pecah teks jadi beberapa baris biar nggak kepotong keluar canvas --
-    dipakai buat baris 'Rincian Box' yang panjangnya nggak nentu (nggak
-    kayak nama produk yang udah dipotong manual jadi 18 karakter)."""
-    words = text.split(" ")
-    lines = []
-    current = ""
-    for w in words:
-        test = (current + " " + w).strip()
-        if draw.textlength(test, font=font) <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = w
-    if current:
-        lines.append(current)
-    return lines or [""]
-
-
-def _format_box_group_lines(box_groups, font, max_width, draw):
-    """Ubah box_groups (list of {"jumlah_box", "items":[{"rasa","qty_per_box"}]})
-    jadi list baris teks yang siap digambar, sudah di-wrap biar muat lebar
-    invoice. Return list kosong kalau box_groups kosong/None."""
-    if not box_groups:
-        return []
-    wrapped = []
-    for grp in box_groups:
-        jumlah = grp.get("jumlah_box", "?")
-        desc = ", ".join(
-            f"{i.get('rasa', '?')} x{i.get('qty_per_box', '?')}" for i in grp.get("items", [])
-        )
-        text = f"• {jumlah} box: {desc}"
-        wrapped.extend(_wrap_text(text, font, max_width, draw))
-    return wrapped
-
-
-def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box_groups: list = None) -> BytesIO:
+def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> BytesIO:
     x_left = PADDING
     x_right = WIDTH - PADDING
     col_qty = x_left + 230
     col_harga = x_right - 100
     CATEGORY_ROW_HEIGHT = 28
-    BOX_LINE_HEIGHT = 19
-
-    # Tanggal_Kirim itu kolom OPSIONAL di Sheets -- kalau admin nggak nentuin
-    # tanggal custom (misal 'besok'), balik ke default lama: minggu_po
-    # (Kamis PO minggu berjalan), jadi invoice yang udah ada nggak berubah
-    # kalau fitur ini nggak dipakai sama sekali.
-    tanggal_kirim = (orders[0].get("Tanggal_Kirim") if orders else None) or minggu_po
 
     # Kelompokin item per kategori, Donat selalu di paling atas, sisanya
     # ikutin urutan config.CATEGORIES.
@@ -117,14 +73,6 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
         grouped.setdefault(o["Kategori"], []).append(o)
     kategori_list = sorted(grouped.keys(), key=kategori_rank)
 
-    # Ukur dulu baris "Rincian Box" (kalau ada) pakai canvas dummy, biar bisa
-    # dipakai buat hitung total tinggi gambar DAN dipakai lagi pas gambar
-    # beneran -- dihitung sekali aja biar konsisten antara pass pertama
-    # (hitung tinggi) dan pass kedua (gambar).
-    dummy_img = Image.new("RGB", (WIDTH, 10), COLOR_BG)
-    dummy_draw = ImageDraw.Draw(dummy_img)
-    box_lines = _format_box_group_lines(box_groups, F_SMALL, x_right - x_left, dummy_draw)
-
     # ---- Hitung total tinggi gambar dulu ----
     y = HEADER_HEIGHT + PADDING
     y += 24 + 22 + 22 + 20
@@ -133,8 +81,6 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     for kategori in kategori_list:
         y += CATEGORY_ROW_HEIGHT
         y += len(grouped[kategori]) * ROW_HEIGHT
-    if box_lines:
-        y += 24 + len(box_lines) * BOX_LINE_HEIGHT + 8
     y += 10
     y += 22 + 22 + 16
     y += 50  # kotak total
@@ -187,7 +133,7 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     y = HEADER_HEIGHT + PADDING
     draw.text((x_left, y), f"Kepada: {nama_customer}", font=F_BODY_BOLD, fill=COLOR_TEXT)
     y += 24
-    draw.text((x_left, y), f"Tanggal Kirim/Ambil: {tanggal_kirim}", font=F_BODY, fill=COLOR_MUTED)
+    draw.text((x_left, y), f"Tanggal Kirim/Ambil: {minggu_po}", font=F_BODY, fill=COLOR_MUTED)
     y += 22
     metode = orders[0].get("Metode", "-") if orders else "-"
     draw.text((x_left, y), f"Metode: {metode}", font=F_BODY, fill=COLOR_MUTED)
@@ -228,15 +174,6 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
             draw.text((col_harga, y), rupiah(harga), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
             draw.text((x_right, y), rupiah(subtotal), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
             y += ROW_HEIGHT
-
-    # ---- Rincian Box (opsional, cuma muncul kalau order-nya pakai satuan box) ----
-    if box_lines:
-        draw.text((x_left, y), "Rincian Box:", font=F_BODY_BOLD, fill=COLOR_TEXT)
-        y += 22
-        for line in box_lines:
-            draw.text((x_left, y), line, font=F_SMALL, fill=COLOR_MUTED)
-            y += BOX_LINE_HEIGHT
-        y += 10
 
     _dashed_line(draw, x_left, y, x_right, COLOR_LINE)
     y += 14
