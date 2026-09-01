@@ -40,7 +40,14 @@ GROUP_CHAT_ID_ORDER = os.getenv("GROUP_CHAT_ID_ORDER") or None
 
 # ==== ANTHROPIC ====
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# Model "berat" -- dipakai buat tugas yang beneran nentuin ISI order (nama
+# barang, qty, harga) -- salah di sini = invoice/surat jalan salah ke customer.
 CLAUDE_MODEL = "claude-sonnet-4-6"
+# Model "ringan/murah" -- dipakai KHUSUS buat classify_intent (nebak maksud
+# admin dari 1 kalimat pendek: mau rekap/invoice/edit/dll). Ini yang paling
+# sering kepanggil (hampir tiap pesan admin), tapi cuma nge-klasifikasi
+# doang -- gak nentuin isi order sama sekali -- jadi model murah udah cukup.
+CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"
 
 # ==== GOOGLE SHEETS ====
 # Untuk deploy di Railway/Render: isi GOOGLE_SERVICE_ACCOUNT_JSON (isi lengkap
