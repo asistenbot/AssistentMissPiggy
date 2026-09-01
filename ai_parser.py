@@ -460,7 +460,7 @@ def classify_intent(raw_text: str) -> dict:
         system_prompt = INTENT_SYSTEM_PROMPT.format(today=today_str)
 
         response = client.messages.create(
-            model=config.CLAUDE_MODEL,
+            model=config.CLAUDE_MODEL_FAST,
             max_tokens=300,
             system=system_prompt,
             messages=[{"role": "user", "content": raw_text}],
