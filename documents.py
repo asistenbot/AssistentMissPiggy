@@ -49,11 +49,16 @@ def build_invoice(nama_customer: str, minggu_po: str, orders: list) -> str:
         lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{qty} @ {rupiah(harga)} = {rupiah(subtotal)}")
 
     ongkir = int(orders[0].get("Ongkir", 0) or 0)
-    grand_total = total + ongkir
+    addon_jenis = orders[0].get("Addon_Jenis") or None
+    addon_qty = int(orders[0].get("Addon_Qty", 0) or 0)
+    addon_total = int(orders[0].get("Addon_Total", 0) or 0)
+    grand_total = total + ongkir + addon_total
 
     lines.append("")
     lines.append(f"Subtotal: {rupiah(total)}")
     lines.append(f"Ongkir: {rupiah(ongkir)}")
+    if addon_jenis and addon_qty:
+        lines.append(f"Add-on: {addon_jenis} x{addon_qty} ({rupiah(addon_total)})")
     lines.append(f"*Total: {rupiah(grand_total)}*")
     lines.append("")
     lines.append("Pembayaran transfer ke:")
@@ -91,6 +96,12 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
     for o in orders:
         lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}")
 
+    addon_jenis = orders[0].get("Addon_Jenis")
+    addon_qty = int(orders[0].get("Addon_Qty", 0) or 0)
+    if addon_jenis and addon_qty:
+        lines.append("")
+        lines.append(f"Add-on: {addon_jenis} x{addon_qty}")
+
     catatan = orders[0].get("Catatan")
     if catatan:
         lines.append("")
@@ -113,7 +124,7 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
     for (kategori, rasa), qty in recap.items():
         by_category.setdefault(kategori, []).append((rasa, qty))
 
-    lines = [f"*REKAP PRODUKSI — Minggu PO {minggu_po}*"]
+    lines = [f"*REKAP PRODUKSI — Kamis PO {minggu_po}*"]
     lines.append(f"(Kirim: {config.DELIVERY_DAY.upper()} {config.DELIVERY_WINDOW})")
     grand_total = 0
     for kategori, items in by_category.items():
@@ -295,7 +306,7 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
     if not kirim_entries:
         return None
 
-    lines = [f"🛵 *DIKIRIM — Minggu PO {minggu_po}*\n"]
+    lines = [f"🛵 *DIKIRIM — Kamis PO {minggu_po}*\n"]
     for (_kategori, nama_key), items in kirim_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
@@ -317,7 +328,7 @@ def build_delivery_kurir(minggu_po: str, orders: list) -> str | None:
     if not kurir_entries:
         return None
 
-    lines = [f"📦 *DIKIRIM (KURIR) — Minggu PO {minggu_po}*\n"]
+    lines = [f"📦 *DIKIRIM (KURIR) — Kamis PO {minggu_po}*\n"]
     for (_kategori, nama_key), items in kurir_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
@@ -334,7 +345,7 @@ def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     if not ambil_entries:
         return None
 
-    lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
+    lines = [f"🏠 *DIAMBIL SENDIRI — Kamis PO {minggu_po}*\n"]
     for (_kategori, nama_key), items in ambil_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")

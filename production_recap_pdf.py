@@ -64,7 +64,7 @@ def _build_category_table(items, col_widths=None):
 
 def generate_production_recap_pdf(judul: str, subtitle: str, orders: list) -> BytesIO:
     """
-    judul = judul utama, misal "REKAP PRODUKSI -- Minggu PO 2026-08-27"
+    judul = judul utama, misal "REKAP PRODUKSI -- Kamis PO 2026-08-27"
             atau "REKAP PRODUKSI -- Ci Meyvany" (buat versi per-customer).
     subtitle = baris kecil di bawah judul, misal "(Kirim: THU 14:00 - 15:00)"
                atau "(Tanggal Kirim: 2026-08-25)".

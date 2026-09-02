@@ -152,6 +152,16 @@ class SheetsClient:
         manual, sebelum fitur ini dipakai -- kalau belum ada, bot tetep
         jalan normal, cuma info kurirnya nggak kesimpen/ke-pakai di rekap.
 
+        order["addon_jenis"]/["addon_qty"]/["addon_total"] (opsional, misal
+        jenis "Tali Pita" qty 2 total Rp10.000, diisi admin lewat tombol
+        "Isi Add-on" pas konfirmasi order, atau dikirim dari form web)
+        disimpen ke kolom Addon_Jenis/Addon_Qty/Addon_Total, SAMA polanya
+        kayak Kurir. WAJIB nambahin 3 kolom header "Addon_Jenis",
+        "Addon_Qty", "Addon_Total" PALING BELAKANG (setelah Kurir, dalam
+        urutan itu) di Google Sheet Orders-nya dulu, manual, sebelum fitur
+        ini dipakai -- kalau belum ada, bot tetep jalan normal, cuma
+        add-on-nya nggak kesimpen/ke-pakai aja.
+
         Satu order bisa berisi banyak item -> tiap item jadi 1 baris,
         biar gampang di-rekap per rasa.
 
@@ -175,6 +185,15 @@ class SheetsClient:
         # misahin daftar "DIKIRIM (KURIR)" dari "DIKIRIM" (armada) di topic
         # Pengiriman, dan ikut ditampilin di surat jalan/invoice.
         kurir = order.get("kurir") or ""
+        # order["addon_jenis"]/["addon_qty"]/["addon_total"] (opsional, misal
+        # "Tali Pita" qty 2 total Rp10.000, diisi admin lewat tombol "Isi
+        # Add-on" pas konfirmasi order, atau dikirim dari form web) -- kosong
+        # semua berarti nggak pakai add-on. Addon_Total ikut ditambahin ke
+        # grand total invoice, dan Addon_Jenis+Addon_Qty ikut ditampilin di
+        # surat jalan buat yang packing.
+        addon_jenis = order.get("addon_jenis") or ""
+        addon_qty = int(order.get("addon_qty") or 0)
+        addon_total = int(order.get("addon_total") or 0)
         rows = []
         order_records = []
         for item in order["items"]:
@@ -200,6 +219,9 @@ class SheetsClient:
                 box_info_json,  # kolom BARU lagi, paling belakang setelah Tanggal_Kirim
                 self._safe_text(catatan),  # kolom BARU lagi, paling belakang setelah Box_Info
                 self._safe_text(kurir),  # kolom BARU lagi, paling belakang setelah Catatan
+                self._safe_text(addon_jenis),  # kolom BARU lagi, paling belakang setelah Kurir
+                addon_qty,  # kolom BARU lagi, paling belakang setelah Addon_Jenis
+                addon_total,  # kolom BARU lagi, paling belakang setelah Addon_Qty
             ])
             order_records.append({
                 "Kategori": item["kategori"],
@@ -214,6 +236,9 @@ class SheetsClient:
                 "Box_Info": box_info_json,
                 "Catatan": catatan,
                 "Kurir": kurir,
+                "Addon_Jenis": addon_jenis,
+                "Addon_Qty": addon_qty,
+                "Addon_Total": addon_total,
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
@@ -413,9 +438,15 @@ class SheetsClient:
         """Sama kayak get_orders_by_week, TAPI (1) jalanin
         rollover_delivered_orders dulu (order yang tanggal kirimnya udah
         lewat otomatis kepindah Status-nya), lalu (2) buang order yang
-        Status-nya udah 'Terkirim' dari hasilnya. KHUSUS dipakai buat REKAP
-        PRODUKSI, biar nggak keitung ulang order yang sebenernya udah kelar
-        diproduksi & dikirim.
+        Status-nya udah 'Terkirim' dari hasilnya, DAN (3) buang order yang
+        Tanggal_Kirim-nya CUSTOM beda dari minggu_po ini (misal Minggu_PO-nya
+        minggu ini tapi Tanggal_Kirim-nya di-custom ke hari/minggu lain) --
+        soalnya order kayak gitu HARUSNYA cuma nongol di rekap tanggal
+        kirimnya sendiri (/rekap <tanggal>), bukan ikut kehitung di rekap
+        mingguan biasa cuma gara-gara Minggu_PO-nya kebetulan minggu ini.
+        KHUSUS dipakai buat REKAP PRODUKSI (+ daftar DIKIRIM/KURIR/AMBIL),
+        biar nggak keitung ulang order yang sebenernya udah kelar diproduksi
+        & dikirim, ATAU yang tanggal kirimnya emang beda hari.
 
         SENGAJA dibikin method BARU, bukan ubah get_orders_by_week langsung
         -- soalnya get_orders_by_week masih dipakai /invoice, /suratjalan,
@@ -428,10 +459,18 @@ class SheetsClient:
             # tetep lanjut nampilin rekap apa adanya drpd bikin /rekap
             # ikutan error gara-gara ini.
             pass
-        return [
-            o for o in self.get_orders_by_week(minggu_po)
-            if str(o.get("Status", "")).strip().lower() != "terkirim"
-        ]
+        hasil = []
+        for o in self.get_orders_by_week(minggu_po):
+            if str(o.get("Status", "")).strip().lower() == "terkirim":
+                continue
+            tanggal_kirim = str(o.get("Tanggal_Kirim", "")).strip()
+            if tanggal_kirim and not self._minggu_po_cocok(tanggal_kirim, minggu_po):
+                # Tanggal_Kirim custom-nya beda dari minggu_po yang lagi
+                # direkap -- skip, biar cuma kejaring di /rekap <tanggal>
+                # sendiri (get_pending_orders_by_tanggal_range).
+                continue
+            hasil.append(o)
+        return hasil
 
     def get_pending_orders_by_tanggal_range(self, start_date: str, end_date: str):
         """Rekap produksi berdasarkan TANGGAL_KIRIM (BUKAN Minggu_PO) dalam
@@ -439,10 +478,11 @@ class SheetsClient:
         kirimnya jatuh di rentang itu, nggak peduli Minggu_PO-nya beda-beda.
         Dipakai buat '/rekap 2026-08-29' atau '/rekap 2026-08-28:2026-08-29'.
 
-        Berguna banget buat kasus tanggal kirim custom (besok/lusa) yang
-        bikin Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu
-        nggak nongol di rekap mingguan biasa, tapi tetep kejaring di sini
-        selama Tanggal_Kirim-nya masuk rentang yang diminta.
+        Berguna banget buat kasus tanggal kirim custom (besok/lusa/tanggal
+        lain) -- customer kayak gitu SENGAJA udah di-skip dari rekap
+        mingguan biasa (liat get_pending_orders_by_week), tapi tetep
+        kejaring di sini selama Tanggal_Kirim-nya masuk rentang yang
+        diminta.
 
         start_date, end_date: string 'YYYY-MM-DD' (inklusif dua-duanya).
         Sama kayak get_pending_orders_by_week: jalanin rollover dulu, baru

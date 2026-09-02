@@ -58,6 +58,16 @@ def _build_preview_text(parsed):
         f"Kurir: {parsed.get('kurir') or '(armada sendiri)'}\n"
         if _is_delivery_metode(parsed.get("metode")) else ""
     )
+    # Baris "Add-on" -- SELALU dicek (nggak digantung metode kayak Kurir di
+    # atas), sama polanya kayak _format_addon_line() versi bot.py (duplikat
+    # kecil, sengaja, ngikutin pola file ini yang emang berdiri sendiri).
+    addon_jenis = parsed.get("addon_jenis")
+    addon_line = ""
+    if addon_jenis:
+        addon_qty = int(parsed.get("addon_qty") or 1)
+        addon_total = int(parsed.get("addon_total") or 0)
+        addon_total_text = "Rp" + format(addon_total, ",").replace(",", ".")
+        addon_line = f"Add-on: {addon_jenis} x{addon_qty} ({addon_total_text})\n"
     return (
         f"*Order Baru dari Web:*\n"
         f"Nama: {parsed.get('nama') or '-'}\n"
@@ -68,6 +78,7 @@ def _build_preview_text(parsed):
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
+        f"{addon_line}"
         f"Catatan: {parsed.get('catatan') or '-'}\n"
     )
 
@@ -98,6 +109,16 @@ def _build_confirm_keyboard(parsed, order_id):
         kurir_sekarang = parsed.get("kurir")
         kurir_label = f"🚚 Ubah Kurir ({kurir_sekarang})" if kurir_sekarang else "🚚 Isi Kurir (kalau via ekspedisi)"
         rows.append([InlineKeyboardButton(kurir_label, callback_data=f"set_kurir:{order_id}")])
+    # Tombol "Isi Add-on" (tali pita/kartu ucapan) -- SELALU muncul (nggak
+    # digantung metode kayak Ongkir/Kurir di atas), callback "set_addon:<id>"
+    # ditangani handle_set_addon/handle_addon_input di bot.py, satu handler
+    # dipakai bareng buat semua sumber order (sama pola kayak Ongkir/Kurir).
+    addon_sekarang = parsed.get("addon_jenis")
+    addon_label = (
+        f"🎀 Ubah Add-on ({addon_sekarang} x{parsed.get('addon_qty') or 1})"
+        if addon_sekarang else "🎀 Isi Add-on (tali pita/kartu ucapan)"
+    )
+    rows.append([InlineKeyboardButton(addon_label, callback_data=f"set_addon:{order_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -158,6 +179,18 @@ def create_web_order_app(application):
         if not (nama and alamat and no_hp and metode and items):
             return web.json_response({"ok": False, "error": "incomplete_order"}, status=400)
 
+        # Add-on (tali pita/kartu ucapan) opsional dari form web -- jenis-nya
+        # HARUS PERSIS salah satu key di config.ADDON_PRICES (form web yang
+        # jaga ini, misal lewat <select>), kalau nggak cocok/nggak dikirim
+        # dianggap nggak pakai add-on sama sekali (bukan error, biar form
+        # lama yang belum update fieldnya tetep jalan normal). Harga TOTAL
+        # dihitung DI SINI dari config.ADDON_PRICES x qty (bukan dari angka
+        # yang dikirim form), biar nggak bisa dimanipulasi dari sisi client.
+        addon_jenis_raw = (body.get("addon_jenis") or "").strip()
+        addon_jenis = addon_jenis_raw if addon_jenis_raw in config.ADDON_PRICES else None
+        addon_qty = max(1, int(body.get("addon_qty") or 1)) if addon_jenis else 0
+        addon_total = config.ADDON_PRICES.get(addon_jenis, 0) * addon_qty if addon_jenis else 0
+
         parsed = {
             "nama": nama,
             "no_hp": no_hp,
@@ -166,6 +199,9 @@ def create_web_order_app(application):
             "items": items,
             "ongkir": int(body.get("ongkir") or 0),
             "catatan": (body.get("catatan") or "").strip() or None,
+            "addon_jenis": addon_jenis,
+            "addon_qty": addon_qty,
+            "addon_total": addon_total,
             "kelengkapan": "lengkap",
         }
 

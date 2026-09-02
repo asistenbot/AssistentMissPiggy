@@ -118,6 +118,16 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     kurir = orders[0].get("Kurir") if orders else None
     tampilkan_kurir = bool(_is_delivery_metode(metode_awal) and kurir)
 
+    # Kolom Addon_Jenis/Addon_Qty/Addon_Total (diisi admin lewat tombol "Isi
+    # Add-on" pas konfirmasi order, misal "Tali Pita" qty 2) -- SELALU dicek
+    # (nggak digantung metode kirim/ambil kayak Kurir), soalnya add-on bisa
+    # dipesan mau order-nya dikirim atau diambil sendiri. Harganya ikut
+    # ditambahin ke grand_total di bawah.
+    addon_jenis = orders[0].get("Addon_Jenis") if orders else None
+    addon_qty = int(orders[0].get("Addon_Qty", 0) or 0) if orders else 0
+    addon_total = int(orders[0].get("Addon_Total", 0) or 0) if orders else 0
+    tampilkan_addon = bool(addon_jenis and addon_qty)
+
     # Kelompokin item per kategori, Donat selalu di paling atas, sisanya
     # ikutin urutan config.CATEGORIES.
     kategori_order = ["Donat"] + [c for c in config.CATEGORIES if c != "Donat"]
@@ -155,6 +165,8 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
         y += 24 + len(box_lines) * BOX_LINE_HEIGHT + 8
     y += 10
     y += 22 + 22 + 16
+    if tampilkan_addon:
+        y += 22
     y += 50  # kotak total
     y += 16
     y += 20 + 22 + 22
@@ -263,14 +275,19 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     y += 14
 
     ongkir = int(orders[0].get("Ongkir", 0) or 0) if orders else 0
-    grand_total = total + ongkir
+    grand_total = total + ongkir + addon_total
 
     draw.text((x_left, y), "Subtotal", font=F_BODY, fill=COLOR_MUTED)
     draw.text((x_right, y), rupiah(total), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
     y += 22
     draw.text((x_left, y), "Ongkir", font=F_BODY, fill=COLOR_MUTED)
     draw.text((x_right, y), rupiah(ongkir), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
-    y += 26
+    y += 22
+    if tampilkan_addon:
+        draw.text((x_left, y), f"Add-on ({addon_jenis} x{addon_qty})", font=F_BODY, fill=COLOR_MUTED)
+        draw.text((x_right, y), rupiah(addon_total), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
+        y += 22
+    y += 4
 
     # ---- Kotak Total (rounded, emas) ----
     draw.rounded_rectangle([x_left - 8, y, x_right + 8, y + 46], radius=10, fill=COLOR_TOTAL_BG)

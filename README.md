@@ -52,8 +52,8 @@ Bikin 1 Google Sheet baru, kasih nama bebas (misal "Miss Piggy - Data PO"),
 lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
 
 ### Tab `Orders`
-| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status | Tanggal_Kirim | Box_Info | Catatan | Kurir |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status | Tanggal_Kirim | Box_Info | Catatan | Kurir | Addon_Jenis | Addon_Qty | Addon_Total |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
 - `Minggu_PO` = tanggal pengiriman Kamis untuk PO minggu itu (format `YYYY-MM-DD`), otomatis diisi bot
 - `Metode` = `Kirim` atau `Ambil`
@@ -74,6 +74,17 @@ lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
   HARUS ditambahin manual sebagai header PALING BELAKANG** (setelah `Catatan`) di sheet
   Orders lo sebelum fitur ini kepake -- kalau belum ada, bot tetep jalan normal, cuma
   info kurirnya nggak kesimpen/ke-pakai aja
+- `Addon_Jenis` / `Addon_Qty` / `Addon_Total` = add-on packing (misal "Tali Pita",
+  "Kartu Ucapan", atau "Tali Pita + Kartu Ucapan"), harganya udah ditentuin tetap
+  di `config.py` (`ADDON_PRICES`, default @Rp5.000/Rp5.000/Rp10.000) dan dikaliin
+  otomatis sama `Addon_Qty` yang lo isi. Diisi lewat tombol "🎀 Isi/Ubah Add-on" pas
+  konfirmasi order (SELALU muncul, nggak peduli metode Kirim/Ambil), atau dikirim
+  dari form web (field `addon_jenis`/`addon_qty` di JSON order). `Addon_Total`
+  ikut nambah ke Total di Invoice, dan `Addon_Jenis`+`Addon_Qty` ikut ditampilin
+  di Surat Jalan buat yang packing. **3 kolom ini HARUS ditambahin manual sebagai
+  header PALING BELAKANG** (setelah `Kurir`, urutannya: `Addon_Jenis`, `Addon_Qty`,
+  `Addon_Total`) di sheet Orders lo sebelum fitur ini kepake -- kalau belum ada,
+  bot tetep jalan normal, cuma add-on-nya nggak kesimpen/ke-pakai aja
 
 ### Tab `PriceList`
 | Kategori | Rasa | Harga |

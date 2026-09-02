@@ -255,6 +255,15 @@ def build_confirm_keyboard(parsed, order_id):
         kurir_sekarang = parsed.get("kurir")
         kurir_label = f"🚚 Ubah Kurir ({kurir_sekarang})" if kurir_sekarang else "🚚 Isi Kurir (kalau via ekspedisi)"
         rows.append([InlineKeyboardButton(kurir_label, callback_data=f"set_kurir:{order_id}")])
+    # Tombol "Isi Add-on" (tali pita/kartu ucapan) -- SENGAJA nggak digantung
+    # sama metode (beda sama Ongkir/Kurir di atas), soalnya order Ambil
+    # Sendiri pun bisa aja minta dikasih kartu ucapan/tali pita.
+    addon_sekarang = parsed.get("addon_jenis")
+    addon_label = (
+        f"🎀 Ubah Add-on ({addon_sekarang} x{parsed.get('addon_qty') or 1})"
+        if addon_sekarang else "🎀 Isi Add-on (tali pita/kartu ucapan)"
+    )
+    rows.append([InlineKeyboardButton(addon_label, callback_data=f"set_addon:{order_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -365,6 +374,74 @@ def _format_kurir_line(parsed):
     return f"Kurir: {parsed.get('kurir') or '(armada sendiri)'}\n"
 
 
+def _format_addon_line(parsed):
+    """Baris 'Add-on: ...' yang dipakai di SEMUA preview order -- beda sama
+    Kurir (yang cuma muncul buat metode kirim), add-on ini SELALU dicek
+    (bisa dipakai baik order Kirim maupun Ambil Sendiri, misal ambil sendiri
+    tapi minta dikasih kartu ucapan). Kosong berarti nggak pakai add-on sama
+    sekali -- liat tombol 'Isi Add-on' di build_confirm_keyboard buat cara
+    isinya. Harganya dihitung dari config.ADDON_PRICES x qty, BUKAN customer
+    yang nentuin sendiri (biar konsisten harganya)."""
+    jenis = parsed.get("addon_jenis")
+    if not jenis:
+        return ""
+    qty = int(parsed.get("addon_qty") or 1)
+    total = int(parsed.get("addon_total") or 0)
+    total_text = "Rp" + format(total, ",").replace(",", ".")
+    return f"Add-on: {jenis} x{qty} ({total_text})\n"
+
+
+_ADDON_CLEAR_KEYWORDS = ("hapus", "kosong", "kosongin", "gak jadi", "tidak jadi", "batal", "gausah", "ga usah")
+
+
+def _set_addon(parsed, jenis, qty):
+    """Nulis addon_jenis/addon_qty/addon_total ke `parsed` sekaligus,
+    hitung total-nya dari config.ADDON_PRICES x qty di SINI (satu tempat),
+    biar nggak ada resiko total-nya kelupaan di-update di salah satu call
+    site pas jenis/qty-nya diganti. jenis=None berarti add-on dihapus/nggak
+    dipakai -- qty & total ikut kereset ke 0."""
+    if not jenis:
+        parsed["addon_jenis"] = None
+        parsed["addon_qty"] = 0
+        parsed["addon_total"] = 0
+        return
+    qty = max(1, int(qty or 1))
+    harga_satuan = config.ADDON_PRICES.get(jenis, 0)
+    parsed["addon_jenis"] = jenis
+    parsed["addon_qty"] = qty
+    parsed["addon_total"] = harga_satuan * qty
+
+
+def _parse_addon_text(text):
+    """Parse teks bebas admin (dari tombol 'Isi Add-on' ATAU dari koreksi
+    bebas kayak '/edit' -- misal 'tali pita 2', 'kartu ucapan', 'tali pita +
+    kartu ucapan 3x') jadi (jenis, qty). jenis salah satu key di
+    config.ADDON_PRICES, qty default 1 kalau nggak ada angka disebut.
+    Return (None, 0) kalau teksnya cocok sama kata kunci hapus/batal.
+    Return None (bukan tuple) kalau teksnya nggak nyebut add-on apapun."""
+    lower = text.strip().lower()
+    if lower in _ADDON_CLEAR_KEYWORDS:
+        return None, 0
+
+    # "kartu ucapan" (bukan bare "kartu") sengaja dipilih biar nggak salah
+    # kesedot kalau ada kata "kartu" muncul di konteks LAIN (misal "kartu
+    # keluarga", "no kartu" dst) di instruksi koreksi bebas.
+    ada_pita = "pita" in lower
+    ada_kartu = "kartu ucapan" in lower
+    if ada_pita and ada_kartu:
+        jenis = "Tali Pita + Kartu Ucapan"
+    elif ada_pita:
+        jenis = "Tali Pita"
+    elif ada_kartu:
+        jenis = "Kartu Ucapan"
+    else:
+        return None
+
+    angka = re.search(r"\d+", lower)
+    qty = int(angka.group()) if angka else 1
+    return jenis, max(1, qty)
+
+
 def _format_catatan_block(parsed):
     """Baris 'Catatan: ...' (+ 'Peringatan AI: ...' kalau ada) yang dipakai
     di SEMUA preview order (baru, abis isi ongkir, abis dikoreksi) -- ditaruh
@@ -403,6 +480,7 @@ def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini, ketik tanggal kirim jadi ... buat ubah)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
+        f"{_format_addon_line(parsed)}"
         f"{_format_catatan_block(parsed)}\n"
     )
 
@@ -601,7 +679,7 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         pdf_buf = production_recap_pdf.generate_production_recap_pdf(
-            f"REKAP PRODUKSI — Minggu PO {minggu_po}",
+            f"REKAP PRODUKSI — Kamis PO {minggu_po}",
             f"(Kirim: {config.DELIVERY_DAY.upper()} {config.DELIVERY_WINDOW})",
             orders,
         )
@@ -911,6 +989,9 @@ async def _gabung_pending_orders_by_nama(update: Update, context: ContextTypes.D
         "metode": _first_nonempty("metode"),
         "tanggal_kirim": _first_nonempty("tanggal_kirim"),
         "kurir": _first_nonempty("kurir"),
+        "addon_jenis": _first_nonempty("addon_jenis"),
+        "addon_qty": _first_nonempty("addon_qty"),
+        "addon_total": _first_nonempty("addon_total"),
         "ongkir": _first_ongkir(),
         "items": merged_items,
         "kelengkapan": "lengkap",
@@ -1075,6 +1156,9 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
         "catatan": orders[0].get("Catatan") or None,
         "kurir": orders[0].get("Kurir") or None,
+        "addon_jenis": orders[0].get("Addon_Jenis") or None,
+        "addon_qty": int(orders[0].get("Addon_Qty", 0) or 0),
+        "addon_total": int(orders[0].get("Addon_Total", 0) or 0),
     }
 
     peringatan_minggu = (
@@ -1107,6 +1191,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # "Isi/Ubah Kurir").
     if context.user_data.get("awaiting_kurir_for"):
         await handle_kurir_input(update, context)
+        return
+
+    # Sama kayak ongkir/kurir di atas, tapi buat add-on (abis klik "Isi/Ubah
+    # Add-on").
+    if context.user_data.get("awaiting_addon_for"):
+        await handle_addon_input(update, context)
         return
 
     # Kalau lagi dalam mode edit order (habis /edit Nama Customer atau baru
@@ -1250,6 +1340,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
             "catatan": orders[0].get("Catatan") or None,
             "kurir": orders[0].get("Kurir") or None,
+            "addon_jenis": orders[0].get("Addon_Jenis") or None,
+            "addon_qty": int(orders[0].get("Addon_Qty", 0) or 0),
+            "addon_total": int(orders[0].get("Addon_Total", 0) or 0),
         }
         # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
         await handle_edit_instruction(update, context, instruction_override=instruksi)
@@ -1327,6 +1420,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_kurir_for"):
         await update.message.reply_text(
             "Lagi nunggu kamu ketik nama kurir/ekspedisi buat order sebelumnya dulu ya, "
+            "baru kirim gambar order lain."
+        )
+        return
+    if context.user_data.get("awaiting_addon_for"):
+        await update.message.reply_text(
+            "Lagi nunggu kamu ketik jenis add-on buat order sebelumnya dulu ya, "
             "baru kirim gambar order lain."
         )
         return
@@ -1434,6 +1533,9 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "tanggal_kirim": parsed.get("tanggal_kirim"),
         "catatan": parsed.get("catatan"),
         "kurir": parsed.get("kurir"),
+        "addon_jenis": parsed.get("addon_jenis"),
+        "addon_qty": parsed.get("addon_qty"),
+        "addon_total": parsed.get("addon_total"),
     }
 
     sheets = get_sheets_client()
@@ -1562,6 +1664,7 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_rupiah}\n"
+        f"{_format_addon_line(parsed)}"
         f"{_format_catatan_block(parsed)}"
     )
 
@@ -1627,6 +1730,74 @@ async def handle_kurir_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
 
 
+async def handle_set_addon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dipicu tombol '🎀 Isi/Ubah Add-on' di preview order -- SELALU muncul
+    (nggak digantung metode kirim/ambil kayak Ongkir/Kurir), soalnya add-on
+    (tali pita/kartu ucapan) bisa dipesan mau order-nya dikirim atau diambil
+    sendiri. Sama polanya kayak handle_set_kurir."""
+    query = update.callback_query
+    await query.answer()
+
+    _, _, order_id = query.data.partition(":")
+
+    parsed = _get_pending_order_by_id(context, order_id)
+    if not parsed:
+        await query.message.reply_text("Nggak ada order yang lagi diproses.")
+        return
+
+    context.user_data["awaiting_addon_for"] = order_id
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    jenis_sekarang = parsed.get("addon_jenis")
+    hint_sekarang = f" (sekarang: {jenis_sekarang} x{parsed.get('addon_qty') or 1})" if jenis_sekarang else ""
+    daftar_harga = ", ".join(f"{k} = {documents.rupiah(v)}" for k, v in config.ADDON_PRICES.items())
+    await query.message.reply_text(
+        f"Ketik jenis & jumlah add-on-nya ya{hint_sekarang}, misal:\n"
+        "- tali pita 2\n"
+        "- kartu ucapan\n"
+        "- tali pita + kartu ucapan 3\n\n"
+        f"Harga: {daftar_harga}.\n"
+        "Ketik 'hapus' kalau nggak jadi pakai add-on."
+    )
+
+
+async def handle_addon_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nerima balasan admin abis klik 'Isi/Ubah Add-on', update pending_order
+    yang ada, lalu kirim ulang preview + tombol Simpan/Batal (sama polanya
+    kayak handle_kurir_input). Kalau teksnya nggak dikenalin sama sekali
+    (bukan tali pita/kartu ucapan/hapus), minta ulang tanpa nge-reset apapun."""
+    raw = update.message.text.strip()
+    order_id = context.user_data.get("awaiting_addon_for")
+
+    parsed = _get_pending_order_by_id(context, order_id)
+    if not parsed:
+        context.user_data.pop("awaiting_addon_for", None)
+        await update.message.reply_text(
+            "Order-nya udah nggak ada / expired. Minta customer kirim ulang, atau paste ulang chat-nya."
+        )
+        return
+
+    hasil = _parse_addon_text(raw)
+    if hasil is None:
+        await update.message.reply_text(
+            "Kurang jelas nih -- ketik salah satu: 'tali pita', 'kartu ucapan', "
+            "'tali pita + kartu ucapan' (boleh tambahin angka jumlahnya), atau 'hapus'."
+        )
+        return
+
+    context.user_data.pop("awaiting_addon_for", None)
+    jenis, qty = hasil
+    _set_addon(parsed, jenis, qty)
+
+    keyboard = build_confirm_keyboard(parsed, order_id)
+    preview = _build_new_order_preview_text(
+        parsed, "Order (add-on sudah diisi):" if parsed.get("addon_jenis") else "Order (tanpa add-on):"
+    )
+    await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
+
+
 async def handle_pending_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                      parsed: dict, order_id: str):
     """Order masih di tahap preview (belum diklik Konfirmasi/Batal). Admin
@@ -1641,13 +1812,21 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     field_correction = _try_parse_field_correction(instruction)
     if field_correction:
         field, new_value = field_correction
-        parsed[field] = new_value
+        if field == "addon":
+            jenis, qty = new_value if new_value else (None, 0)
+            _set_addon(parsed, jenis, qty)
+            display_value = f"{parsed['addon_jenis']} x{parsed['addon_qty']}" if parsed.get("addon_jenis") else "(dikosongin)"
+        else:
+            parsed[field] = new_value
+            # catatan bisa sengaja dikosongin (new_value None) -- tampilin
+            # "(dikosongin)" alih-alih literal "None".
+            display_value = new_value if new_value is not None else "(dikosongin)"
         _store_pending_order(context, parsed, order_id)
 
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
             "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
-            "catatan": "Catatan", "kurir": "Kurir",
+            "catatan": "Catatan", "kurir": "Kurir", "addon": "Add-on",
         }[field]
         items_text = "\n".join(
             f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -1656,9 +1835,6 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         ongkir_val = int(parsed.get("ongkir") or 0)
         ongkir_text = ("Rp" + format(ongkir_val, ",").replace(",", ".")) if ongkir_val else "belum diisi (Rp0)"
         tanggal_kirim_text = parsed.get("tanggal_kirim") or "(default: Kamis PO minggu ini)"
-        # catatan bisa sengaja dikosongin (new_value None) -- tampilin
-        # "(dikosongin)" alih-alih literal "None".
-        display_value = new_value if new_value is not None else "(dikosongin)"
 
         preview = (
             f"*{field_label} diganti jadi:* {display_value}\n\n"
@@ -1670,6 +1846,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
             f"Tanggal Kirim: {tanggal_kirim_text}\n"
             f"Items:\n{items_text}\n"
             f"Ongkir: {ongkir_text}\n"
+            f"{_format_addon_line(parsed)}"
             f"{_format_catatan_block(parsed)}"
         )
         keyboard = build_confirm_keyboard(parsed, order_id)
@@ -1763,6 +1940,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
+        f"{_format_addon_line(parsed)}"
         f"{_format_catatan_block(parsed)}"
     )
     keyboard = build_confirm_keyboard(parsed, order_id)
@@ -1930,6 +2108,18 @@ def _try_parse_field_correction(instruction):
         if val:
             return "kurir", val
 
+    # Add-on packing (tali pita/kartu ucapan) -- pola sama kayak kurir: dicek
+    # dari kata kunci ("add-on"/"addon"/"pita"/"kartu"), biar admin bisa
+    # isi/ubah add-on lewat ketik bebas juga (BUKAN cuma lewat tombol 'Isi
+    # Add-on'). _parse_addon_text yang urus jenis+qty-nya sekaligus, return
+    # None kalau ternyata teksnya nggak beneran nyebut add-on apapun
+    # (misal cuma numpang lewat kata "kartu" di konteks lain).
+    if "add-on" in lower or "addon" in lower or "pita" in lower or "kartu ucapan" in lower:
+        hasil_addon = _parse_addon_text(text)
+        if hasil_addon is not None:
+            jenis, qty = hasil_addon
+            return "addon", (jenis, qty) if jenis else None
+
     # Tanggal kirim custom (default-nya tetep Kamis PO minggu berjalan kalau
     # nggak pernah disebut sama sekali). Nggak wajib kata "tanggal" -- admin
     # sering cuma bilang "buat besok" doang -- tapi ini SENGAJA dicek PALING
@@ -1954,20 +2144,25 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
     field_correction = _try_parse_field_correction(instruction)
     if field_correction:
         field, new_value = field_correction
-        editing[field] = new_value
+        if field == "addon":
+            jenis, qty = new_value if new_value else (None, 0)
+            _set_addon(editing, jenis, qty)
+            display_value = f"{editing['addon_jenis']} x{editing['addon_qty']}" if editing.get("addon_jenis") else "(dikosongin)"
+        else:
+            editing[field] = new_value
+            # catatan bisa sengaja dikosongin (new_value None) -- tampilin
+            # "(dikosongin)" alih-alih literal "None".
+            display_value = new_value if new_value is not None else "(dikosongin)"
 
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
             "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
-            "catatan": "Catatan", "kurir": "Kurir",
+            "catatan": "Catatan", "kurir": "Kurir", "addon": "Add-on",
         }[field]
         item_list_text = "\n".join(
             f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
         ) or "  (kosong)"
         tanggal_kirim_now = editing.get("tanggal_kirim") or editing["minggu_po"]
-        # catatan bisa sengaja dikosongin (new_value None) -- tampilin
-        # "(dikosongin)" alih-alih literal "None".
-        display_value = new_value if new_value is not None else "(dikosongin)"
 
         preview = (
             f"*{field_label} diganti jadi:* {display_value}\n\n"
@@ -1978,6 +2173,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
             f"Metode: {editing['metode']}\n"
             f"{_format_kurir_line(editing)}"
             f"Tanggal Kirim: {tanggal_kirim_now}\n"
+            f"{_format_addon_line(editing)}"
             f"Catatan: {editing.get('catatan') or '-'}\n"
             f"Items (nggak berubah):\n{item_list_text}\n\n"
             f"Item pesanan nggak ikut berubah. Mau koreksi field lain juga? "
@@ -1996,6 +2192,9 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
             "tanggal_kirim": tanggal_kirim_now,
             "catatan": editing.get("catatan"),
             "kurir": editing.get("kurir"),
+            "addon_jenis": editing.get("addon_jenis"),
+            "addon_qty": editing.get("addon_qty"),
+            "addon_total": editing.get("addon_total"),
         }
 
         keyboard = InlineKeyboardMarkup([[
@@ -2061,6 +2260,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
         f"Ongkir: {ongkir_rupiah}\n"
         f"{_format_kurir_line(editing)}"
+        f"{_format_addon_line(editing)}"
         f"Catatan (packing): {editing.get('catatan') or '-'}\n"
         f"Ringkasan AI: {ai_edit_summary}\n\n"
         + (
@@ -2083,6 +2283,9 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         "tanggal_kirim": editing.get("tanggal_kirim"),
         "catatan": editing.get("catatan"),
         "kurir": editing.get("kurir"),
+        "addon_jenis": editing.get("addon_jenis"),
+        "addon_qty": editing.get("addon_qty"),
+        "addon_total": editing.get("addon_total"),
     }
 
     keyboard = InlineKeyboardMarkup([[
@@ -2214,6 +2417,9 @@ def _rewrite_customer_order(sheets, pending):
         "tanggal_kirim": pending.get("tanggal_kirim"),
         "catatan": pending.get("catatan"),
         "kurir": pending.get("kurir"),
+        "addon_jenis": pending.get("addon_jenis"),
+        "addon_qty": pending.get("addon_qty"),
+        "addon_total": pending.get("addon_total"),
     }
     return sheets.add_order_rows(order, pending["minggu_po"])
 
@@ -2257,6 +2463,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order):"))
     app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir:"))
     app.add_handler(CallbackQueryHandler(handle_set_kurir, pattern="^set_kurir:"))
+    app.add_handler(CallbackQueryHandler(handle_set_addon, pattern="^set_addon:"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

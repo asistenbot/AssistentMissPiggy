@@ -162,6 +162,16 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     else:
         lines.append((f"Ambil di: {config.PICKUP_ADDRESS}", FONT_NORMAL, "left_wrap", 0))
 
+    # Add-on packing (tali pita/kartu ucapan, diisi admin lewat tombol "Isi
+    # Add-on" pas konfirmasi order) -- ditaruh SEBELUM Catatan, alasan sama
+    # kayak kenapa CARA/Catatan ditaruh di bawah: paling gampang kebaca sama
+    # yang packing tepat sebelum barangnya dibungkus.
+    addon_jenis = (orders[0].get("Addon_Jenis") if orders else None) or None
+    addon_qty = int((orders[0].get("Addon_Qty") if orders else 0) or 0)
+    if addon_jenis and addon_qty:
+        lines.append(("", FONT_SMALL, "left", 0))
+        lines.append((f"ADD-ON: {addon_jenis} x{addon_qty}", FONT_BOLD, "left_wrap", 0))
+
     # Catatan (kolom Catatan di Sheets, misal "Donat & Gula dipisah") SENGAJA
     # ditaruh PALING BAWAH, nempel abis info CARA/Alamat -- alasan sama kayak
     # kenapa CARA ditaruh di bawah: ini bagian yang paling gampang kebaca sama

@@ -138,6 +138,17 @@ PRODUCT_ALIASES = [
         "rasa": "Baso (Pork)",
     },
 ]
+# Add-on packing (tali pita/kartu ucapan dst) -- harga per JENIS (bukan per
+# pcs produk), dikaliin sama qty yang diisi admin lewat tombol "Isi Add-on"
+# pas konfirmasi order (atau dikirim dari form web). Tambahin baris baru di
+# sini kapan aja kalau ada jenis add-on baru -- key-nya harus PERSIS sama
+# kayak yang dicek di bot.py (_ADDON_KEYWORDS) kalau nambah jenis baru,
+# jangan cuma di sini doang.
+ADDON_PRICES = {
+    "Tali Pita": 5000,
+    "Kartu Ucapan": 5000,
+    "Tali Pita + Kartu Ucapan": 10000,
+}
 GROUP_CHAT_ID_INVOICE = os.getenv("GROUP_CHAT_ID_INVOICE") or None
 GROUP_CHAT_ID_SURATJALAN = os.getenv("GROUP_CHAT_ID_SURATJALAN") or None
 GROUP_CHAT_ID_REKAPPRODUKSI = os.getenv("GROUP_CHAT_ID_REKAPPRODUKSI") or None
