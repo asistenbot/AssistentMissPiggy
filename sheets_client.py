@@ -36,6 +36,49 @@ class SheetsClient:
 
     # ---------- ORDERS ----------
 
+    def _get_all_records_safe(self, ws):
+        """Ganti ws.get_all_records() bawaan gspread -- versi bawaan itu
+        RAISE ERROR (nge-buyarin SELURUH /rekap, /invoice, dst sekaligus)
+        kalau ternyata ada 2 KOLOM HEADER yang namanya SAMA PERSIS (atau
+        sama-sama kosong) di baris pertama sheet. Gampang kejadian kalau
+        admin nambah header baru manual terus nggak sadar ke-double /
+        typo (misal nambah 'Addon_Jenis' tapi ternyata sheet-nya udah
+        punya kolom kosong tanpa nama di situ, atau nge-copy-paste header
+        yang sama 2x).
+
+        Di sini kita baca RAW values sendiri (get_all_values, BUKAN
+        get_all_records), lalu header yang dobel/kosong dibikin unik
+        otomatis (ditambahin '_2', '_3', dst, atau '_kosong' buat yang
+        blank) -- jadi bot TETEP JALAN walau ada duplikat header, bukan
+        mati total. (Kolom yang ke-rename kayak gini emang jadi nggak
+        kebaca bener sampai admin benerin header aslinya di Sheets, tapi
+        minimal fitur LAIN yang nggak nyentuh kolom situ tetep normal.)
+        """
+        values = ws.get_all_values()
+        if not values:
+            return []
+        header_row = values[0]
+        seen = {}
+        headers = []
+        for h in header_row:
+            h = (h or "").strip()
+            if not h:
+                h = "_kosong"
+            if h in seen:
+                seen[h] += 1
+                h = f"{h}_{seen[h]}"
+            else:
+                seen[h] = 1
+            headers.append(h)
+
+        records = []
+        for row in values[1:]:
+            if not any(str(cell).strip() for cell in row):
+                continue  # baris kosong total, skip (sama kayak get_all_records)
+            row_padded = list(row) + [""] * (len(headers) - len(row))
+            records.append(dict(zip(headers, row_padded)))
+        return records
+
     def _normalize_records(self, ws):
         """
         Ambil semua baris dari sebuah worksheet, tapi "normalisasi" nama
@@ -43,7 +86,7 @@ class SheetsClient:
         walau header di Sheets ditulis 'Minggu PO' atau 'Minggu_PO', dua-duanya
         tetap kebaca sebagai field yang sama oleh kode ini.
         """
-        records = ws.get_all_records()
+        records = self._get_all_records_safe(ws)
         normalized = []
         for r in records:
             new_r = {}
