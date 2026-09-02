@@ -144,6 +144,14 @@ class SheetsClient:
         Sheet Orders-nya dulu, manual, sebelum fitur ini dipakai -- append_rows
         di bawah nulis berdasarkan URUTAN kolom, bukan nama header.
 
+        order["kurir"] (opsional, misal "JNE"/"Paxel"/"J&T", diisi admin
+        lewat tombol "Isi Kurir" pas konfirmasi order -- kosong berarti
+        dikirim pake armada/kurir toko sendiri) disimpen ke kolom Kurir,
+        SAMA polanya kayak Catatan. WAJIB nambahin kolom header "Kurir"
+        PALING BELAKANG (setelah Catatan) di Google Sheet Orders-nya dulu,
+        manual, sebelum fitur ini dipakai -- kalau belum ada, bot tetep
+        jalan normal, cuma info kurirnya nggak kesimpen/ke-pakai di rekap.
+
         Satu order bisa berisi banyak item -> tiap item jadi 1 baris,
         biar gampang di-rekap per rasa.
 
@@ -161,6 +169,12 @@ class SheetsClient:
         tanggal_kirim = order.get("tanggal_kirim") or minggu_po
         box_info_json = json.dumps(box_groups, ensure_ascii=False) if box_groups else ""
         catatan = order.get("catatan") or ""
+        # order["kurir"] (opsional, misal "JNE"/"Paxel"/"J&T", diisi admin
+        # lewat tombol "Isi Kurir" pas konfirmasi order) -- kosong berarti
+        # dikirim pake armada/kurir toko sendiri. Dipakai /rekap buat
+        # misahin daftar "DIKIRIM (KURIR)" dari "DIKIRIM" (armada) di topic
+        # Pengiriman, dan ikut ditampilin di surat jalan/invoice.
+        kurir = order.get("kurir") or ""
         rows = []
         order_records = []
         for item in order["items"]:
@@ -185,6 +199,7 @@ class SheetsClient:
                                        # nggak nggeser kolom lama yang udah ada
                 box_info_json,  # kolom BARU lagi, paling belakang setelah Tanggal_Kirim
                 self._safe_text(catatan),  # kolom BARU lagi, paling belakang setelah Box_Info
+                self._safe_text(kurir),  # kolom BARU lagi, paling belakang setelah Catatan
             ])
             order_records.append({
                 "Kategori": item["kategori"],
@@ -198,6 +213,7 @@ class SheetsClient:
                 "Tanggal_Kirim": tanggal_kirim,
                 "Box_Info": box_info_json,
                 "Catatan": catatan,
+                "Kurir": kurir,
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
@@ -515,6 +531,37 @@ class SheetsClient:
         orders_terbaru = by_week[minggu_terbaru_key]
         minggu_po_str = str(orders_terbaru[0].get("Minggu_PO", "")).strip()
         return orders_terbaru, minggu_po_str
+
+    def get_pending_orders_by_customer_any_week(self, nama_customer: str):
+        """Sama kayak get_orders_by_customer_any_week, TAPI (kalau ada
+        campuran) buang baris yang Status-nya udah 'Terkirim' -- pola
+        filter-nya SAMA PERSIS kayak get_pending_orders_by_customer_week.
+
+        BUG NYATA yang ini benerin: customer yang order beberapa kali di
+        Minggu_PO yang SAMA (order lama udah Terkirim, order baru masih
+        Pending) bisa bikin /edit, /invoice, /suratjalan, & /rekap NamaX
+        nyasar narik SEMUA baris itu (lama+baru numplek jadi 1) begitu
+        pencarian minggu-aktifnya kosong dan jatuh ke fallback 'any week'
+        ini -- padahal cuma yang MASIH PENDING yang harusnya kepake/keedit.
+        Laporan admin: '/edit franky' nampilin belasan item numpuk (17 baso,
+        10 mocha meises, dst) padahal yang masih pending cuma order baru
+        yang barusan diketik.
+
+        Kalau baris di minggu yang ketemu itu TERNYATA semuanya udah
+        'Terkirim' (murni order lama yang mau di-reprint/edit ulang, bukan
+        campuran), balikin semua apa adanya -- kapabilitas reprint order
+        lama tetep jalan kayak biasa.
+
+        Return: (list_order, minggu_po_string) atau ([], None)."""
+        try:
+            self.rollover_delivered_orders()
+        except Exception:
+            pass
+        semua, minggu_po = self.get_orders_by_customer_any_week(nama_customer)
+        if not semua:
+            return [], None
+        belum_terkirim = [o for o in semua if str(o.get("Status", "")).strip().lower() != "terkirim"]
+        return (belum_terkirim, minggu_po) if belum_terkirim else (semua, minggu_po)
 
     def get_orders_by_month(self, year: int, month: int):
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""

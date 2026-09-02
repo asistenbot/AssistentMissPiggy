@@ -93,6 +93,10 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     metode = orders[0].get("Metode", "-") if orders else "-"
     no_hp = orders[0].get("No_HP", "-") if orders else "-"
     alamat = orders[0].get("Alamat", "-") if orders else "-"
+    # Kolom Kurir (diisi admin lewat tombol "Isi Kurir" pas konfirmasi order)
+    # -- kosong berarti dikirim pake armada/kurir toko sendiri, ada isinya
+    # (misal "JNE", "Paxel", "J&T") berarti lewat ekspedisi pihak ketiga.
+    kurir = (orders[0].get("Kurir") if orders else None) or None
 
     # Susun dulu daftar baris konten (belum digambar), biar tinggi gambar
     # bisa dihitung pas -- nggak kepotong, nggak kelebihan kosong.
@@ -140,9 +144,18 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     # biar paling gampang kebaca sama bagian packing pas terakhir liat
     # surat jalan ini sebelum barangnya dibungkus/diberangkatin.
     is_delivery = _is_delivery_metode(metode)
-    metode_label = "DIANTAR" if is_delivery else "AMBIL SENDIRI"
     lines.append(("", FONT_SMALL, "left", 0))
-    lines.append((f"CARA: {metode_label}", FONT_HUGE, "center", 0))
+    if is_delivery and kurir:
+        # Dipisah jadi 2 baris (label + nama kurir) alih-alih 1 baris
+        # gabungan "CARA: KIRIM VIA JNE" -- biar nama ekspedisinya (panjang
+        # bervariasi, admin ketik bebas) nggak beresiko kepotong/nembus tepi
+        # kertas di font segede FONT_HUGE yang emang nggak auto-wrap.
+        lines.append(("CARA: KIRIM VIA KURIR", FONT_HUGE, "center", 0))
+        lines.append((kurir.upper(), FONT_HUGE, "center", 0))
+    elif is_delivery:
+        lines.append(("CARA: DIANTAR", FONT_HUGE, "center", 0))
+    else:
+        lines.append(("CARA: AMBIL SENDIRI", FONT_HUGE, "center", 0))
     if is_delivery:
         lines.append(("Alamat:", FONT_BOLD, "left", 0))
         lines.append((alamat, FONT_NORMAL, "left_wrap", 0))

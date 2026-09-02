@@ -141,8 +141,8 @@ def _tujuan_rekapproduksi(update):
 
 
 def _tujuan_pengiriman(update):
-    """(chat_id, message_thread_id) TUJUAN khusus buat daftar "DIKIRIM KURIR"
-    dan "DIAMBIL SENDIRI" (dari /rekap) -- DIPISAH dari _tujuan_suratjalan
+    """(chat_id, message_thread_id) TUJUAN khusus buat daftar "DIKIRIM",
+    "DIKIRIM (KURIR)", dan "DIAMBIL SENDIRI" (dari /rekap) -- DIPISAH dari _tujuan_suratjalan
     (yang isinya foto surat jalan per-customer) atas permintaan admin, biar
     daftar kirim/ambil nggak numplek sama foto-foto surat jalan. Pola sama
     persis: config.TOPIC_ID_PENGIRIMAN (topic) atau
@@ -246,6 +246,15 @@ def build_confirm_keyboard(parsed, order_id):
     ]]
     if _is_delivery_metode(parsed.get("metode")):
         rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data=f"set_ongkir:{order_id}")])
+        # Tombol "Isi Kurir" KHUSUS metode kirim/antar juga -- dipake admin
+        # nandain order ini lewat EKSPEDISI pihak ketiga (JNE/Paxel/J&T dst),
+        # BEDA sama dikirim pake armada/kurir toko sendiri (kalau tombol ini
+        # nggak dipencet/dikosongin, defaultnya dianggap armada sendiri).
+        # Labelnya nunjukin nama kurir yang lagi keisi (kalau ada) biar
+        # admin gampang liat status-nya tanpa buka koreksi.
+        kurir_sekarang = parsed.get("kurir")
+        kurir_label = f"🚚 Ubah Kurir ({kurir_sekarang})" if kurir_sekarang else "🚚 Isi Kurir (kalau via ekspedisi)"
+        rows.append([InlineKeyboardButton(kurir_label, callback_data=f"set_kurir:{order_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -345,6 +354,35 @@ def _get_active_pending_order(context):
     return order_id, parsed
 
 
+def _format_kurir_line(parsed):
+    """Baris 'Kurir: ...' yang dipakai di SEMUA preview order -- cuma
+    dimunculin kalau metode-nya kirim/antar (nggak relevan buat Ambil
+    Sendiri). Kosong/(armada sendiri) berarti dianter pake armada/kurir
+    toko sendiri (bukan ekspedisi pihak ketiga kayak JNE/Paxel/J&T) --
+    liat tombol 'Isi Kurir' di build_confirm_keyboard buat cara isinya."""
+    if not _is_delivery_metode(parsed.get("metode")):
+        return ""
+    return f"Kurir: {parsed.get('kurir') or '(armada sendiri)'}\n"
+
+
+def _format_catatan_block(parsed):
+    """Baris 'Catatan: ...' (+ 'Peringatan AI: ...' kalau ada) yang dipakai
+    di SEMUA preview order (baru, abis isi ongkir, abis dikoreksi) -- ditaruh
+    di 1 tempat biar konsisten & gampang diubah sekali aja.
+
+    "catatan" = instruksi packing yang ADMIN sendiri tulis (misal "donat &
+    gula dipisah") -- ini yang kesimpen ke Sheets & ikut nongol di surat
+    jalan. "peringatan_ai" = catetan OTOMATIS dari AI pas baca chat customer
+    (no HP kosong, nama rasa ambigu, alamat kurang lengkap, dst) -- berguna
+    buat admin CEK dulu sebelum Simpan, tapi SENGAJA nggak ikut
+    kesimpen/keprint ke surat jalan (surat jalan itu buat kurir/packing,
+    bukan tempat catetan kualitas parsing AI)."""
+    text = f"Catatan: {parsed.get('catatan') or '-'}\n"
+    if parsed.get("peringatan_ai"):
+        text += f"⚠️ Peringatan AI (cek dulu -- TIDAK ikut ke surat jalan/invoice): {parsed['peringatan_ai']}\n"
+    return text
+
+
 def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
     """Susun teks preview order BARU (belum disimpan) dari hasil parse AI --
     dipake bareng sama alur teks (handle_text) DAN alur gambar (handle_photo),
@@ -361,14 +399,15 @@ def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"{_format_kurir_line(parsed)}"
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini, ketik tanggal kirim jadi ... buat ubah)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
-        f"Catatan: {parsed.get('catatan') or '-'}\n\n"
+        f"{_format_catatan_block(parsed)}\n"
     )
 
     if parsed.get("kelengkapan") == "kurang_lengkap":
-        preview += "⚠️ ADA YANG PERLU DICEK (lihat Catatan di atas) sebelum disimpan!\n\n"
+        preview += "⚠️ ADA YANG PERLU DICEK (lihat Peringatan AI di atas) sebelum disimpan!\n\n"
 
     return preview
 
@@ -421,8 +460,8 @@ async def groupid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "(invoice foto ke customer), TOPIC_ID_REKAPPRODUKSI (rekap produksi "
             "mingguan/bahan baku), TOPIC_ID_LAPORANBULANAN (laporan bulanan supplier), "
             "TOPIC_ID_SURATJALAN (foto surat jalan per-customer), atau "
-            "TOPIC_ID_PENGIRIMAN (daftar DIKIRIM KURIR / DIAMBIL SENDIRI dari "
-            "/rekap) — chat/grup-nya tetep pake GROUP_CHAT_ID yang biasa."
+            "TOPIC_ID_PENGIRIMAN (daftar DIKIRIM / DIKIRIM (KURIR) / DIAMBIL SENDIRI "
+            "dari /rekap) — chat/grup-nya tetep pake GROUP_CHAT_ID yang biasa."
         )
     await update.message.reply_text(teks, parse_mode="Markdown")
 
@@ -494,7 +533,7 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nama_tunggal = daftar_nama[0]
             orders = sheets.get_pending_orders_by_customer_week(nama_tunggal, minggu_po)
             if not orders:
-                orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama_tunggal)
+                orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama_tunggal)
                 if orders_fallback:
                     orders = orders_fallback
                     minggu_po = minggu_fallback
@@ -507,7 +546,7 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for nama_satu in daftar_nama:
                 o = sheets.get_pending_orders_by_customer_week(nama_satu, minggu_po)
                 if not o:
-                    o, _ = sheets.get_orders_by_customer_any_week(nama_satu)
+                    o, _ = sheets.get_pending_orders_by_customer_any_week(nama_satu)
                 orders.extend(o)
             text_customer = documents.build_production_recap_multi(daftar_nama, orders)
             judul_pdf = f"REKAP PRODUKSI — {', '.join(daftar_nama)}"
@@ -579,6 +618,10 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text_kirim:
         await _kirim_teks_ke(context, update, _tujuan_pengiriman(update), text_kirim)
 
+    text_kurir = documents.build_delivery_kurir(minggu_po, orders)
+    if text_kurir:
+        await _kirim_teks_ke(context, update, _tujuan_pengiriman(update), text_kurir)
+
     text_ambil = documents.build_delivery_ambil(minggu_po, orders)
     if text_ambil:
         await _kirim_teks_ke(context, update, _tujuan_pengiriman(update), text_ambil)
@@ -595,7 +638,7 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
     catatan_minggu_lama = None
     if not orders:
-        orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+        orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
         if orders_fallback:
             orders = orders_fallback
             minggu_po = minggu_fallback
@@ -623,7 +666,7 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
     catatan_minggu_lama = None
     if not orders:
-        orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+        orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
         if orders_fallback:
             orders = orders_fallback
             minggu_po = minggu_fallback
@@ -867,25 +910,30 @@ async def _gabung_pending_orders_by_nama(update: Update, context: ContextTypes.D
         "alamat": _first_nonempty("alamat"),
         "metode": _first_nonempty("metode"),
         "tanggal_kirim": _first_nonempty("tanggal_kirim"),
+        "kurir": _first_nonempty("kurir"),
         "ongkir": _first_ongkir(),
         "items": merged_items,
         "kelengkapan": "lengkap",
     }
 
-    # Kalau ternyata field penting (alamat/no_hp/metode) BEDA antar order
-    # yang digabung, jangan diem-diem dipilih salah satu -- catet di
-    # 'catatan' + tandain 'kurang_lengkap' biar admin sadar & ngecek manual
-    # sebelum pencet Simpan & Generate.
+    # Catatan PACKING asli (yang admin tulis sendiri di order-order yang
+    # digabung) digabung apa adanya -- ini beneran mau kesimpen/keprint.
     catatan_list = [p.get("catatan") for p in matched if p.get("catatan")]
-    peringatan = []
+    merged["catatan"] = " | ".join(catatan_list) if catatan_list else None
+
+    # Kalau ternyata field penting (alamat/no_hp/metode) BEDA antar order
+    # yang digabung, jangan diem-diem dipilih salah satu -- ini peringatan
+    # OTOMATIS dari sistem (bukan catatan admin), jadi masuk 'peringatan_ai'
+    # (sama kayak peringatan ambigu dari AI parser) BUKAN 'catatan' -- biar
+    # nggak ikut kesimpen/keprint ke surat jalan, cuma buat admin cek
+    # manual di Telegram sebelum pencet Simpan & Generate.
+    peringatan_list = [p.get("peringatan_ai") for p in matched if p.get("peringatan_ai")]
     for field, label in (("alamat", "Alamat"), ("no_hp", "No HP"), ("metode", "Metode")):
         nilai_beda = {str(p.get(field)).strip() for p in matched if p.get(field)}
         if len(nilai_beda) > 1:
-            peringatan.append(f"{label} beda antar order yang digabung ({' vs '.join(nilai_beda)}), cek manual!")
+            peringatan_list.append(f"{label} beda antar order yang digabung ({' vs '.join(nilai_beda)}), cek manual!")
             merged["kelengkapan"] = "kurang_lengkap"
-    if peringatan:
-        catatan_list.append(" | ".join(peringatan))
-    merged["catatan"] = " | ".join(catatan_list) if catatan_list else None
+    merged["peringatan_ai"] = " | ".join(peringatan_list) if peringatan_list else None
 
     for oid in matched_ids:
         _clear_pending_order_by_id(context, oid)
@@ -997,11 +1045,11 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+    orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
 
     catatan_minggu_lama = None
     if not orders:
-        orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+        orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
         if orders_fallback:
             orders = orders_fallback
             minggu_po = minggu_fallback
@@ -1026,6 +1074,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "minggu_po": minggu_po,
         "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
         "catatan": orders[0].get("Catatan") or None,
+        "kurir": orders[0].get("Kurir") or None,
     }
 
     peringatan_minggu = (
@@ -1052,6 +1101,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ini dicek PALING atas, sebelum kemungkinan lain.
     if context.user_data.get("awaiting_ongkir_for"):
         await handle_ongkir_input(update, context)
+        return
+
+    # Sama kayak ongkir di atas, tapi buat nama kurir/ekspedisi (abis klik
+    # "Isi/Ubah Kurir").
+    if context.user_data.get("awaiting_kurir_for"):
+        await handle_kurir_input(update, context)
         return
 
     # Kalau lagi dalam mode edit order (habis /edit Nama Customer atau baru
@@ -1170,9 +1225,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
-        orders = sheets.get_orders_by_customer_week(nama, minggu_po)
+        orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
         if not orders:
-            orders_fallback, minggu_fallback = sheets.get_orders_by_customer_any_week(nama)
+            orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
             if orders_fallback:
                 orders = orders_fallback
                 minggu_po = minggu_fallback
@@ -1194,6 +1249,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "minggu_po": minggu_po,
             "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
             "catatan": orders[0].get("Catatan") or None,
+            "kurir": orders[0].get("Kurir") or None,
         }
         # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
         await handle_edit_instruction(update, context, instruction_override=instruksi)
@@ -1265,6 +1321,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_ongkir_for"):
         await update.message.reply_text(
             "Lagi nunggu kamu ketik nominal ongkir buat order sebelumnya dulu ya, "
+            "baru kirim gambar order lain."
+        )
+        return
+    if context.user_data.get("awaiting_kurir_for"):
+        await update.message.reply_text(
+            "Lagi nunggu kamu ketik nama kurir/ekspedisi buat order sebelumnya dulu ya, "
             "baru kirim gambar order lain."
         )
         return
@@ -1371,6 +1433,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ongkir": int(parsed.get("ongkir") or 0),
         "tanggal_kirim": parsed.get("tanggal_kirim"),
         "catatan": parsed.get("catatan"),
+        "kurir": parsed.get("kurir"),
     }
 
     sheets = get_sheets_client()
@@ -1495,13 +1558,72 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"{_format_kurir_line(parsed)}"
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_rupiah}\n"
-        f"Catatan: {parsed.get('catatan') or '-'}\n"
+        f"{_format_catatan_block(parsed)}"
     )
 
     keyboard = build_confirm_keyboard(parsed, order_id)
+    await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
+
+
+_KURIR_CLEAR_KEYWORDS = ("armada", "hapus", "batal", "kosong", "gak jadi", "tidak jadi", "sendiri")
+
+
+async def handle_set_kurir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dipicu tombol '🚚 Isi/Ubah Kurir' di preview order (khusus metode
+    Kirim/Diantar). Sama polanya kayak handle_set_ongkir -- copot tombol di
+    pesan lama (biar nggak kepencet Confirm sebelum kurir-nya jelas), lalu
+    minta admin ketik nama ekspedisinya."""
+    query = update.callback_query
+    await query.answer()
+
+    _, _, order_id = query.data.partition(":")
+
+    parsed = _get_pending_order_by_id(context, order_id)
+    if not parsed:
+        await query.message.reply_text("Nggak ada order yang lagi diproses.")
+        return
+
+    context.user_data["awaiting_kurir_for"] = order_id
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    kurir_sekarang = parsed.get("kurir")
+    hint_sekarang = f" (sekarang: {kurir_sekarang})" if kurir_sekarang else ""
+    await query.message.reply_text(
+        f"Ketik nama ekspedisinya ya (misal JNE, Paxel, J&T, SiCepat){hint_sekarang}.\n"
+        "Kalau ternyata dikirim pake armada/kurir toko sendiri (bukan "
+        "ekspedisi), ketik 'armada' atau 'hapus'."
+    )
+
+
+async def handle_kurir_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nerima balasan admin abis klik 'Isi/Ubah Kurir', update pending_order
+    yang ada, lalu kirim ulang preview + tombol Simpan/Batal (sama polanya
+    kayak handle_ongkir_input)."""
+    raw = update.message.text.strip()
+    order_id = context.user_data.pop("awaiting_kurir_for", None)
+
+    parsed = _get_pending_order_by_id(context, order_id)
+    if not parsed:
+        await update.message.reply_text(
+            "Order-nya udah nggak ada / expired. Minta customer kirim ulang, atau paste ulang chat-nya."
+        )
+        return
+
+    if raw.lower().strip() in _KURIR_CLEAR_KEYWORDS:
+        parsed["kurir"] = None
+    else:
+        parsed["kurir"] = raw
+
+    keyboard = build_confirm_keyboard(parsed, order_id)
+    preview = _build_new_order_preview_text(
+        parsed, "Order (kurir sudah diisi):" if parsed.get("kurir") else "Order (armada sendiri):"
+    )
     await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
 
 
@@ -1525,7 +1647,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
             "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
-            "catatan": "Catatan",
+            "catatan": "Catatan", "kurir": "Kurir",
         }[field]
         items_text = "\n".join(
             f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -1544,10 +1666,11 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
             f"No HP: {parsed.get('no_hp') or '-'}\n"
             f"Alamat: {parsed.get('alamat') or '-'}\n"
             f"Metode: {parsed.get('metode') or '-'}\n"
+            f"{_format_kurir_line(parsed)}"
             f"Tanggal Kirim: {tanggal_kirim_text}\n"
             f"Items:\n{items_text}\n"
             f"Ongkir: {ongkir_text}\n"
-            f"Catatan: {parsed.get('catatan') or '-'}\n"
+            f"{_format_catatan_block(parsed)}"
         )
         keyboard = build_confirm_keyboard(parsed, order_id)
         await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
@@ -1578,6 +1701,25 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     parsed["items"] = result.get("items", [])
     if result.get("ongkir") is not None:
         parsed["ongkir"] = int(result.get("ongkir"))
+    # BUG NYATA yang ini benerin: "box_groups" (rincian "2 box: Baso x4,
+    # Cream Cheese x4" dst yang ditampilin di invoice & surat jalan) DIISI
+    # SEKALI pas parse AWAL doang, dan parse_order_edit yang dipanggil di
+    # atas SAMA SEKALI nggak tau-menau soal box_groups -- dia cuma dikasih
+    # "items" (yang udah diratain/di-total) sebagai konteks, dan hasilnya
+    # cuma "items" versi baru, bukan box_groups versi baru. Jadi kalau abis
+    # ini admin ngoreksi salah satu item yang KEBETULAN bagian dari sebuah
+    # box (misal ngoreksi nama rasa "Cream Cheese" jadi "Mocha Meises"),
+    # "items" (dipakai buat total & Sheets) udah bener, TAPI "box_groups"
+    # (dipakai KHUSUS buat tampilan rincian box) masih nyimpen nama/qty
+    # LAMA -- makanya invoice & surat jalan sempet nampilin "Mocha Meises
+    # x8" di daftar item tapi "Cream Cheese x4" di rincian box, padahal
+    # maksudnya barang yang SAMA. Daripada beresiko nampilin data box yang
+    # UDAH USANG (nama/qty salah), box_groups DIBUANG abis ada koreksi item
+    # apa pun -- surat jalan/invoice balik nampilin per-kategori biasa
+    # (sumbernya "items" yang udah pasti akurat), bukan rincian per-box lagi.
+    box_groups_dibuang = bool(parsed.get("box_groups"))
+    if box_groups_dibuang:
+        parsed["box_groups"] = []
     # PENTING -- BUG lama yang barusan diperbaiki: result["catatan"] di sini
     # itu RINGKASAN PERUBAHAN dari AI edit-item (lihat EDIT_SYSTEM_PROMPT_BASE
     # di ai_parser.py, field "catatan"-nya didefinisikan sebagai "ringkasan
@@ -1597,6 +1739,12 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     ai_edit_summary = result.get("catatan")
     if ai_edit_summary and ai_edit_summary != "-":
         await update.message.reply_text(f"ℹ️ {ai_edit_summary}")
+    if box_groups_dibuang:
+        await update.message.reply_text(
+            "ℹ️ Rincian per-box order ini kereset gara-gara ada koreksi item -- "
+            "invoice/surat jalan bakal nampilin per-kategori biasa (total udah "
+            "tetap akurat, cuma nggak dikelompokin per box lagi)."
+        )
 
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -1611,10 +1759,11 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"{_format_kurir_line(parsed)}"
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
-        f"Catatan: {parsed.get('catatan') or '-'}\n"
+        f"{_format_catatan_block(parsed)}"
     )
     keyboard = build_confirm_keyboard(parsed, order_id)
     await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
@@ -1756,6 +1905,31 @@ def _try_parse_field_correction(instruction):
         if "ambil" in lower:
             return "metode", "Ambil sendiri"
 
+    # Kurir/ekspedisi (misal "kurir jne", "kirim pake paxel", "ekspedisi:
+    # j&t") -- pola sama kayak catatan: dicek dari kata kunci, biar admin
+    # bisa isi/ubah kurir lewat ketik bebas juga (BUKAN cuma lewat tombol
+    # 'Isi Kurir'). Sama _KURIR_CLEAR_KEYWORDS yang dipake handle_kurir_input
+    # buat ngenalin "balikin ke armada sendiri".
+    if "kurir" in lower or "ekspedisi" in lower:
+        if any(k in lower for k in _KURIR_CLEAR_KEYWORDS):
+            return "kurir", None
+        val = _extract_after_splitter(lower, text)
+        if not val:
+            for kata in ("ekspedisi", "kurir"):
+                idx = lower.rfind(kata)
+                if idx == -1:
+                    continue
+                after = text[idx + len(kata):].strip(" :.-")
+                for prefix in ("nya ", "pake ", "pakai ", "jadi "):
+                    if after.lower().startswith(prefix):
+                        after = after[len(prefix):].strip()
+                        break
+                if after:
+                    val = after
+                    break
+        if val:
+            return "kurir", val
+
     # Tanggal kirim custom (default-nya tetep Kamis PO minggu berjalan kalau
     # nggak pernah disebut sama sekali). Nggak wajib kata "tanggal" -- admin
     # sering cuma bilang "buat besok" doang -- tapi ini SENGAJA dicek PALING
@@ -1785,7 +1959,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
             "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
-            "catatan": "Catatan",
+            "catatan": "Catatan", "kurir": "Kurir",
         }[field]
         item_list_text = "\n".join(
             f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
@@ -1802,6 +1976,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
             f"No HP: {editing['no_hp']}\n"
             f"Alamat: {editing['alamat']}\n"
             f"Metode: {editing['metode']}\n"
+            f"{_format_kurir_line(editing)}"
             f"Tanggal Kirim: {tanggal_kirim_now}\n"
             f"Catatan: {editing.get('catatan') or '-'}\n"
             f"Items (nggak berubah):\n{item_list_text}\n\n"
@@ -1820,6 +1995,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
             "minggu_po": editing["minggu_po"],
             "tanggal_kirim": tanggal_kirim_now,
             "catatan": editing.get("catatan"),
+            "kurir": editing.get("kurir"),
         }
 
         keyboard = InlineKeyboardMarkup([[
@@ -1884,6 +2060,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         f"*Order Lama:*\n{old_text}\n\n"
         f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
         f"Ongkir: {ongkir_rupiah}\n"
+        f"{_format_kurir_line(editing)}"
         f"Catatan (packing): {editing.get('catatan') or '-'}\n"
         f"Ringkasan AI: {ai_edit_summary}\n\n"
         + (
@@ -1905,6 +2082,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         "minggu_po": editing["minggu_po"],
         "tanggal_kirim": editing.get("tanggal_kirim"),
         "catatan": editing.get("catatan"),
+        "kurir": editing.get("kurir"),
     }
 
     keyboard = InlineKeyboardMarkup([[
@@ -2035,6 +2213,7 @@ def _rewrite_customer_order(sheets, pending):
         "ongkir": pending.get("ongkir", 0),
         "tanggal_kirim": pending.get("tanggal_kirim"),
         "catatan": pending.get("catatan"),
+        "kurir": pending.get("kurir"),
     }
     return sheets.add_order_rows(order, pending["minggu_po"])
 
@@ -2077,6 +2256,7 @@ def main():
     # order numpuk nunggu diproses bareng (liat build_confirm_keyboard).
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^(confirm_order|cancel_order):"))
     app.add_handler(CallbackQueryHandler(handle_set_ongkir, pattern="^set_ongkir:"))
+    app.add_handler(CallbackQueryHandler(handle_set_kurir, pattern="^set_kurir:"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

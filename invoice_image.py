@@ -43,6 +43,14 @@ def rupiah(n):
     return "Rp" + f"{int(n):,}".replace(",", ".")
 
 
+def _is_delivery_metode(metode):
+    """Sama persis kayak versi di bot.py/receipt.py/documents.py -- dicek
+    berbasis substring (bukan '==' persis) biar "Kirim" (dari AI parser chat
+    manual) sama "Diantar" (dari order web) dua-duanya kena."""
+    m = (metode or "").strip().lower()
+    return "antar" in m or "kirim" in m
+
+
 def _dashed_line(draw, x1, y, x2, color, dash=5, gap=4, width=1):
     x = x1
     while x < x2:
@@ -102,6 +110,14 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     # kalau fitur ini nggak dipakai sama sekali.
     tanggal_kirim = (orders[0].get("Tanggal_Kirim") if orders else None) or minggu_po
 
+    # Kolom Kurir (diisi admin lewat tombol "Isi Kurir" pas konfirmasi order)
+    # -- kosong berarti armada/kurir toko sendiri, ada isinya (misal "JNE",
+    # "Paxel") berarti lewat ekspedisi pihak ketiga. Baris "Kurir: ..." cuma
+    # digambar kalau metode-nya kirim/antar DAN kolom ini keisi.
+    metode_awal = orders[0].get("Metode", "-") if orders else "-"
+    kurir = orders[0].get("Kurir") if orders else None
+    tampilkan_kurir = bool(_is_delivery_metode(metode_awal) and kurir)
+
     # Kelompokin item per kategori, Donat selalu di paling atas, sisanya
     # ikutin urutan config.CATEGORIES.
     kategori_order = ["Donat"] + [c for c in config.CATEGORIES if c != "Donat"]
@@ -128,6 +144,8 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     # ---- Hitung total tinggi gambar dulu ----
     y = HEADER_HEIGHT + PADDING
     y += 24 + 22 + 22 + 20
+    if tampilkan_kurir:
+        y += 22
     y += 6
     y += ROW_HEIGHT
     for kategori in kategori_list:
@@ -192,6 +210,9 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     metode = orders[0].get("Metode", "-") if orders else "-"
     draw.text((x_left, y), f"Metode: {metode}", font=F_BODY, fill=COLOR_MUTED)
     y += 20
+    if tampilkan_kurir:
+        draw.text((x_left, y), f"Kurir: {kurir}", font=F_BODY, fill=COLOR_MUTED)
+        y += 22
 
     _dashed_line(draw, x_left, y, x_right, COLOR_GOLD)
     y += 6

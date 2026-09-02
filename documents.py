@@ -21,7 +21,7 @@ def _is_delivery_metode(metode):
     ini, fungsi-fungsi di bawah nyocokin metode pake '== \"Kirim\"' persis,
     jadi order dari web ('Diantar') ke-skip diam-diam dari daftar kurir
     (kejadian di order Ratna: kehitung di rekap produksi tapi ilang dari
-    'DIKIRIM KURIR')."""
+    'DIKIRIM')."""
     m = (metode or "").strip().lower()
     return "antar" in m or "kirim" in m
 
@@ -35,6 +35,8 @@ def build_invoice(nama_customer: str, minggu_po: str, orders: list) -> str:
     lines.append(f"Kepada: {nama_customer}")
     lines.append(f"Tanggal Kirim/Ambil: {minggu_po}")
     lines.append(f"Metode: {orders[0].get('Metode', '-')}")
+    if _is_delivery_metode(orders[0].get("Metode")) and orders[0].get("Kurir"):
+        lines.append(f"Kurir: {orders[0]['Kurir']}")
     lines.append("")
     lines.append("Rincian Pesanan:")
 
@@ -79,6 +81,9 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
     # dikirim ke alamat customer). Sekarang disamain pake _is_delivery_metode.
     if _is_delivery_metode(orders[0].get("Metode")):
         lines.append(f"Alamat: {orders[0].get('Alamat', '-')}")
+        kurir = orders[0].get("Kurir")
+        if kurir:
+            lines.append(f"Kurir: {kurir}")
     else:
         lines.append(f"Ambil di: {config.PICKUP_ADDRESS}")
     lines.append("")
@@ -244,10 +249,27 @@ def build_production_recap_tanggal(label: str, orders: list) -> str:
     return "\n".join(lines)
 
 
+def _kategori_pengiriman(metode, kurir) -> str:
+    """3 kategori cara pesenan nyampe ke customer -- dipake misahin /rekap
+    jadi 3 daftar terpisah di topic Pengiriman (atas permintaan admin, biar
+    beda perlakuan: yang lewat ekspedisi pihak ketiga perlu di-drop ke
+    agen/dijemput kurirnya, yang armada sendiri diater langsung, yang ambil
+    sendiri nunggu di toko):
+    - "ambil"  -- metode-nya Ambil Sendiri.
+    - "kurir"  -- metode-nya Kirim/Diantar DAN ada nama ekspedisi kesimpen
+                  di kolom Kurir (diisi admin lewat tombol 'Isi Kurir' pas
+                  konfirmasi order, misal 'JNE'/'Paxel'/'J&T').
+    - "kirim"  -- metode-nya Kirim/Diantar TAPI kolom Kurir kosong, artinya
+                  dianter pake armada/kurir toko sendiri (bukan ekspedisi)."""
+    if not _is_delivery_metode(metode):
+        return "ambil"
+    return "kurir" if str(kurir or "").strip() else "kirim"
+
+
 def _group_per_customer(orders: list) -> dict:
-    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
-    diringkas jadi boolean 'ini pengiriman apa bukan' lewat
-    _is_delivery_metode -- BUKAN metode/nama literal apa adanya.
+    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan cara
+    pengirimannya diringkas jadi 3 kategori lewat _kategori_pengiriman --
+    BUKAN metode/nama literal apa adanya.
 
     DULU key-nya `(metode, nama)` mentah, jadi 1 customer yang SAMA tapi
     kebetulan punya order dari 2 SUMBER beda (web selalu nulis 'Diantar',
@@ -258,22 +280,23 @@ def _group_per_customer(orders: list) -> dict:
     per_customer = {}
     for o in orders:
         nama = str(o.get("Nama_Customer", "-")).strip()
-        metode = o.get("Metode", "-")
-        key = (_is_delivery_metode(metode), nama.lower())
+        kategori = _kategori_pengiriman(o.get("Metode", "-"), o.get("Kurir"))
+        key = (kategori, nama.lower())
         per_customer.setdefault(key, []).append(o)
     return per_customer
 
 
 def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
-    """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
-    ke bagian gudang/kurir tanpa perlu crop screenshot."""
+    """Daftar customer yang DIKIRIM pake ARMADA/KURIR TOKO SENDIRI (bukan
+    ekspedisi pihak ketiga) -- liat build_delivery_kurir buat yang lewat
+    JNE/Paxel/J&T/dst, dan build_delivery_ambil buat yang ambil sendiri."""
     per_customer = _group_per_customer(orders)
-    kirim_entries = {k: v for k, v in per_customer.items() if k[0]}
+    kirim_entries = {k: v for k, v in per_customer.items() if k[0] == "kirim"}
     if not kirim_entries:
         return None
 
-    lines = [f"🛵 *DIKIRIM KURIR — Minggu PO {minggu_po}*\n"]
-    for (is_delivery, nama_key), items in kirim_entries.items():
+    lines = [f"🛵 *DIKIRIM — Minggu PO {minggu_po}*\n"]
+    for (_kategori, nama_key), items in kirim_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
         alamat = items[0].get("Alamat", "-")
@@ -281,15 +304,38 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
     return "\n".join(lines)
 
 
+def build_delivery_kurir(minggu_po: str, orders: list) -> str | None:
+    """Daftar customer yang dikirim lewat EKSPEDISI pihak ketiga (JNE,
+    Paxel, J&T, dst) -- DIPISAH dari build_delivery_kirim (armada toko
+    sendiri) atas permintaan admin, biar gampang misahin mana yang perlu
+    di-drop/dijemput agen ekspedisi vs mana yang dianter langsung sama
+    armada toko. Nama ekspedisinya (kolom Kurir di Sheets, diisi admin
+    lewat tombol 'Isi Kurir' pas konfirmasi order) ikut ditampilin per
+    customer biar jelas mau dikirim pake apa."""
+    per_customer = _group_per_customer(orders)
+    kurir_entries = {k: v for k, v in per_customer.items() if k[0] == "kurir"}
+    if not kurir_entries:
+        return None
+
+    lines = [f"📦 *DIKIRIM (KURIR) — Minggu PO {minggu_po}*\n"]
+    for (_kategori, nama_key), items in kurir_entries.items():
+        nama = items[0].get("Nama_Customer", "-")
+        no_hp = items[0].get("No_HP", "-")
+        alamat = items[0].get("Alamat", "-")
+        kurir = items[0].get("Kurir", "-")
+        lines.append(f"• {nama} — via {kurir} — {alamat} — {no_hp}")
+    return "\n".join(lines)
+
+
 def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
     per_customer = _group_per_customer(orders)
-    ambil_entries = {k: v for k, v in per_customer.items() if not k[0]}
+    ambil_entries = {k: v for k, v in per_customer.items() if k[0] == "ambil"}
     if not ambil_entries:
         return None
 
     lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
-    for (is_delivery, nama_key), items in ambil_entries.items():
+    for (_kategori, nama_key), items in ambil_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
         lines.append(f"• {nama} — {no_hp}")

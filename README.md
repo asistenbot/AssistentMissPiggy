@@ -52,8 +52,8 @@ Bikin 1 Google Sheet baru, kasih nama bebas (misal "Miss Piggy - Data PO"),
 lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
 
 ### Tab `Orders`
-| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status | Tanggal_Kirim | Box_Info | Catatan |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status | Tanggal_Kirim | Box_Info | Catatan | Kurir |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
 - `Minggu_PO` = tanggal pengiriman Kamis untuk PO minggu itu (format `YYYY-MM-DD`), otomatis diisi bot
 - `Metode` = `Kirim` atau `Ambil`
@@ -66,6 +66,14 @@ lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
   HARUS ditambahin manual sebagai header PALING BELAKANG** (setelah `Box_Info`) di sheet Orders
   lo sebelum fitur ini kepake -- kalau belum ada, bot tetep jalan normal, cuma catatan-nya
   nggak kesimpen/ke-print aja
+- `Kurir` = nama ekspedisi pihak ketiga (misal "JNE", "Paxel", "J&T") kalau order-nya
+  dikirim lewat itu, bukan armada/kurir toko sendiri -- kosong berarti armada sendiri.
+  Diisi admin lewat tombol "🚚 Isi/Ubah Kurir" pas konfirmasi order (khusus metode
+  Kirim/Diantar), dan bikin `/rekap` misahin daftar "DIKIRIM (KURIR)" dari "DIKIRIM"
+  (armada) di topic Pengiriman, plus ikut muncul di Surat Jalan/Invoice. **Kolom ini
+  HARUS ditambahin manual sebagai header PALING BELAKANG** (setelah `Catatan`) di sheet
+  Orders lo sebelum fitur ini kepake -- kalau belum ada, bot tetep jalan normal, cuma
+  info kurirnya nggak kesimpen/ke-pakai aja
 
 ### Tab `PriceList`
 | Kategori | Rasa | Harga |

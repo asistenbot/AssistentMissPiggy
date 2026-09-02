@@ -51,12 +51,20 @@ def _build_preview_text(parsed):
         if ongkir else "belum diisi (Rp0)"
     )
 
+    # Baris "Kurir" cuma dimunculin buat metode kirim/antar -- sama polanya
+    # kayak _format_kurir_line() versi bot.py (duplikat kecil, sengaja,
+    # ngikutin pola file ini yang emang berdiri sendiri dari bot.py).
+    kurir_line = (
+        f"Kurir: {parsed.get('kurir') or '(armada sendiri)'}\n"
+        if _is_delivery_metode(parsed.get("metode")) else ""
+    )
     return (
         f"*Order Baru dari Web:*\n"
         f"Nama: {parsed.get('nama') or '-'}\n"
         f"No HP: {parsed.get('no_hp') or '-'}\n"
         f"Alamat: {parsed.get('alamat') or '-'}\n"
         f"Metode: {parsed.get('metode') or '-'}\n"
+        f"{kurir_line}"
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
@@ -83,6 +91,13 @@ def _build_confirm_keyboard(parsed, order_id):
     ]]
     if _is_delivery_metode(parsed.get("metode")):
         rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data=f"set_ongkir:{order_id}")])
+        # Tombol "Isi Kurir" (JNE/Paxel/J&T dst) -- callback "set_kurir:<id>"
+        # ditangani handle_set_kurir/handle_kurir_input di bot.py, sama
+        # persis kayak order dari paste-chat manual (satu handler dipakai
+        # bareng buat semua sumber order, liat catatan set_ongkir di atas).
+        kurir_sekarang = parsed.get("kurir")
+        kurir_label = f"🚚 Ubah Kurir ({kurir_sekarang})" if kurir_sekarang else "🚚 Isi Kurir (kalau via ekspedisi)"
+        rows.append([InlineKeyboardButton(kurir_label, callback_data=f"set_kurir:{order_id}")])
     return InlineKeyboardMarkup(rows)
 
 
