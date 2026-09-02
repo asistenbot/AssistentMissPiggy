@@ -35,13 +35,15 @@ Struktur JSON:
     {"jumlah_box": 0, "items": [{"kategori": "...", "rasa": "...", "qty_per_box": 0}]}
   ],
   "ongkir": angka ongkir dalam rupiah kalau admin menyebutkannya (misal "ongkir 15rb" jadi 15000), atau null kalau tidak disebutkan,
-  "catatan": "hal lain yang perlu diperhatikan admin, atau null",
+  "peringatan_ai": "peringatan OTOMATIS dari kamu buat admin kalau ada yang perlu dicek (info kurang, nama rasa ambigu, dst), atau null kalau semua jelas -- PENTING: field ini BUKAN catatan packing dari customer, JANGAN pernah diisi permintaan/instruksi packing customer di sini (kalau customer minta packing khusus, itu masuk 'catatan' di bawah, bukan sini)",
+  "catatan": "instruksi/permintaan packing yang BENERAN disebut customer sendiri (misal 'donat sama gula dipisah', 'jangan dibungkus plastik'), atau null kalau customer nggak minta apa-apa soal packing -- field ini nanti kesimpen ke Sheets & DICETAK di surat jalan buat kurir/packing, jadi JANGAN isi kesimpulan/analisis kamu sendiri di sini, HANYA permintaan packing yang eksplisit disebut customer",
   "kelengkapan": "lengkap" atau "kurang_lengkap"
 }
 
 Kalau ada informasi penting yang tidak disebutkan customer (nama, alamat kalau kirim,
 no hp, atau item pesanan kosong), set "kelengkapan" jadi "kurang_lengkap" dan sebutkan
-apa yang kurang di field "catatan". Ongkir yang belum disebutkan TIDAK menghalangi
+apa yang kurang di field "peringatan_ai" (BUKAN "catatan" -- "catatan" khusus permintaan
+packing dari customer). Ongkir yang belum disebutkan TIDAK menghalangi
 "kelengkapan" jadi "lengkap" -- ongkir boleh diisi belakangan.
 
 ATURAN KHUSUS SATUAN "BOX": kadang pesanan ditulis pakai satuan "box"/"dus"/
@@ -97,26 +99,30 @@ ATURAN PENTING soal mencocokkan item pesanan ke daftar di atas:
    "pisju"/"pisket" cocok ke "Pisang Keju" -- kategorinya (Roti atau Roti
    Gandum) tetap ditentuin dari konteks sama kayak biasa (lihat aturan 2 di
    bawah kalau nggak jelas kategorinya yang mana).
-2. Kalau nama yang disebut customer BISA COCOK ke lebih dari satu produk --
-   entah itu di kategori BERBEDA (misal "coklat" ada sebagai rasa di kategori
-   Roti DAN Roti Gandum yang harganya beda), ATAU beberapa VARIAN dalam
-   kategori yang SAMA (misal "Baso" polos tanpa keterangan bisa berarti
-   "Baso (Ayam)" ATAU "Baso (Pork)" yang sama-sama ada di kategori Roti) --
-   JANGAN ASAL TEBAK dan JANGAN PERNAH menggabungkan nama beberapa pilihan
-   jadi satu string aneh (misal JANGAN tulis "Baso (Pork) (Ayam)" atau
-   sejenisnya -- itu BUKAN nama produk yang valid dan tidak akan cocok ke
-   manapun di sistem). Field "rasa" WAJIB selalu berisi PERSIS SATU nama yang
-   ada di daftar produk, tidak boleh gabungan. Kalau ambigu: pilih SATU
-   kandidat yang paling masuk akal dari konteks sebagai tebakan, TAPI set
-   "kelengkapan" jadi "kurang_lengkap" dan di "catatan" sebutkan jelas: item
-   mana yang ambigu dan pilihan-pilihan yang ada apa aja, biar admin bisa
-   konfirmasi ulang ke customer.
+2. CEK DULU daftar "ATURAN TETAP" di bagian bawah (kalau ada) -- itu aturan
+   default yang FIX buat sebutan tertentu (misal "Baso" polos tanpa
+   keterangan Ayam/Pork), jadi kalau sebutannya cocok ke salah satu ATURAN
+   TETAP, langsung pakai itu, JANGAN dianggap ambigu dan JANGAN minta
+   konfirmasi lagi.
+   Kalau nama yang disebut customer BISA COCOK ke lebih dari satu produk DAN
+   TIDAK ada di ATURAN TETAP -- entah itu di kategori BERBEDA (misal "coklat"
+   ada sebagai rasa di kategori Roti DAN Roti Gandum yang harganya beda),
+   ATAU beberapa VARIAN dalam kategori yang SAMA -- JANGAN ASAL TEBAK dan
+   JANGAN PERNAH menggabungkan nama beberapa pilihan jadi satu string aneh
+   (misal JANGAN tulis "Nama (VarianA) (VarianB)" atau sejenisnya -- itu
+   BUKAN nama produk yang valid dan tidak akan cocok ke manapun di sistem).
+   Field "rasa" WAJIB selalu berisi PERSIS SATU nama yang ada di daftar
+   produk, tidak boleh gabungan. Kalau ambigu: pilih SATU kandidat yang
+   paling masuk akal dari konteks sebagai tebakan, TAPI set "kelengkapan"
+   jadi "kurang_lengkap" dan di "peringatan_ai" (BUKAN "catatan") sebutkan
+   jelas: item mana yang ambigu dan pilihan-pilihan yang ada apa aja, biar
+   admin bisa konfirmasi ulang ke customer.
 3. Kalau nama yang disebut customer TIDAK ADA sama sekali di daftar produk
    (misal nyebut "Donat Coklat" padahal yang ada cuma "Donat Coklat Celup"),
    tetap masukkan tebakan yang paling mendekati (SATU nama valid dari daftar,
    bukan gabungan), TAPI set "kelengkapan" jadi "kurang_lengkap" dan jelaskan
-   di "catatan" bahwa nama itu tidak ada persis di daftar dan apa kemungkinan
-   yang dimaksud.
+   di "peringatan_ai" (BUKAN "catatan") bahwa nama itu tidak ada persis di
+   daftar dan apa kemungkinan yang dimaksud.
 4. Field "kategori" dan "rasa" di output HARUS ditulis PERSIS sama seperti di
    daftar produk (termasuk kapitalisasi), bukan hasil tebakan bebas -- ini
    berlaku juga untuk "kategori"/"rasa" di dalam "box_groups".
@@ -166,10 +172,16 @@ def _prepare_catalog_prompt(system_prompt, catalog):
     return system_prompt + PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
 
 
-def _empty_parse_result(catatan):
+def _empty_parse_result(pesan_error):
+    """pesan_error (misal 'Gagal hubungi AI: ...') masuk ke 'peringatan_ai'
+    (info buat admin doang), BUKAN ke 'catatan' -- 'catatan' HARUS selalu
+    kosong di sini soalnya belum ada apa-apa yang berhasil diparse sama
+    sekali, jangan sampai pesan error nyasar kesimpen/keprint ke surat jalan
+    seolah-olah itu permintaan packing dari customer."""
     return {
         "nama": None, "no_hp": None, "alamat": None, "metode": None,
-        "items": [], "box_groups": [], "catatan": catatan, "kelengkapan": "kurang_lengkap",
+        "items": [], "box_groups": [], "catatan": None,
+        "peringatan_ai": pesan_error, "kelengkapan": "kurang_lengkap",
     }
 
 
@@ -277,12 +289,16 @@ ke daftar item final. Kalau jumlah box cuma 1, tidak perlu dikali. Kalau ada
 beberapa kelompok box berbeda, hitung tiap kelompok sendiri-sendiri lalu
 gabungkan rasa yang sama.
 
-PENTING soal nama rasa: field "rasa" WAJIB selalu SATU nama produk yang valid
-(persis sesuai daftar produk), TIDAK BOLEH digabung jadi satu string aneh
-kalau ambigu (misal JANGAN tulis "Baso (Pork) (Ayam)"). Kalau nama yang
-disebut bisa berarti lebih dari satu varian (misal "Baso" polos bisa berarti
-"Baso (Ayam)" atau "Baso (Pork)"), pilih SATU yang paling masuk akal dan
-sebutkan di "catatan" bahwa ini ambigu & perlu dikonfirmasi ke customer.
+PENTING soal nama rasa: CEK DULU daftar "ATURAN TETAP" di bagian bawah
+(kalau ada) -- itu aturan default FIX buat sebutan tertentu (misal "Baso"
+polos tanpa keterangan Ayam/Pork), jadi kalau sebutannya cocok ke salah
+satu ATURAN TETAP, langsung pakai itu, JANGAN dianggap ambigu. Field "rasa"
+WAJIB selalu SATU nama produk yang valid (persis sesuai daftar produk),
+TIDAK BOLEH digabung jadi satu string aneh kalau ambigu (misal JANGAN tulis
+"Nama (VarianA) (VarianB)"). Kalau nama yang disebut bisa berarti lebih
+dari satu varian DAN TIDAK ada di ATURAN TETAP, pilih SATU yang paling
+masuk akal dan sebutkan di "catatan" bahwa ini ambigu & perlu dikonfirmasi
+ke customer.
 """
 
 EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT_BASE
@@ -349,6 +365,19 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
         return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
     result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
+    # "catatan" sekarang KHUSUS permintaan packing yang BENERAN disebut
+    # customer di chat-nya (misal "donat sama gula dipisah ya") -- boleh
+    # keisi dari parse ini kalau customer emang nyebut sendiri, soalnya itu
+    # beneran mau kesimpen ke Sheets & keprint ke surat jalan. "peringatan_ai"
+    # itu WADAH TERPISAH buat catetan otomatis AI (info kurang, item
+    # ambigu, dst) -- liat prompt di atas, field ini yang sekarang dipakai
+    # buat itu, BUKAN "catatan" lagi (dulu sebelum dipisah, 2 hal ini
+    # numplek jadi 1 field "catatan" -- itu sebabnya surat jalan sempet
+    # ikut nyetak analisis AI kayak "Cream meisses ditafsirkan sebagai
+    # Cream Cheese..." padahal itu bukan permintaan packing dari customer).
+    result.setdefault("peringatan_ai", None)
+    if not (isinstance(result.get("catatan"), str) and result["catatan"].strip()):
+        result["catatan"] = None
     return result
 
 
@@ -405,6 +434,19 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
         return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
     result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
+    # "catatan" sekarang KHUSUS permintaan packing yang BENERAN disebut
+    # customer di chat-nya (misal "donat sama gula dipisah ya") -- boleh
+    # keisi dari parse ini kalau customer emang nyebut sendiri, soalnya itu
+    # beneran mau kesimpen ke Sheets & keprint ke surat jalan. "peringatan_ai"
+    # itu WADAH TERPISAH buat catetan otomatis AI (info kurang, item
+    # ambigu, dst) -- liat prompt di atas, field ini yang sekarang dipakai
+    # buat itu, BUKAN "catatan" lagi (dulu sebelum dipisah, 2 hal ini
+    # numplek jadi 1 field "catatan" -- itu sebabnya surat jalan sempet
+    # ikut nyetak analisis AI kayak "Cream meisses ditafsirkan sebagai
+    # Cream Cheese..." padahal itu bukan permintaan packing dari customer).
+    result.setdefault("peringatan_ai", None)
+    if not (isinstance(result.get("catatan"), str) and result["catatan"].strip()):
+        result["catatan"] = None
     return result
 
 

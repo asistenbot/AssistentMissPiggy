@@ -132,6 +132,11 @@ PRODUCT_ALIASES = [
         "kategori": "Donat",
         "rasa": "Meises",
     },
+    {
+        "sebutan": "Baso (disebut polos, tanpa keterangan Ayam/Pork sama sekali)",
+        "kategori": "Roti",
+        "rasa": "Baso (Pork)",
+    },
 ]
 GROUP_CHAT_ID_INVOICE = os.getenv("GROUP_CHAT_ID_INVOICE") or None
 GROUP_CHAT_ID_SURATJALAN = os.getenv("GROUP_CHAT_ID_SURATJALAN") or None
