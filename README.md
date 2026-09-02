@@ -81,10 +81,17 @@ lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
   konfirmasi order (SELALU muncul, nggak peduli metode Kirim/Ambil), atau dikirim
   dari form web (field `addon_jenis`/`addon_qty` di JSON order). `Addon_Total`
   ikut nambah ke Total di Invoice, dan `Addon_Jenis`+`Addon_Qty` ikut ditampilin
-  di Surat Jalan buat yang packing. **3 kolom ini HARUS ditambahin manual sebagai
-  header PALING BELAKANG** (setelah `Kurir`, urutannya: `Addon_Jenis`, `Addon_Qty`,
-  `Addon_Total`) di sheet Orders lo sebelum fitur ini kepake -- kalau belum ada,
-  bot tetep jalan normal, cuma add-on-nya nggak kesimpen/ke-pakai aja
+  di Surat Jalan buat yang packing. **OTOMATIS KEDETEKSI JUGA** kalau customer
+  udah nyebut "pita"/"kartu ucapan" dari chat/caption ASLINYA (misal customer
+  nulis "catatan: pakai pita + kartu ucapan") -- admin nggak perlu pencet
+  tombol lagi, langsung ke-isi & ke-total pas hasil parse pertama muncul
+  (qty default 1 kecuali ada angka yang literally nempel di kata pita/kartu
+  ucapan, misal "pita 2"). Tombol "🎀 Isi/Ubah Add-on" tetep ada buat
+  nambah/ubah/hapus manual kapan aja. **3 kolom ini HARUS ditambahin manual
+  sebagai header PALING BELAKANG** (setelah `Kurir`, urutannya: `Addon_Jenis`,
+  `Addon_Qty`, `Addon_Total`) di sheet Orders lo sebelum fitur ini kepake --
+  kalau belum ada, bot tetep jalan normal, cuma add-on-nya nggak
+  kesimpen/ke-pakai aja
 
 ### Tab `PriceList`
 | Kategori | Rasa | Harga |

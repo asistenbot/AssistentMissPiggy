@@ -442,6 +442,45 @@ def _parse_addon_text(text):
     return jenis, max(1, qty)
 
 
+def _parse_addon_from_customer_text(text):
+    """Detektor add-on KHUSUS buat teks ORIGINAL dari customer (chat
+    mentah yang di-paste admin ke bot, atau caption foto) -- BEDA sama
+    _parse_addon_text yang buat balesan admin SINGKAT ('tali pita 2').
+
+    Teks mentah customer biasanya multi-baris dan udah penuh angka LAIN
+    (qty tiap item, no HP, ongkir, dst), jadi kalau asal ambil "angka
+    PERTAMA yang ketemu di seluruh teks" kayak _parse_addon_text,
+    resikonya qty item lain (misal '3 Ham Cheese') malah kesedot jadi
+    qty add-on. Di sini angka CUMA diambil kalau literally NEMPEL sama
+    kata pita/kartu ucapan (misal 'pita 2', '2x kartu ucapan') -- kalau
+    nggak nemu angka yang nempel, default qty=1.
+
+    Return (jenis, qty) kalau nemu, None kalau teksnya nggak nyebut
+    pita/kartu ucapan sama sekali."""
+    if not text:
+        return None
+    lower = text.lower()
+    ada_pita = "pita" in lower
+    ada_kartu = "kartu ucapan" in lower
+    if not ada_pita and not ada_kartu:
+        return None
+
+    if ada_pita and ada_kartu:
+        jenis = "Tali Pita + Kartu Ucapan"
+    elif ada_pita:
+        jenis = "Tali Pita"
+    else:
+        jenis = "Kartu Ucapan"
+
+    qty = 1
+    for pola in (r"(\d+)\s*x?\s*(?:pita|kartu ucapan)", r"(?:pita|kartu ucapan)\s*x?\s*(\d+)"):
+        m = re.search(pola, lower)
+        if m:
+            qty = max(1, int(m.group(1)))
+            break
+    return jenis, qty
+
+
 def _format_catatan_block(parsed):
     """Baris 'Catatan: ...' (+ 'Peringatan AI: ...' kalau ada) yang dipakai
     di SEMUA preview order (baru, abis isi ongkir, abis dikoreksi) -- ditaruh
@@ -1387,6 +1426,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tanggal_dari_teks:
             parsed["tanggal_kirim"] = tanggal_dari_teks
 
+    # AI parser juga belom ngerti soal add-on packing (tali pita/kartu
+    # ucapan) -- kalau customer udah nyebut itu dari CHAT PERTAMA (misal
+    # di bagian catatan), dia bakal ketangkep AI cuma sebagai catatan
+    # biasa, nggak otomatis ke-total ke invoice. Coba deteksi juga pake
+    # parser deterministik biar langsung ke-isi otomatis, admin nggak
+    # perlu pencet tombol '🎀 Isi Add-on' lagi kalau customernya udah jelas
+    # minta dari awal.
+    if not parsed.get("addon_jenis"):
+        hasil_addon_otomatis = _parse_addon_from_customer_text(raw_text)
+        if hasil_addon_otomatis:
+            jenis_otomatis, qty_otomatis = hasil_addon_otomatis
+            _set_addon(parsed, jenis_otomatis, qty_otomatis)
+
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Parse:")
     keyboard = build_confirm_keyboard(parsed, order_id)
@@ -1476,6 +1528,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tanggal_dari_caption = _parse_tanggal_kirim(caption)
         if tanggal_dari_caption:
             parsed["tanggal_kirim"] = tanggal_dari_caption
+
+    # Sama kayak alur teks -- coba deteksi add-on (tali pita/kartu ucapan)
+    # otomatis dari caption ATAU dari catatan yang udah ke-baca AI dari
+    # gambar (misal fotonya nunjukkin tulisan "pakai pita + kartu ucapan").
+    if not parsed.get("addon_jenis"):
+        hasil_addon_otomatis = _parse_addon_from_customer_text(caption) or _parse_addon_from_customer_text(
+            parsed.get("catatan")
+        )
+        if hasil_addon_otomatis:
+            jenis_otomatis, qty_otomatis = hasil_addon_otomatis
+            _set_addon(parsed, jenis_otomatis, qty_otomatis)
 
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Baca Gambar:")
