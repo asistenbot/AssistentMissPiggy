@@ -52,12 +52,20 @@ Bikin 1 Google Sheet baru, kasih nama bebas (misal "Miss Piggy - Data PO"),
 lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
 
 ### Tab `Orders`
-| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Timestamp | Minggu_PO | Nama_Customer | No_HP | Alamat | Metode | Kategori | Rasa | Qty | Harga_Satuan | Subtotal | Ongkir | Status | Tanggal_Kirim | Box_Info | Catatan |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
 - `Minggu_PO` = tanggal pengiriman Kamis untuk PO minggu itu (format `YYYY-MM-DD`), otomatis diisi bot
 - `Metode` = `Kirim` atau `Ambil`
-- `Status` = `Pending` / `Lunas` (lo update manual di sheet kalau mau)
+- `Status` = `Pending` / `Terkirim` (otomatis berubah jadi `Terkirim` kalau ada automation
+  terpisah yang lo pasang di Google Apps Script, atau update manual di sheet kalau mau)
+- `Tanggal_Kirim` = tanggal kirim custom (kalau beda dari `Minggu_PO`), otomatis diisi bot
+- `Box_Info` = rincian pembagian per box (JSON), otomatis diisi bot kalau order-nya pakai satuan box
+- `Catatan` = catatan bebas per order (misal "Donat & Gula dipisah pas packing"), otomatis
+  diisi bot dari chat customer/instruksi admin, dan ikut muncul di Surat Jalan. **Kolom ini
+  HARUS ditambahin manual sebagai header PALING BELAKANG** (setelah `Box_Info`) di sheet Orders
+  lo sebelum fitur ini kepake -- kalau belum ada, bot tetep jalan normal, cuma catatan-nya
+  nggak kesimpen/ke-print aja
 
 ### Tab `PriceList`
 | Kategori | Rasa | Harga |
@@ -123,9 +131,11 @@ Paling gampang pake **Railway.app** atau **Render.com** (background worker):
 | `/laporanbulanan` | Generate laporan bulanan buat bayar supplier (bulan berjalan) |
 | `/laporanbulanan 2026-07` | Generate laporan bulanan untuk bulan tertentu |
 
-Auto-terjadwal (tanpa lo minta):
-- **Tiap Rabu jam 15:00, 16:00, 19:00 WIB** → bot kirim rekap produksi otomatis ke lo
-- **Tanggal 1 tiap bulan jam 09:00 WIB** → bot kirim laporan bulanan bulan sebelumnya (bisa lo ganti tanggalnya di `config.py`)
+Auto-terjadwal: **NGGAK ADA** -- rekap produksi mingguan (dulu tiap Rabu
+15:00/16:00/19:00) dan laporan bulanan (dulu tanggal 1 jam 09:00) dua-duanya
+udah dimatiin atas permintaan admin. Semua manual lewat `/rekap` dan
+`/laporanbulanan` kapan pun perlu. Kalau nanti mau dinyalain lagi, tinggal
+un-comment bagian yang sesuai di `scheduler_jobs.py`.
 
 ---
 

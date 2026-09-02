@@ -34,6 +34,10 @@ TOPIC_ID_INVOICE = _topic_id("TOPIC_ID_INVOICE")
 TOPIC_ID_SURATJALAN = _topic_id("TOPIC_ID_SURATJALAN")
 TOPIC_ID_REKAPPRODUKSI = _topic_id("TOPIC_ID_REKAPPRODUKSI")
 TOPIC_ID_LAPORANBULANAN = _topic_id("TOPIC_ID_LAPORANBULANAN")
+# Topic KHUSUS buat daftar "siapa dikirim kurir" + "siapa ambil sendiri"
+# (dari /rekap) -- DIPISAH dari TOPIC_ID_SURATJALAN atas permintaan admin,
+# biar nggak numplek sama foto surat jalan tiap customer.
+TOPIC_ID_PENGIRIMAN = _topic_id("TOPIC_ID_PENGIRIMAN")
 
 GROUP_CHAT_ID_ORDER = os.getenv("GROUP_CHAT_ID_ORDER") or None
 

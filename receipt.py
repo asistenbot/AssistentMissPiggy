@@ -149,6 +149,16 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     else:
         lines.append((f"Ambil di: {config.PICKUP_ADDRESS}", FONT_NORMAL, "left_wrap", 0))
 
+    # Catatan (kolom Catatan di Sheets, misal "Donat & Gula dipisah") SENGAJA
+    # ditaruh PALING BAWAH, nempel abis info CARA/Alamat -- alasan sama kayak
+    # kenapa CARA ditaruh di bawah: ini bagian yang paling gampang kebaca sama
+    # yang packing tepat sebelum barangnya dibungkus/diberangkatin.
+    catatan = (orders[0].get("Catatan") if orders else None) or None
+    if catatan:
+        lines.append(("", FONT_SMALL, "left", 0))
+        lines.append(("CATATAN:", FONT_BOLD, "left", 0))
+        lines.append((catatan, FONT_NORMAL, "left_wrap", 0))
+
     lines.append(("", FONT_SMALL, "left", 0))  # spasi kosong buat sobek kertas
 
     # Canvas dummy dulu buat ngukur tinggi yang dibutuhkan

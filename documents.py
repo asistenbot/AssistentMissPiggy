@@ -86,6 +86,11 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
     for o in orders:
         lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}")
 
+    catatan = orders[0].get("Catatan")
+    if catatan:
+        lines.append("")
+        lines.append(f"Catatan: {catatan}")
+
     return "\n".join(lines)
 
 

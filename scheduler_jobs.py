@@ -1,9 +1,12 @@
 """
-Jadwal otomatis:
-- Tanggal 1 tiap bulan jam 09:00 WIB -> kirim laporan bulanan supplier (bulan sebelumnya)
-
-(Auto rekap produksi mingguan tiap Rabu SUDAH DIMATIKAN atas permintaan admin --
-sekarang admin minta rekap produksi manual aja lewat /rekap kapan pun perlu.)
+Jadwal otomatis: TIDAK ADA -- semua auto-kirim terjadwal SUDAH DIMATIKAN atas
+permintaan admin (baik rekap produksi mingguan tiap Rabu MAUPUN laporan
+bulanan tanggal 1). Sekarang admin minta manual aja lewat /rekap dan
+/laporanbulanan kapan pun perlu. Fungsi send_auto_recap & send_auto_monthly_report
+di bawah masih ada (dan setup_scheduler masih dipanggil dari bot.py) sengaja
+dibiarin nggak dihapus -- kalau nanti admin mau nyalain lagi salah satu/
+dua-duanya, tinggal un-comment scheduler.add_job yang sesuai di bawah,
+nggak perlu tulis ulang dari nol.
 """
 import datetime
 import logging
@@ -16,13 +19,18 @@ from sheets_client import get_sheets_client
 logger = logging.getLogger(__name__)
 def setup_scheduler(bot):
     scheduler = AsyncIOScheduler(timezone=config.TIMEZONE)
-    scheduler.add_job(
-        send_auto_monthly_report,
-        CronTrigger(day=config.MONTHLY_REPORT_DAY, hour=config.MONTHLY_REPORT_HOUR,
-                    minute=config.MONTHLY_REPORT_MINUTE, timezone=config.TIMEZONE),
-        args=[bot],
-        id="auto_monthly_report",
-    )
+    # Auto laporan bulanan (tanggal 1 jam 09:00 WIB) DIMATIKAN atas permintaan
+    # admin -- dulu ada scheduler.add_job(send_auto_monthly_report, ...) di
+    # sini, sekarang admin panggil /laporanbulanan manual aja. Un-comment
+    # blok ini lagi kalau nanti mau dinyalain ulang:
+    #
+    # scheduler.add_job(
+    #     send_auto_monthly_report,
+    #     CronTrigger(day=config.MONTHLY_REPORT_DAY, hour=config.MONTHLY_REPORT_HOUR,
+    #                 minute=config.MONTHLY_REPORT_MINUTE, timezone=config.TIMEZONE),
+    #     args=[bot],
+    #     id="auto_monthly_report",
+    # )
     scheduler.start()
     return scheduler
 def _target_chat_ids():

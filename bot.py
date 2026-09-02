@@ -140,6 +140,23 @@ def _tujuan_rekapproduksi(update):
     return update.effective_chat.id, None
 
 
+def _tujuan_pengiriman(update):
+    """(chat_id, message_thread_id) TUJUAN khusus buat daftar "DIKIRIM KURIR"
+    dan "DIAMBIL SENDIRI" (dari /rekap) -- DIPISAH dari _tujuan_suratjalan
+    (yang isinya foto surat jalan per-customer) atas permintaan admin, biar
+    daftar kirim/ambil nggak numplek sama foto-foto surat jalan. Pola sama
+    persis: config.TOPIC_ID_PENGIRIMAN (topic) atau
+    config.GROUP_CHAT_ID_PENGIRIMAN (grup terpisah), fallback ke chat
+    sekarang kalau nggak di-setting."""
+    topic_id = getattr(config, "TOPIC_ID_PENGIRIMAN", None)
+    if topic_id:
+        return (getattr(config, "GROUP_CHAT_ID", None) or update.effective_chat.id), topic_id
+    chat_id = getattr(config, "GROUP_CHAT_ID_PENGIRIMAN", None)
+    if chat_id:
+        return chat_id, None
+    return update.effective_chat.id, None
+
+
 def _tujuan_laporanbulanan(update):
     """(chat_id, message_thread_id) TUJUAN khusus buat laporan bulanan
     supplier (/laporanbulanan, teks + PDF) -- DIPISAH dari _tujuan_invoice
@@ -162,19 +179,23 @@ async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", r
     nggak seimbang kayak * _ ` [ ), dicoba dulu kirim ULANG tanpa format
     sebelum bener-bener nyerah -- biar admin tetep kebagian isinya walau
     jadi polos. Kalau tetap gagal, SELALU kasih tau di chat asal (nggak lagi
-    cuma kalau beda topic) -- biar nggak diem-diem ilang kayak sebelumnya."""
+    cuma kalau beda topic) -- biar nggak diem-diem ilang kayak sebelumnya.
+
+    Return objek Message yang BENERAN kekirim (biar caller bisa nyimpen
+    chat_id+message_id-nya, misal buat nge-EDIT preview order ini lagi
+    belakangan alih-alih kirim pesan baru -- liat _send_or_update_preview),
+    atau None kalau semua percobaan kirim gagal total."""
     chat_id, thread_id = tujuan
     try:
-        await context.bot.send_message(
+        return await context.bot.send_message(
             chat_id=chat_id, text=text, parse_mode=parse_mode,
             message_thread_id=thread_id, reply_markup=reply_markup,
         )
-        return
     except Exception as e:
         logger.error(f"Gagal kirim teks ke chat {chat_id} (topic {thread_id}): {e}")
 
     try:
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=chat_id, text=text, parse_mode=None,
             message_thread_id=thread_id, reply_markup=reply_markup,
         )
@@ -183,7 +204,7 @@ async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", r
                 "⚠️ Berhasil kirim ke grup/topic tujuan, tapi formatnya jadi polos "
                 "(ada karakter yang bikin format tebal/miring gagal)."
             )
-        return
+        return sent
     except Exception as e2:
         logger.error(f"Tetap gagal kirim teks (plain) ke chat {chat_id} (topic {thread_id}): {e2}")
 
@@ -191,6 +212,7 @@ async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", r
         f"⚠️ Gagal kirim ke grup/topic tujuan. Cek bot udah di-invite & jadi admin di situ belum.\n\n"
         f"Ini isinya (kirim manual dulu ya):\n\n{text}"
     )
+    return None
 
 
 async def _kirim_foto_ke(context, update, tujuan, photo, caption):
@@ -225,6 +247,42 @@ def build_confirm_keyboard(parsed, order_id):
     if _is_delivery_metode(parsed.get("metode")):
         rows.append([InlineKeyboardButton("✏️ Isi/Ubah Ongkir", callback_data=f"set_ongkir:{order_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+async def _send_or_update_preview(context, update, parsed, order_id, preview_text, keyboard):
+    """Kirim pesan preview order (order BARU), ATAU kalau order ini UDAH
+    punya pesan preview sebelumnya (chat_id+message_id-nya kesimpen di
+    parsed['_preview_chat_id']/['_preview_msg_id']), EDIT pesan LAMA itu
+    di tempat -- BUKAN kirim pesan baru.
+
+    Ini fix buat laporan admin: abis koreksi/edit "berhasil disimpan",
+    scroll ke atas masih ada kartu LAMA yang keliatan minta
+    konfirmasi/batal padahal udah nggak relevan lagi. Akar masalahnya:
+    tiap koreksi teks bebas selalu balas pakai reply_text (pesan BARU),
+    jadi kartu lama nggak pernah ke-update/ke-clear sama sekali walau
+    datanya di baliknya udah berubah.
+
+    Kalau belum ada pesan lama (order baru) ATAU edit ke pesan lama gagal
+    (misal keburu dihapus admin manual / lebih dari 48 jam), fallback
+    kirim pesan BARU dan simpen id-nya buat koreksi berikutnya."""
+    chat_id = parsed.get("_preview_chat_id")
+    msg_id = parsed.get("_preview_msg_id")
+    if chat_id and msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id, text=preview_text,
+                parse_mode="Markdown", reply_markup=keyboard,
+            )
+            _store_pending_order(context, parsed, order_id)
+            return
+        except Exception as e:
+            logger.error(f"Gagal edit preview lama order {order_id}, kirim pesan baru: {e}")
+
+    sent = await update.message.reply_text(preview_text, parse_mode="Markdown", reply_markup=keyboard)
+    if sent:
+        parsed["_preview_chat_id"] = sent.chat_id
+        parsed["_preview_msg_id"] = sent.message_id
+    _store_pending_order(context, parsed, order_id)
 
 
 def _new_order_id():
@@ -340,7 +398,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
         "- /laporanbulanan 2026-07:2026-08 — laporan rentang beberapa bulan\n"
         "- /groupid — lihat ID chat ini (buat setup grup admin)\n\n"
-        "Auto-recap produksi akan dikirim tiap Rabu jam 15:00, 16:00, dan 19:00 WIB."
+        "Rekap produksi & laporan bulanan sekarang manual semua (via /rekap "
+        "dan /laporanbulanan) — auto-kirim terjadwal udah dimatiin."
     )
 
 
@@ -361,8 +420,9 @@ async def groupid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "buat apa): TOPIC_ID_ORDER (order masuk & konfirmasi), TOPIC_ID_INVOICE "
             "(invoice foto ke customer), TOPIC_ID_REKAPPRODUKSI (rekap produksi "
             "mingguan/bahan baku), TOPIC_ID_LAPORANBULANAN (laporan bulanan supplier), "
-            "atau TOPIC_ID_SURATJALAN (surat jalan/rekap kurir) — chat/grup-nya tetep "
-            "pake GROUP_CHAT_ID yang biasa."
+            "TOPIC_ID_SURATJALAN (foto surat jalan per-customer), atau "
+            "TOPIC_ID_PENGIRIMAN (daftar DIKIRIM KURIR / DIAMBIL SENDIRI dari "
+            "/rekap) — chat/grup-nya tetep pake GROUP_CHAT_ID yang biasa."
         )
     await update.message.reply_text(teks, parse_mode="Markdown")
 
@@ -517,11 +577,11 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text_kirim = documents.build_delivery_kirim(minggu_po, orders)
     if text_kirim:
-        await _kirim_teks_ke(context, update, _tujuan_suratjalan(update), text_kirim)
+        await _kirim_teks_ke(context, update, _tujuan_pengiriman(update), text_kirim)
 
     text_ambil = documents.build_delivery_ambil(minggu_po, orders)
     if text_ambil:
-        await _kirim_teks_ke(context, update, _tujuan_suratjalan(update), text_ambil)
+        await _kirim_teks_ke(context, update, _tujuan_pengiriman(update), text_ambil)
 
 
 @owner_only
@@ -835,7 +895,10 @@ async def _gabung_pending_orders_by_nama(update: Update, context: ContextTypes.D
         merged, f"Digabung dari {len(matched_ids)} order — Hasil Gabungan:"
     )
     keyboard = build_confirm_keyboard(merged, order_id)
-    await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
+    sent = await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
+    if sent:
+        merged["_preview_chat_id"] = sent.chat_id
+        merged["_preview_msg_id"] = sent.message_id
 
 
 @owner_only
@@ -962,6 +1025,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ongkir": int(orders[0].get("Ongkir", 0) or 0),
         "minggu_po": minggu_po,
         "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
+        "catatan": orders[0].get("Catatan") or None,
     }
 
     peringatan_minggu = (
@@ -1129,6 +1193,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ongkir": int(orders[0].get("Ongkir", 0) or 0),
             "minggu_po": minggu_po,
             "tanggal_kirim": orders[0].get("Tanggal_Kirim") or minggu_po,
+            "catatan": orders[0].get("Catatan") or None,
         }
         # Langsung proses instruksinya, nggak perlu tanya ulang ke admin
         await handle_edit_instruction(update, context, instruction_override=instruksi)
@@ -1176,7 +1241,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Parse:")
     keyboard = build_confirm_keyboard(parsed, order_id)
-    await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
+    sent = await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
+    if sent:
+        # Simpen id pesan preview ini -- biar koreksi teks bebas belakangan
+        # (handle_pending_correction) bisa EDIT kartu ini langsung di
+        # tempat, bukan numpuk kirim kartu baru tiap kali dikoreksi.
+        parsed["_preview_chat_id"] = sent.chat_id
+        parsed["_preview_msg_id"] = sent.message_id
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1248,7 +1319,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Baca Gambar:")
     keyboard = build_confirm_keyboard(parsed, order_id)
-    await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
+    sent = await _kirim_teks_ke(context, update, _tujuan_order(update), preview, reply_markup=keyboard)
+    if sent:
+        parsed["_preview_chat_id"] = sent.chat_id
+        parsed["_preview_msg_id"] = sent.message_id
 
 
 async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1296,6 +1370,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         "ongkir": int(parsed.get("ongkir") or 0),
         "tanggal_kirim": parsed.get("tanggal_kirim"),
+        "catatan": parsed.get("catatan"),
     }
 
     sheets = get_sheets_client()
@@ -1427,7 +1502,7 @@ async def handle_ongkir_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     keyboard = build_confirm_keyboard(parsed, order_id)
-    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+    await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
 
 
 async def handle_pending_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -1450,6 +1525,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
             "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
+            "catatan": "Catatan",
         }[field]
         items_text = "\n".join(
             f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -1458,9 +1534,12 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         ongkir_val = int(parsed.get("ongkir") or 0)
         ongkir_text = ("Rp" + format(ongkir_val, ",").replace(",", ".")) if ongkir_val else "belum diisi (Rp0)"
         tanggal_kirim_text = parsed.get("tanggal_kirim") or "(default: Kamis PO minggu ini)"
+        # catatan bisa sengaja dikosongin (new_value None) -- tampilin
+        # "(dikosongin)" alih-alih literal "None".
+        display_value = new_value if new_value is not None else "(dikosongin)"
 
         preview = (
-            f"*{field_label} diganti jadi:* {new_value}\n\n"
+            f"*{field_label} diganti jadi:* {display_value}\n\n"
             f"Nama: {parsed.get('nama') or '-'}\n"
             f"No HP: {parsed.get('no_hp') or '-'}\n"
             f"Alamat: {parsed.get('alamat') or '-'}\n"
@@ -1471,7 +1550,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
             f"Catatan: {parsed.get('catatan') or '-'}\n"
         )
         keyboard = build_confirm_keyboard(parsed, order_id)
-        await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+        await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
         return
 
     await update.message.reply_text("Oke, ngitung ulang preview-nya...")
@@ -1499,11 +1578,25 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     parsed["items"] = result.get("items", [])
     if result.get("ongkir") is not None:
         parsed["ongkir"] = int(result.get("ongkir"))
-    catatan_baru = result.get("catatan")
-    if catatan_baru and catatan_baru != "-":
-        parsed["catatan"] = catatan_baru
-
-    _store_pending_order(context, parsed, order_id)
+    # PENTING -- BUG lama yang barusan diperbaiki: result["catatan"] di sini
+    # itu RINGKASAN PERUBAHAN dari AI edit-item (lihat EDIT_SYSTEM_PROMPT_BASE
+    # di ai_parser.py, field "catatan"-nya didefinisikan sebagai "ringkasan
+    # perubahan yang dilakukan"), BUKAN catatan packing bebas dari customer
+    # (field "catatan" YANG SAMA NAMANYA di dict `parsed`, tapi asalnya dari
+    # PARSE_SYSTEM_PROMPT_BASE, artinya beda total -- misal "donat & gula
+    # dipisah pas packing"). Kode lama nimpa parsed["catatan"] pakai
+    # ringkasan AI ini TIAP KALI ada koreksi item apa pun (bukan cuma
+    # koreksi soal catatan) -- itu sebabnya catatan packing yang udah
+    # ditulis admin ("catatan untuk donat gula dipisah") ilang ketiban teks
+    # kayak "Catatan hapus" begitu admin ngoreksi item lain. FIX: catatan
+    # packing (parsed["catatan"]) SAMA SEKALI nggak disentuh di sini lagi --
+    # cuma bisa diubah lewat koreksi "catatan ..." (_try_parse_field_correction)
+    # atau pas order awal diparse. Ringkasan AI cuma ditampilin SEKALI
+    # sebagai info tambahan (misal peringatan nama rasa ambigu), nggak
+    # disimpen ke mana-mana.
+    ai_edit_summary = result.get("catatan")
+    if ai_edit_summary and ai_edit_summary != "-":
+        await update.message.reply_text(f"ℹ️ {ai_edit_summary}")
 
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
@@ -1524,7 +1617,7 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
         f"Catatan: {parsed.get('catatan') or '-'}\n"
     )
     keyboard = build_confirm_keyboard(parsed, order_id)
-    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+    await _send_or_update_preview(context, update, parsed, order_id, preview, keyboard)
 
 
 # ---------------- EDIT ORDER ----------------
@@ -1596,8 +1689,11 @@ def _parse_tanggal_kirim(text):
 
 def _try_parse_field_correction(instruction):
     """Coba deteksi instruksi koreksi DATA customer (No HP/Alamat/Nama/
-    Metode) langsung dari kata kunci, TANPA lewat AI -- biar reliable buat
-    hal krusial kayak nomor HP (nggak digantung interpretasi model bahasa).
+    Metode/Tanggal Kirim/Catatan) langsung dari kata kunci, TANPA lewat AI
+    -- biar reliable buat hal krusial kayak nomor HP (nggak digantung
+    interpretasi model bahasa), DAN biar catatan packing (field "catatan")
+    nggak pernah kesasar ke alur edit-item AI yang bisa nimpa isinya
+    (liat komentar di blok "catatan" di bawah).
     Return (field, value_baru) kalau ketemu SATU koreksi yang jelas, atau
     None kalau nggak yakin -- yang berarti fallback ke alur edit ITEM (AI)
     yang udah ada, jadi kapabilitas lama nggak keganggu sama sekali.
@@ -1614,6 +1710,35 @@ def _try_parse_field_correction(instruction):
             new_hp = re.sub(r"[^\d]", "", digits[-1])
             if len(new_hp) >= 8:
                 return "no_hp", new_hp
+
+    # Catatan (catatan packing bebas, misal "donat & gula dipisah") --
+    # SENGAJA dicek SEBELUM alamat/nama, soalnya isi catatannya sendiri
+    # sering nyebut kata "alamat"/"nama" (misal "catatan: alamat sementara
+    # pindah dulu"), yang kalau nggak keburu ke-tangkep di sini bakal salah
+    # kesedot jadi koreksi alamat/nama padahal maksudnya cuma catatan
+    # packing. Dulu instruksi kayak ini ("catatan untuk donat gula
+    # dipisah") nggak dikenalin field koreksi apa pun sama sekali, jadi
+    # nyasar ke alur edit-item AI (parse_order_edit) yang ujung-ujungnya
+    # malah nimpa catatan pakai ringkasan perubahan AI -- liat catatan di
+    # handle_pending_correction soal bug itu.
+    if "catatan" in lower:
+        if any(k in lower for k in ("hapus", "kosong", "kosongin", "hilangin", "buang")):
+            return "catatan", None
+        val = _extract_after_splitter(lower, text)
+        if not val:
+            # _extract_after_splitter cuma nangkep splitter umum kayak
+            # 'jadi'/'ke'/'di' -- kalimat catatan sering nggak pakai itu
+            # ("catatan untuk donat gula dipisah", "catatan: ..."), jadi
+            # coba juga ambil semua teks SETELAH kata "catatan" itu sendiri.
+            idx = lower.rfind("catatan")
+            after = text[idx + len("catatan"):].strip(" :.-")
+            for prefix in ("untuk ", "buat ", "nya "):
+                if after.lower().startswith(prefix):
+                    after = after[len(prefix):].strip()
+                    break
+            val = after or None
+        if val:
+            return "catatan", val
 
     if "alamat" in lower:
         val = _extract_after_splitter(lower, text)
@@ -1660,20 +1785,25 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         field_label = {
             "no_hp": "No HP", "nama": "Nama", "alamat": "Alamat",
             "metode": "Metode", "tanggal_kirim": "Tanggal Kirim",
+            "catatan": "Catatan",
         }[field]
         item_list_text = "\n".join(
             f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
         ) or "  (kosong)"
         tanggal_kirim_now = editing.get("tanggal_kirim") or editing["minggu_po"]
+        # catatan bisa sengaja dikosongin (new_value None) -- tampilin
+        # "(dikosongin)" alih-alih literal "None".
+        display_value = new_value if new_value is not None else "(dikosongin)"
 
         preview = (
-            f"*{field_label} diganti jadi:* {new_value}\n\n"
+            f"*{field_label} diganti jadi:* {display_value}\n\n"
             f"*Data order {editing['nama']} sekarang:*\n"
             f"Nama: {editing['nama']}\n"
             f"No HP: {editing['no_hp']}\n"
             f"Alamat: {editing['alamat']}\n"
             f"Metode: {editing['metode']}\n"
             f"Tanggal Kirim: {tanggal_kirim_now}\n"
+            f"Catatan: {editing.get('catatan') or '-'}\n"
             f"Items (nggak berubah):\n{item_list_text}\n\n"
             f"Item pesanan nggak ikut berubah. Mau koreksi field lain juga? "
             f"Ketik lagi sebelum konfirmasi. Kalau udah bener, klik Konfirmasi."
@@ -1689,6 +1819,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
             "ongkir": editing["ongkir"],
             "minggu_po": editing["minggu_po"],
             "tanggal_kirim": tanggal_kirim_now,
+            "catatan": editing.get("catatan"),
         }
 
         keyboard = InlineKeyboardMarkup([[
@@ -1721,7 +1852,15 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         return
 
     new_items = result.get("items", [])
-    catatan = result.get("catatan", "-")
+    # PENTING: result["catatan"] itu RINGKASAN PERUBAHAN dari AI (lihat
+    # EDIT_SYSTEM_PROMPT_BASE di ai_parser.py) -- BUKAN catatan packing
+    # bebas dari customer (field "catatan" yang beda arti di editing/
+    # pending_edit, misal "donat & gula dipisah"). Ditampilin di preview
+    # cuma sebagai info ringkasan/peringatan ambigu dari AI, dan LABELNYA
+    # sengaja dibedain ("Ringkasan AI") biar admin nggak ngira ini catatan
+    # packing asli -- catatan packing asli-nya sendiri (editing["catatan"])
+    # nggak disentuh sama sekali di sini.
+    ai_edit_summary = result.get("catatan") or "-"
     # Kalau admin sebut ongkir baru di instruksinya, pakai itu. Kalau nggak
     # disebut sama sekali, PERTAHANKAN ongkir lama (jangan direset ke 0).
     ongkir_final = result.get("ongkir")
@@ -1745,7 +1884,8 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         f"*Order Lama:*\n{old_text}\n\n"
         f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
         f"Ongkir: {ongkir_rupiah}\n"
-        f"Catatan: {catatan}\n\n"
+        f"Catatan (packing): {editing.get('catatan') or '-'}\n"
+        f"Ringkasan AI: {ai_edit_summary}\n\n"
         + (
             "⚠️ Item KOSONG — kalau dikonfirmasi, order ini bakal DIBATALIN TOTAL "
             "(dihapus dari Sheets, TANPA invoice/surat jalan baru)."
@@ -1764,6 +1904,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         "ongkir": ongkir_final,
         "minggu_po": editing["minggu_po"],
         "tanggal_kirim": editing.get("tanggal_kirim"),
+        "catatan": editing.get("catatan"),
     }
 
     keyboard = InlineKeyboardMarkup([[
@@ -1893,6 +2034,7 @@ def _rewrite_customer_order(sheets, pending):
         "items": pending["items"],
         "ongkir": pending.get("ongkir", 0),
         "tanggal_kirim": pending.get("tanggal_kirim"),
+        "catatan": pending.get("catatan"),
     }
     return sheets.add_order_rows(order, pending["minggu_po"])
 

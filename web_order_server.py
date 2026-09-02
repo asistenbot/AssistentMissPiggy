@@ -188,7 +188,7 @@ def create_web_order_app(application):
         sent_to_anyone = False
         for chat_id, thread_id in _target_order(owner_ids):
             try:
-                await application.bot.send_message(
+                sent = await application.bot.send_message(
                     chat_id=chat_id,
                     text=preview,
                     parse_mode="Markdown",
@@ -196,6 +196,20 @@ def create_web_order_app(application):
                     message_thread_id=thread_id,
                 )
                 sent_to_anyone = True
+                # Simpen id pesan preview PERTAMA yang berhasil kekirim --
+                # dipakai bot.py (_send_or_update_preview) biar koreksi teks
+                # bebas belakangan bisa EDIT kartu ini di tempat, bukan
+                # numpuk kirim kartu baru (sama kayak fix buat order dari
+                # paste-chat/screenshot manual). Kalau order ini dikirim ke
+                # BEBERAPA chat sekaligus (fallback DM per-admin waktu
+                # GROUP_CHAT_ID belum di-setting), yang kesimpen cuma target
+                # pertama -- admin lain tetep dapet notifikasi normal, cuma
+                # kartu MEREKA nggak ikut ke-edit otomatis kalau ada
+                # koreksi (fallback-nya kirim pesan baru kayak sebelumnya,
+                # nggak ada regresi).
+                if "_preview_chat_id" not in parsed:
+                    parsed["_preview_chat_id"] = sent.chat_id
+                    parsed["_preview_msg_id"] = sent.message_id
             except Exception as e:
                 logger.error(f"Gagal kirim order web ke chat {chat_id}: {e}")
 
