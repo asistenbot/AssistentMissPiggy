@@ -2184,11 +2184,18 @@ def _try_parse_field_correction(instruction):
             return "addon", (jenis, qty) if jenis else None
 
     # Tanggal kirim custom (default-nya tetep Kamis PO minggu berjalan kalau
-    # nggak pernah disebut sama sekali). Nggak wajib kata "tanggal" -- admin
-    # sering cuma bilang "buat besok" doang -- tapi ini SENGAJA dicek PALING
-    # TERAKHIR (semua field lain udah dicoba duluan) biar "besok" yang
+    # nggak pernah disebut sama sekali). Ini SENGAJA dicek PALING TERAKHIR
+    # (semua field lain udah dicoba duluan) biar "besok"/"tanggal" yang
     # nyempil di kalimat lain nggak salah kesedot jadi koreksi tanggal.
-    if ("tanggal" in lower and "kirim" in lower) or "tgl kirim" in lower \
+    #
+    # DULU syaratnya kata "tanggal" DAN "kirim" harus ada BARENG -- ternyata
+    # kepencet: instruksi kayak "untuk tanggal 4/09/2026" (nyebut "tanggal"
+    # doang, TANPA kata "kirim") nggak kedetect sama sekali & kelolos ke
+    # alur edit-item AI yang nggak nyentuh field tanggal kirim, jadi
+    # tanggalnya diem aja nggak keubah. Sekarang cukup kata "tanggal" ATAU
+    # "tgl" doang (di titik ini semua field lain -- termasuk "catatan" --
+    # udah dicek & di-skip duluan, jadi resiko salah tangkep kecil).
+    if "tanggal" in lower or "tgl" in lower \
             or "besok" in lower or "lusa" in lower or "hari ini" in lower:
         tanggal = _parse_tanggal_kirim(text)
         if tanggal:
@@ -2304,6 +2311,18 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
     ongkir_final = result.get("ongkir")
     ongkir_final = int(ongkir_final) if ongkir_final is not None else editing["ongkir"]
 
+    # Jaring pengaman: parse_order_edit (AI) di atas cuma fokus ke ITEM +
+    # ongkir, SAMA SEKALI nggak ngurusin tanggal kirim -- jadi kalau
+    # instruksinya nyebut tanggal juga BARENGAN sama perubahan item (misal
+    # "tambahin baso 2 buat tanggal 4/09"), tanpa ini tanggalnya bakal
+    # keabaian diem-diem walau _try_parse_field_correction di atas udah
+    # dicoba duluan (tapi gagal balik "tanggal_kirim" krn instruksinya juga
+    # nyebut perubahan item, jadi kedetect field lain / None).
+    tanggal_kirim_final = editing.get("tanggal_kirim")
+    tanggal_dari_instruksi = _parse_tanggal_kirim(instruction)
+    if tanggal_dari_instruksi:
+        tanggal_kirim_final = tanggal_dari_instruksi
+
     old_text = "\n".join(
         f"  - {i['rasa']} ({i['kategori']}) x{i['qty']}" for i in editing["existing_items"]
     ) or "  (kosong)"
@@ -2323,6 +2342,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         f"*Order Baru (setelah diedit):*\n{new_text}\n\n"
         f"Ongkir: {ongkir_rupiah}\n"
         f"{_format_kurir_line(editing)}"
+        f"Tanggal Kirim: {tanggal_kirim_final or editing['minggu_po']}\n"
         f"{_format_addon_line(editing)}"
         f"Catatan (packing): {editing.get('catatan') or '-'}\n"
         f"Ringkasan AI: {ai_edit_summary}\n\n"
@@ -2343,7 +2363,7 @@ async def handle_edit_instruction(update: Update, context: ContextTypes.DEFAULT_
         "items": new_items,
         "ongkir": ongkir_final,
         "minggu_po": editing["minggu_po"],
-        "tanggal_kirim": editing.get("tanggal_kirim"),
+        "tanggal_kirim": tanggal_kirim_final,
         "catatan": editing.get("catatan"),
         "kurir": editing.get("kurir"),
         "addon_jenis": editing.get("addon_jenis"),
