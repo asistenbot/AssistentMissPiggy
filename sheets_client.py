@@ -650,14 +650,15 @@ class SheetsClient:
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""
         return self.get_orders_by_month_range(year, month, year, month)
 
-    def get_orders_by_month_range(self, year_start: int, month_start: int, year_end: int, month_end: int):
-        """Filter berdasarkan Minggu_PO yang jatuh di rentang bulan year_start-month_start
-        sampai year_end-month_end (inklusif). Buat laporan bulanan yang minta
-        beberapa bulan sekaligus, misal '2 bulan ke belakang' atau 'Juli-Agustus'."""
+    def _filter_by_month_range(self, records, year_start: int, month_start: int, year_end: int, month_end: int):
+        """Helper bersama buat get_orders_by_month_range &
+        get_historis_orders_by_month_range -- filter list record APAPUN
+        (asal ada kolom Minggu_PO) berdasarkan rentang bulan year_start-
+        month_start sampai year_end-month_end (inklusif)."""
         start_key = year_start * 100 + month_start
         end_key = year_end * 100 + month_end
         result = []
-        for o in self.get_all_orders():
+        for o in records:
             teks = str(o.get("Minggu_PO")).strip()
             d = None
             for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
@@ -671,6 +672,30 @@ class SheetsClient:
                 if start_key <= key <= end_key:
                     result.append(o)
         return result
+
+    def get_orders_by_month_range(self, year_start: int, month_start: int, year_end: int, month_end: int):
+        """Filter berdasarkan Minggu_PO yang jatuh di rentang bulan year_start-month_start
+        sampai year_end-month_end (inklusif). Buat laporan bulanan yang minta
+        beberapa bulan sekaligus, misal '2 bulan ke belakang' atau 'Juli-Agustus'."""
+        return self._filter_by_month_range(self.get_all_orders(), year_start, month_start, year_end, month_end)
+
+    def get_historis_orders_by_month_range(self, year_start: int, month_start: int, year_end: int, month_end: int):
+        """Sama kayak get_orders_by_month_range, TAPI bacanya dari tab
+        OPSIONAL config.SHEET_RIWAYAT_HISTORIS ('Riwayat Historis') --
+        tempat admin mindahin baris qty historis (dari SEBELUM order
+        dicatet lewat bot) biar nggak ganggu pivot table/chart di Orders.
+        KHUSUS dipakai /laporanbulanan biar qty lama yang belum kebayar ke
+        supplier tetep ikut kehitung walau udah nggak ada di Orders lagi.
+
+        Kalau tab-nya nggak ada (belum pernah dibikin, atau namanya beda),
+        return list KOSONG aja -- JANGAN bikin /laporanbulanan ikutan error
+        gara-gara tab opsional ini nggak ketemu."""
+        try:
+            ws = self.sheet.worksheet(config.SHEET_RIWAYAT_HISTORIS)
+        except gspread.exceptions.WorksheetNotFound:
+            return []
+        records = self._normalize_records(ws)
+        return self._filter_by_month_range(records, year_start, month_start, year_end, month_end)
 
     # ---------- PRICE LIST ----------
 

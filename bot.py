@@ -1114,6 +1114,18 @@ async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             asyncio.to_thread(sheets.get_orders_by_month_range, year_start, month_start, year_end, month_end),
             timeout=20,
         )
+        # Ikut gabungin qty dari tab OPSIONAL "Riwayat Historis" (kalau ada)
+        # -- itu tempat admin mindahin baris qty historis lama (dari
+        # SEBELUM order dicatet lewat bot) biar nggak ganggu pivot
+        # table/chart di Orders. Tanpa ini, qty lama yang belum kebayar ke
+        # supplier bakal keitung ilang begitu dipindah keluar dari Orders.
+        orders_historis = await asyncio.wait_for(
+            asyncio.to_thread(
+                sheets.get_historis_orders_by_month_range, year_start, month_start, year_end, month_end
+            ),
+            timeout=20,
+        )
+        orders = orders + orders_historis
         dough_price_map = await asyncio.wait_for(
             asyncio.to_thread(sheets.get_dough_price_map), timeout=20
         )

@@ -100,6 +100,18 @@ lalu bikin 3 tab (sheet) di dalemnya dengan nama & kolom PERSIS seperti ini:
 Isi ini manual dulu sesuai harga jual lo per rasa. Bot bakal baca harga dari
 sini tiap kali bikin invoice.
 
+### Tab `Riwayat Historis` (OPSIONAL)
+Sama persis kolomnya kayak tab `Orders` (boleh copy-paste header + baris dari
+situ). Ini tempat naruh baris qty historis LAMA (misal dari sebelum order
+dicatet lewat bot, cuma keisi Kategori+Qty per minggu, tanpa Rasa/harga) yang
+dipindah keluar dari `Orders` biar nggak numpuk/ganggu Pivot Table & Chart
+yang lo bikin sendiri di Sheets. `/rekap` dan fitur lain SAMA SEKALI nggak
+baca tab ini (cuma baca `Orders`) -- KECUALI `/laporanbulanan`, yang ikut
+gabungin qty dari sini juga (berdasarkan `Minggu_PO`), biar qty lama yang
+belum kebayar ke supplier tetep kehitung walau udah nggak ada di `Orders`
+lagi. Tab ini boleh nggak ada sama sekali (nggak wajib) -- kalau nggak ada,
+bot tetep jalan normal, `/laporanbulanan` cuma baca dari `Orders` doang.
+
 ### Tab `SupplierDough`
 | Kategori | Harga_Dough_Per_Unit |
 |---|---|

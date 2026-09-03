@@ -65,6 +65,13 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SHEET_ORDERS = "Orders"
 SHEET_PRICELIST = "PriceList"
 SHEET_SUPPLIER_DOUGH = "SupplierDough"
+# Tab OPSIONAL berisi data qty historis (per kategori, dari SEBELUM order
+# dicatet lewat bot) yang dipindahin admin keluar dari Orders biar nggak
+# ganggu pivot table/chart di situ -- /laporanbulanan tetep ikut baca tab
+# ini (gabung sama Orders) biar qty lama yang belum kebayar ke supplier
+# nggak keitung ilang. Kalau tabnya nggak ada, bot tetep jalan normal aja
+# (dianggap kosong, nggak error).
+SHEET_RIWAYAT_HISTORIS = "Riwayat Historis"
 
 # ==== TIMEZONE ====
 TIMEZONE = "Asia/Jakarta"
