@@ -216,17 +216,35 @@ async def _kirim_teks_ke(context, update, tujuan, text, parse_mode="Markdown", r
 
 
 async def _kirim_foto_ke(context, update, tujuan, photo, caption):
-    """Sama kayak _kirim_teks_ke, versi FOTO (invoice/surat jalan)."""
+    """Sama kayak _kirim_teks_ke, versi FOTO (invoice/surat jalan).
+
+    Kalau send_photo gagal (paling sering gara-gara Telegram nolak foto yang
+    rasio tinggi:lebar-nya kelewat ekstrim -- misal surat jalan order yang
+    itemnya buanyak banget jadi gambarnya kepanjangan), coba lagi kirim
+    sebagai DOKUMEN (send_document nggak punya batasan rasio/dimensi kayak
+    foto). Kalau itu juga gagal, SELALU kasih tau ke chat asal -- SEBELUMNYA
+    cuma dikasih tau kalau chat_id beda dari chat yang lagi confirm, jadi di
+    kasus paling umum (nggak ada grup/topic terpisah) kegagalan ini BENERAN
+    diem-diem aja, admin nggak pernah tau surat jalan/invoice-nya gak
+    kekirim."""
     chat_id, thread_id = tujuan
     try:
         await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption, message_thread_id=thread_id)
+        return
     except Exception as e:
-        logger.error(f"Gagal kirim foto ke chat {chat_id} (topic {thread_id}): {e}")
-        if chat_id != update.effective_chat.id:
-            await update.effective_chat.send_message(
-                f"⚠️ Gagal kirim '{caption}' ke grup/topic tujuan: {e}\n"
-                "Cek bot udah di-invite & jadi admin di situ belum."
-            )
+        logger.error(f"Gagal kirim foto ke chat {chat_id} (topic {thread_id}), coba kirim sebagai dokumen: {e}")
+
+    try:
+        if hasattr(photo, "seek"):
+            photo.seek(0)
+        await context.bot.send_document(chat_id=chat_id, document=photo, caption=caption, message_thread_id=thread_id)
+    except Exception as e2:
+        logger.error(f"Tetap gagal kirim '{caption}' ke chat {chat_id} (topic {thread_id}) sebagai dokumen: {e2}")
+        await update.effective_chat.send_message(
+            f"⚠️ Gagal kirim '{caption}': {e2}\n"
+            "Coba /invoice atau /suratjalan lagi buat generate ulang, atau cek bot udah "
+            "di-invite & jadi admin di grup/topic tujuan belum."
+        )
 
 
 def build_confirm_keyboard(parsed, order_id):
@@ -282,7 +300,14 @@ async def _send_or_update_preview(context, update, parsed, order_id, preview_tex
 
     Kalau belum ada pesan lama (order baru) ATAU edit ke pesan lama gagal
     (misal keburu dihapus admin manual / lebih dari 48 jam), fallback
-    kirim pesan BARU dan simpen id-nya buat koreksi berikutnya."""
+    kirim pesan BARU dan simpen id-nya buat koreksi berikutnya.
+
+    Sama kayak _kirim_teks_ke: kalau Markdown gagal parse (misal alamat/
+    catatan customer kebetulan ada karakter '_'/'*'/'[' yang bikin Telegram
+    nolak seluruh pesan), coba lagi versi POLOS (parse_mode=None) sebelum
+    bener-bener nyerah -- SEBELUMNYA nggak ada fallback ini sama sekali,
+    jadi kalau Markdown-nya gagal, tombol Simpan/Batal BENERAN nggak pernah
+    nongol ke admin (bukan cuma nggak responsif pas diklik)."""
     chat_id = parsed.get("_preview_chat_id")
     msg_id = parsed.get("_preview_msg_id")
     if chat_id and msg_id:
@@ -294,9 +319,34 @@ async def _send_or_update_preview(context, update, parsed, order_id, preview_tex
             _store_pending_order(context, parsed, order_id)
             return
         except Exception as e:
-            logger.error(f"Gagal edit preview lama order {order_id}, kirim pesan baru: {e}")
+            logger.error(f"Gagal edit preview lama order {order_id} (Markdown), coba versi polos: {e}")
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id, text=preview_text,
+                    parse_mode=None, reply_markup=keyboard,
+                )
+                _store_pending_order(context, parsed, order_id)
+                return
+            except Exception as e2:
+                logger.error(f"Tetap gagal edit preview lama order {order_id} (polos), kirim pesan baru: {e2}")
 
-    sent = await update.message.reply_text(preview_text, parse_mode="Markdown", reply_markup=keyboard)
+    try:
+        sent = await update.message.reply_text(preview_text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Gagal kirim preview baru order {order_id} (Markdown), coba versi polos: {e}")
+        try:
+            sent = await update.message.reply_text(preview_text, parse_mode=None, reply_markup=keyboard)
+            await update.message.reply_text(
+                "⚠️ Preview di atas formatnya jadi polos (ada karakter yang bikin format tebal gagal), "
+                "tapi tombol Simpan/Batal-nya tetep aktif normal."
+            )
+        except Exception as e2:
+            logger.error(f"Tetap gagal kirim preview baru order {order_id} (polos): {e2}")
+            await update.message.reply_text(
+                f"⚠️ Gagal nampilin preview order (order_id: {order_id}). Coba /edit atau kirim ulang "
+                f"chat order-nya. Error: {e2}"
+            )
+            return
     if sent:
         parsed["_preview_chat_id"] = sent.chat_id
         parsed["_preview_msg_id"] = sent.message_id
