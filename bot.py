@@ -815,11 +815,21 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="Markdown")
         return
 
-    img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
-    caption = "Invoice (siap kirim ke customer)"
-    if catatan_minggu_lama:
-        caption += f"\n⚠️ Order dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang)."
-    await _kirim_foto_ke(context, update, _tujuan_invoice(update), img, caption)
+    # DIBUNGKUS try/except -- SEBELUMNYA kalau generate_invoice_image gagal
+    # (misal data order-nya ada yang aneh), exception-nya nggak ketangkep
+    # sama sekali di sini DAN bot ini nggak punya error handler global (lihat
+    # main()/error_handler di bawah) -- jadi admin ketik /invoice atau bilang
+    # "invoice [nama]" dan BENERAN nggak ada respon apa pun, diem total,
+    # kayak command-nya nggak pernah kepencet.
+    try:
+        img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
+        caption = "Invoice (siap kirim ke customer)"
+        if catatan_minggu_lama:
+            caption += f"\n⚠️ Order dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang)."
+        await _kirim_foto_ke(context, update, _tujuan_invoice(update), img, caption)
+    except Exception as e:
+        logger.error(f"Gagal generate invoice buat {nama}: {e}")
+        await update.message.reply_text(f"⚠️ Gagal generate invoice buat {nama}: {e}")
 
 
 @owner_only
@@ -851,13 +861,22 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (json.JSONDecodeError, TypeError):
             box_groups = None
 
-    img = receipt.generate_surat_jalan_image(nama, minggu_po, orders, box_groups=box_groups)
-    caption = "Surat jalan (siap print) — tap gambar → Share → app printer"
-    if catatan_minggu_lama:
-        caption += f"\n⚠️ Order dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang)."
-    await _kirim_foto_ke(
-        context, update, _tujuan_suratjalan(update), img, caption,
-    )
+    # DIBUNGKUS try/except -- sama kayak invoice_cmd di atas. Ini PERSIS
+    # jenis kegagalan yang bikin '/suratjalan Veronica' (atau versi natural
+    # 'surat jalan veronica') keliatan diem total nggak ada respon: kalau
+    # generate_surat_jalan_image gagal, sebelumnya nggak ada apa pun yang
+    # dikirim balik ke admin sama sekali.
+    try:
+        img = receipt.generate_surat_jalan_image(nama, minggu_po, orders, box_groups=box_groups)
+        caption = "Surat jalan (siap print) — tap gambar → Share → app printer"
+        if catatan_minggu_lama:
+            caption += f"\n⚠️ Order dari minggu PO {catatan_minggu_lama} (bukan minggu aktif sekarang)."
+        await _kirim_foto_ke(
+            context, update, _tujuan_suratjalan(update), img, caption,
+        )
+    except Exception as e:
+        logger.error(f"Gagal generate surat jalan buat {nama}: {e}")
+        await update.message.reply_text(f"⚠️ Gagal generate surat jalan buat {nama}: {e}")
 
 
 async def _tandai_terkirim(update: Update, nama: str):
@@ -1637,87 +1656,115 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     saving_flags.add(order_id)
 
-    parsed = _get_pending_order_by_id(context, order_id)
-    if not parsed or not parsed.get("items"):
-        await query.edit_message_text("Nggak ada data order yang tersimpan. Kirim ulang chat-nya ya.")
-        saving_flags.discard(order_id)
-        return
-
-    await query.edit_message_text("Menyimpan...")
-
-    order = {
-        "nama": parsed.get("nama") or "Tanpa Nama",
-        "no_hp": parsed.get("no_hp") or "-",
-        "alamat": parsed.get("alamat") or "-",
-        "metode": parsed.get("metode") or "Ambil",
-        "items": [
-            {"kategori": i["kategori"], "rasa": i["rasa"], "qty": int(i["qty"])}
-            for i in parsed["items"]
-        ],
-        "ongkir": int(parsed.get("ongkir") or 0),
-        "tanggal_kirim": parsed.get("tanggal_kirim"),
-        "catatan": parsed.get("catatan"),
-        "kurir": parsed.get("kurir"),
-        "addon_jenis": parsed.get("addon_jenis"),
-        "addon_qty": parsed.get("addon_qty"),
-        "addon_total": parsed.get("addon_total"),
-    }
-
-    sheets = get_sheets_client()
-    minggu_po = date_helpers.current_po_week_thursday()
-
+    # SEMUA logic di bawah DIBUNGKUS try/finally biar order_id ini DIJAMIN
+    # dilepas lagi dari saving_flags -- APAPUN yang kejadian di dalem
+    # (termasuk generate_invoice_image/generate_surat_jalan_image yang
+    # SEBELUMNYA nggak dibungkus try/except sama sekali). Kalau salah satu
+    # dari itu throw exception nggak ke-antisipasi (misal gambar surat jalan
+    # kepanjangan buat order item-nya banyak), sebelumnya order_id ini
+    # NYANGKUT selamanya di saving_flags -> tombol Konfirmasi order itu
+    # keliatan "gak ngefek" kalau diklik ulang, dan invoice/surat jalan yang
+    # belum sempet kekirim juga nggak pernah retry/dikasih tau ke admin.
     try:
-        orders = await asyncio.wait_for(
-            asyncio.to_thread(sheets.add_order_rows, order, minggu_po, parsed.get("box_groups")), timeout=30
-        )
-    except asyncio.TimeoutError:
-        await query.message.reply_text(
-            "Timeout — gagal simpan ke Sheets (lebih dari 30 detik). "
-            "Cek koneksi Google Sheets, lalu kirim ulang chat order-nya."
-        )
+        parsed = _get_pending_order_by_id(context, order_id)
+        if not parsed or not parsed.get("items"):
+            await query.edit_message_text("Nggak ada data order yang tersimpan. Kirim ulang chat-nya ya.")
+            return
+
+        await query.edit_message_text("Menyimpan...")
+
+        order = {
+            "nama": parsed.get("nama") or "Tanpa Nama",
+            "no_hp": parsed.get("no_hp") or "-",
+            "alamat": parsed.get("alamat") or "-",
+            "metode": parsed.get("metode") or "Ambil",
+            "items": [
+                {"kategori": i["kategori"], "rasa": i["rasa"], "qty": int(i["qty"])}
+                for i in parsed["items"]
+            ],
+            "ongkir": int(parsed.get("ongkir") or 0),
+            "tanggal_kirim": parsed.get("tanggal_kirim"),
+            "catatan": parsed.get("catatan"),
+            "kurir": parsed.get("kurir"),
+            "addon_jenis": parsed.get("addon_jenis"),
+            "addon_qty": parsed.get("addon_qty"),
+            "addon_total": parsed.get("addon_total"),
+        }
+
+        sheets = get_sheets_client()
+        minggu_po = date_helpers.current_po_week_thursday()
+
+        try:
+            orders = await asyncio.wait_for(
+                asyncio.to_thread(sheets.add_order_rows, order, minggu_po, parsed.get("box_groups")), timeout=30
+            )
+        except asyncio.TimeoutError:
+            await query.message.reply_text(
+                "Timeout — gagal simpan ke Sheets (lebih dari 30 detik). "
+                "Cek koneksi Google Sheets, lalu kirim ulang chat order-nya."
+            )
+            return
+        except Exception as e:
+            await query.message.reply_text(f"Gagal simpan ke Sheets: {e}\nKirim ulang chat-nya ya.")
+            return
+
+        await query.message.reply_text("Tersimpan!")
+
+        harga_kosong = sorted(set(
+            o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0
+        ))
+        if harga_kosong:
+            await query.message.reply_text(
+                "⚠️ PERHATIAN: harga Rp0 untuk " + ", ".join(harga_kosong) + ". "
+                "Kemungkinan nama rasa/kategori itu nggak ketemu persis di PriceList. "
+                "Cek & benerin manual di Google Sheets ya."
+            )
+
+        # Invoice & surat jalan DIPISAH ke 2 grup TUJUAN beda (admin invoice /
+        # admin surat jalan) kalau udah di-setting -- biar nggak numplek di 1
+        # tempat sama pesan status ("Menyimpan...", "Tersimpan!") yang tetep di
+        # sini (chat/grup tempat order-nya diproses). box_groups (rincian
+        # pembagian per box, kalau order-nya pakai satuan box) ikut dioper ke
+        # invoice & surat jalan biar ada section tambahan "Rincian Box" -- cuma
+        # tersedia SEKALI di titik konfirmasi ini (nggak kesimpen ke Sheets),
+        # jadi kalau invoice/surat jalan ini di-generate ULANG lewat /invoice
+        # atau /suratjalan nanti, rincian box-nya nggak ikut muncul lagi.
+        #
+        # DIBUNGKUS try/except MASING2 (bukan 1 try gede) biar kalau salah
+        # satu gagal generate, yang satunya TETEP jalan, dan admin SELALU
+        # dikasih tau lewat chat -- data Sheets-nya sendiri udah aman
+        # kesimpen duluan di atas, jadi ini cuma soal gambar yang perlu
+        # di-generate ulang manual kalau gagal.
+        try:
+            invoice_img = invoice_image.generate_invoice_image(
+                order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups")
+            )
+            await _kirim_foto_ke(context, update, _tujuan_invoice(update), invoice_img, "Invoice (siap kirim ke customer)")
+        except Exception as e:
+            logger.error(f"Gagal generate/kirim invoice buat order baru {order['nama']}: {e}")
+            await query.message.reply_text(
+                f"⚠️ Order udah tersimpan, tapi gagal generate INVOICE: {e}\n"
+                f"Coba /invoice {order['nama']}"
+            )
+
+        try:
+            img = receipt.generate_surat_jalan_image(
+                order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups")
+            )
+            await _kirim_foto_ke(
+                context, update, _tujuan_suratjalan(update), img,
+                "Surat jalan (siap print) — tap gambar → Share → app printer",
+            )
+        except Exception as e:
+            logger.error(f"Gagal generate/kirim surat jalan buat order baru {order['nama']}: {e}")
+            await query.message.reply_text(
+                f"⚠️ Order udah tersimpan, tapi gagal generate SURAT JALAN: {e}\n"
+                f"Coba /suratjalan {order['nama']}"
+            )
+
+        _clear_pending_order_by_id(context, order_id)
+    finally:
         saving_flags.discard(order_id)
-        return
-    except Exception as e:
-        await query.message.reply_text(f"Gagal simpan ke Sheets: {e}\nKirim ulang chat-nya ya.")
-        saving_flags.discard(order_id)
-        return
-
-    await query.message.reply_text("Tersimpan!")
-
-    harga_kosong = sorted(set(
-        o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0
-    ))
-    if harga_kosong:
-        await query.message.reply_text(
-            "⚠️ PERHATIAN: harga Rp0 untuk " + ", ".join(harga_kosong) + ". "
-            "Kemungkinan nama rasa/kategori itu nggak ketemu persis di PriceList. "
-            "Cek & benerin manual di Google Sheets ya."
-        )
-
-    # Invoice & surat jalan DIPISAH ke 2 grup TUJUAN beda (admin invoice /
-    # admin surat jalan) kalau udah di-setting -- biar nggak numplek di 1
-    # tempat sama pesan status ("Menyimpan...", "Tersimpan!") yang tetep di
-    # sini (chat/grup tempat order-nya diproses). box_groups (rincian
-    # pembagian per box, kalau order-nya pakai satuan box) ikut dioper ke
-    # invoice & surat jalan biar ada section tambahan "Rincian Box" -- cuma
-    # tersedia SEKALI di titik konfirmasi ini (nggak kesimpen ke Sheets),
-    # jadi kalau invoice/surat jalan ini di-generate ULANG lewat /invoice
-    # atau /suratjalan nanti, rincian box-nya nggak ikut muncul lagi.
-    invoice_img = invoice_image.generate_invoice_image(
-        order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups")
-    )
-    await _kirim_foto_ke(context, update, _tujuan_invoice(update), invoice_img, "Invoice (siap kirim ke customer)")
-
-    img = receipt.generate_surat_jalan_image(
-        order["nama"], minggu_po, orders, box_groups=parsed.get("box_groups")
-    )
-    await _kirim_foto_ke(
-        context, update, _tujuan_suratjalan(update), img,
-        "Surat jalan (siap print) — tap gambar → Share → app printer",
-    )
-
-    _clear_pending_order_by_id(context, order_id)
-    saving_flags.discard(order_id)
 
 
 async def handle_set_ongkir(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2457,90 +2504,119 @@ async def handle_edit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     context.user_data["saving_in_progress"] = True
 
-    pending = context.user_data.get("pending_edit")
-    if not pending:
-        await query.edit_message_text("Data edit nggak ketemu, coba /edit lagi.")
-        context.user_data["saving_in_progress"] = False
-        return
+    # SEMUA logic di bawah ini DIBUNGKUS try/finally biar
+    # "saving_in_progress" nya DIJAMIN balik ke False lagi -- APAPUN yang
+    # kejadian di dalem (termasuk error yang nggak ke-antisipasi kayak
+    # generate gambar invoice/surat jalan gagal). SEBELUMNYA, reset flag ini
+    # ditulis manual satu-satu di tiap return -- kalau ada 1 baris kode di
+    # antaranya yang throw exception (khususnya generate_invoice_image /
+    # generate_surat_jalan_image yang emang belum pernah dibungkus try/except
+    # sama sekali), flag ini NYANGKUT True SELAMANYA (nggak ke-reset sampai
+    # bot di-restart), dan efeknya SEMUA tombol "Konfirmasi Edit" admin ini
+    # abis itu (buat order APA AJA, bukan cuma yang error) keliatan kayak
+    # "gak ngefek pas diklik" -- padahal beneran diterima Telegram, cuma
+    # langsung di-block sama pengecekan di atas.
+    try:
+        pending = context.user_data.get("pending_edit")
+        if not pending:
+            await query.edit_message_text("Data edit nggak ketemu, coba /edit lagi.")
+            return
 
-    await query.edit_message_text("Menyimpan perubahan...")
+        await query.edit_message_text("Menyimpan perubahan...")
 
-    sheets = get_sheets_client()
-    nama = pending["nama"]
-    old_nama = pending.get("original_nama", nama)
-    minggu_po = pending["minggu_po"]
+        sheets = get_sheets_client()
+        nama = pending["nama"]
+        old_nama = pending.get("original_nama", nama)
+        minggu_po = pending["minggu_po"]
 
-    if not pending["items"]:
-        # Semua item dihapus lewat instruksi -> ini PEMBATALAN TOTAL, bukan
-        # edit biasa. Cukup hapus baris di Sheets, JANGAN ditulis ulang
-        # (kosong) dan JANGAN generate invoice/surat jalan (nggak ada apa-apa
-        # buat dikirim ke customer yang udah batal).
+        if not pending["items"]:
+            # Semua item dihapus lewat instruksi -> ini PEMBATALAN TOTAL, bukan
+            # edit biasa. Cukup hapus baris di Sheets, JANGAN ditulis ulang
+            # (kosong) dan JANGAN generate invoice/surat jalan (nggak ada apa-apa
+            # buat dikirim ke customer yang udah batal).
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(sheets.delete_customer_week_rows, old_nama, minggu_po), timeout=30
+                )
+            except asyncio.TimeoutError:
+                await query.message.reply_text(
+                    "Timeout pas ngehapus order. Cek manual di Google Sheets ya."
+                )
+                return
+            except Exception as e:
+                await query.message.reply_text(f"Gagal batalin order: {e}\nCek manual di Sheets ya.")
+                return
+
+            await query.message.reply_text(
+                f"Order {nama} berhasil DIBATALIN & dihapus dari Sheets minggu ini."
+            )
+            context.user_data.pop("editing_order", None)
+            context.user_data.pop("pending_edit", None)
+            return
+
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(sheets.delete_customer_week_rows, old_nama, minggu_po), timeout=30
+            orders = await asyncio.wait_for(
+                asyncio.to_thread(_rewrite_customer_order, sheets, pending), timeout=30
             )
         except asyncio.TimeoutError:
             await query.message.reply_text(
-                "Timeout pas ngehapus order. Cek manual di Google Sheets ya."
+                "Timeout pas nyimpen perubahan. PENTING: cek manual di Google Sheets, "
+                "soalnya order lama mungkin udah kehapus tapi yang baru belum sempet ditulis. "
+                "Kalau perlu, input ulang manual dulu."
             )
-            context.user_data["saving_in_progress"] = False
             return
         except Exception as e:
-            await query.message.reply_text(f"Gagal batalin order: {e}\nCek manual di Sheets ya.")
-            context.user_data["saving_in_progress"] = False
+            await query.message.reply_text(f"Gagal simpan perubahan: {e}\nCek manual di Sheets ya.")
             return
 
-        await query.message.reply_text(
-            f"Order {nama} berhasil DIBATALIN & dihapus dari Sheets minggu ini."
-        )
+        await query.message.reply_text("Order berhasil diupdate!")
+
+        harga_kosong = sorted(set(
+            o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0
+        ))
+        if harga_kosong:
+            await query.message.reply_text(
+                "⚠️ PERHATIAN: harga Rp0 untuk " + ", ".join(harga_kosong) + ". "
+                "Kemungkinan nama rasa/kategori itu nggak ketemu persis di PriceList. "
+                "Cek & benerin manual di Google Sheets ya."
+            )
+
+        # Generate & kirim invoice/surat jalan -- DIBUNGKUS try/except MASING2
+        # (bukan 1 try gede) biar kalau salah satu gagal generate (misal
+        # gambarnya kepanjangan/error lain), yang satunya TETEP jalan, dan
+        # admin SELALU dikasih tau lewat chat -- bukan diem2 gagal kayak
+        # sebelumnya (data Sheets-nya udah kesimpen duluan di atas, jadi
+        # nggak ada resiko data ilang, cuma gambarnya yang perlu di-generate
+        # ulang manual).
+        try:
+            invoice_img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
+            await _kirim_foto_ke(
+                context, update, _tujuan_invoice(update), invoice_img, "Invoice terbaru (siap kirim ke customer)"
+            )
+        except Exception as e:
+            logger.error(f"Gagal generate/kirim invoice abis edit order {nama}: {e}")
+            await query.message.reply_text(
+                f"⚠️ Data udah tersimpan, tapi gagal generate ulang INVOICE: {e}\n"
+                f"Coba /invoice {nama}"
+            )
+
+        try:
+            img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
+            await _kirim_foto_ke(
+                context, update, _tujuan_suratjalan(update), img,
+                "Surat jalan terbaru (siap print) — tap gambar → Share → app printer",
+            )
+        except Exception as e:
+            logger.error(f"Gagal generate/kirim surat jalan abis edit order {nama}: {e}")
+            await query.message.reply_text(
+                f"⚠️ Data udah tersimpan, tapi gagal generate ulang SURAT JALAN: {e}\n"
+                f"Coba /suratjalan {nama}"
+            )
+
         context.user_data.pop("editing_order", None)
         context.user_data.pop("pending_edit", None)
+    finally:
         context.user_data["saving_in_progress"] = False
-        return
-
-    try:
-        orders = await asyncio.wait_for(
-            asyncio.to_thread(_rewrite_customer_order, sheets, pending), timeout=30
-        )
-    except asyncio.TimeoutError:
-        await query.message.reply_text(
-            "Timeout pas nyimpen perubahan. PENTING: cek manual di Google Sheets, "
-            "soalnya order lama mungkin udah kehapus tapi yang baru belum sempet ditulis. "
-            "Kalau perlu, input ulang manual dulu."
-        )
-        context.user_data["saving_in_progress"] = False
-        return
-    except Exception as e:
-        await query.message.reply_text(f"Gagal simpan perubahan: {e}\nCek manual di Sheets ya.")
-        context.user_data["saving_in_progress"] = False
-        return
-
-    await query.message.reply_text("Order berhasil diupdate!")
-
-    harga_kosong = sorted(set(
-        o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0
-    ))
-    if harga_kosong:
-        await query.message.reply_text(
-            "⚠️ PERHATIAN: harga Rp0 untuk " + ", ".join(harga_kosong) + ". "
-            "Kemungkinan nama rasa/kategori itu nggak ketemu persis di PriceList. "
-            "Cek & benerin manual di Google Sheets ya."
-        )
-
-    invoice_img = invoice_image.generate_invoice_image(nama, minggu_po, orders)
-    await _kirim_foto_ke(
-        context, update, _tujuan_invoice(update), invoice_img, "Invoice terbaru (siap kirim ke customer)"
-    )
-
-    img = receipt.generate_surat_jalan_image(nama, minggu_po, orders)
-    await _kirim_foto_ke(
-        context, update, _tujuan_suratjalan(update), img,
-        "Surat jalan terbaru (siap print) — tap gambar → Share → app printer",
-    )
-
-    context.user_data.pop("editing_order", None)
-    context.user_data.pop("pending_edit", None)
-    context.user_data["saving_in_progress"] = False
 
 
 def _rewrite_customer_order(sheets, pending):
@@ -2567,6 +2643,44 @@ def _rewrite_customer_order(sheets, pending):
         "addon_total": pending.get("addon_total"),
     }
     return sheets.add_order_rows(order, pending["minggu_po"])
+
+
+async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """Jaring pengaman TERAKHIR -- kepanggil kalau ada exception yang lolos
+    dari SEMUA try/except di handler mana pun (termasuk kasus yang belum
+    kepikiran/belum di-cover satu-satu). Tanpa ini, python-telegram-bot
+    default-nya cuma nge-log error ke server (invisible buat admin) terus
+    diem -- itu akar dari beberapa laporan "kok gak ada respon apa pun abis
+    gua ketik/klik sesuatu" (misal /suratjalan atau versi bahasa natural
+    "surat jalan [nama]" yang generate gambarnya gagal). SEKARANG, exception
+    APA PUN yang kejadian di mana pun, admin PASTI dikasih tau di chat
+    asalnya -- atau ke semua admin (OWNER_TELEGRAM_IDS) kalau nggak ada chat
+    asal yang jelas (misal error dari job terjadwal, bukan dari chat)."""
+    logger.error("Unhandled exception dari update %s:", update, exc_info=context.error)
+
+    pesan = (
+        f"⚠️ Ada error yang nggak ketangkep di kode: {context.error}\n"
+        "Coba ulangi lagi. Kalau berulang terus, kasih tau developer bot-nya."
+    )
+
+    chat_id = None
+    if isinstance(update, Update) and update.effective_chat:
+        chat_id = update.effective_chat.id
+
+    if chat_id:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=pesan)
+            return
+        except Exception:
+            pass
+
+    # Fallback: langsung ke semua admin kalau nggak ada chat asal yang jelas,
+    # atau kalau ngirim ke chat asal di atas SENDIRI ikutan gagal.
+    for owner_id in config.OWNER_TELEGRAM_IDS:
+        try:
+            await context.bot.send_message(chat_id=owner_id, text=pesan)
+        except Exception:
+            pass
 
 
 async def on_startup(app: Application):
@@ -2612,6 +2726,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_error_handler(global_error_handler)
 
     logger.info("Bot jalan...")
     app.run_polling()
