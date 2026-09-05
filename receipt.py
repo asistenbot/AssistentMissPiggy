@@ -53,20 +53,32 @@ def _is_delivery_metode(metode):
 
 
 def _wrap_text(text, font, max_width, draw):
-    words = text.split(" ")
-    lines = []
-    current = ""
-    for w in words:
-        test = (current + " " + w).strip()
-        if draw.textlength(test, font=font) <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = w
-    if current:
-        lines.append(current)
-    return lines or [""]
+    """Word-wrap `text` biar muat di `max_width`. Dipecah per BARIS ASLI
+    dulu (split "\\n") SEBELUM di-word-wrap per kata -- soalnya
+    draw.textlength() dari Pillow itu nolak TOTAL (raise ValueError "can't
+    measure length of multiline text") kalau dikasih string yang ada
+    karakter baris barunya. Alamat/catatan yang customer/admin ketik
+    multi-baris (lumayan sering kejadian, misal alamat 2 baris) sebelumnya
+    bikin generate_surat_jalan_image() CRASH TOTAL gara-gara ini -- baris
+    barunya kebawa utuh ke draw.textlength() lewat text.split(" ") yang
+    emang cuma misahin per SPASI, bukan per baris."""
+    all_lines = []
+    for raw_line in text.split("\n"):
+        words = raw_line.split(" ")
+        lines = []
+        current = ""
+        for w in words:
+            test = (current + " " + w).strip()
+            if draw.textlength(test, font=font) <= max_width:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                current = w
+        if current:
+            lines.append(current)
+        all_lines.extend(lines or [""])
+    return all_lines or [""]
 
 
 def _group_by_category(orders):

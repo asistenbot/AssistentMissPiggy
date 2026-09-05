@@ -62,21 +62,32 @@ def _dashed_line(draw, x1, y, x2, color, dash=5, gap=4, width=1):
 def _wrap_text(text, font, max_width, draw):
     """Pecah teks jadi beberapa baris biar nggak kepotong keluar canvas --
     dipakai buat baris 'Rincian Box' yang panjangnya nggak nentu (nggak
-    kayak nama produk yang udah dipotong manual jadi 18 karakter)."""
-    words = text.split(" ")
-    lines = []
-    current = ""
-    for w in words:
-        test = (current + " " + w).strip()
-        if draw.textlength(test, font=font) <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = w
-    if current:
-        lines.append(current)
-    return lines or [""]
+    kayak nama produk yang udah dipotong manual jadi 18 karakter).
+
+    Dipecah per BARIS ASLI dulu (split "\\n") SEBELUM di-word-wrap per kata
+    -- draw.textlength() dari Pillow nolak TOTAL (raise ValueError "can't
+    measure length of multiline text") kalau dikasih string yang ada
+    karakter baris barunya. Sama persis kayak bug yang bikin
+    generate_surat_jalan_image() crash total di receipt.py -- dibenerin di
+    sini juga biar invoice-nya nggak kena kasus yang sama kalau kebetulan
+    ada teks multi-baris yang lewat sini."""
+    all_lines = []
+    for raw_line in text.split("\n"):
+        words = raw_line.split(" ")
+        lines = []
+        current = ""
+        for w in words:
+            test = (current + " " + w).strip()
+            if draw.textlength(test, font=font) <= max_width:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                current = w
+        if current:
+            lines.append(current)
+        all_lines.extend(lines or [""])
+    return all_lines or [""]
 
 
 def _format_box_group_lines(box_groups, font, max_width, draw):
