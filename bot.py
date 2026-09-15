@@ -24,7 +24,10 @@ import invoice_image
 import monthly_report_pdf
 import production_recap_pdf
 from sheets_client import get_sheets_client
-from ai_parser import parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent
+from ai_parser import (
+    parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
+    parse_produk_baru,
+)
 from scheduler_jobs import setup_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -411,6 +414,195 @@ def _get_active_pending_order(context):
     if parsed is None:
         return None, None
     return order_id, parsed
+
+
+# ---------- PRODUK BARU (tambah kategori/rasa baru ke PriceList via chat bebas) ----------
+#
+# Alurnya sengaja dibikin PERSIS kayak alur order (parse AI -> preview +
+# tombol Simpan/Batal -> baru nulis ke Sheets pas dikonfirm), termasuk
+# pola try/finally di handle_produk_baru_confirm (lihat handle_confirm) --
+# biar KELAS BUG yang sama (flag "lagi nyimpen" nyangkut gara-gara exception
+# nggak ke-tangkep pas generate/nulis) nggak keulang lagi di fitur baru ini.
+
+def _store_pending_produk_baru(context, data, pid=None):
+    pending = context.bot_data.setdefault("pending_produk_baru", {})
+    if pid is None:
+        pid = _new_order_id()
+    pending[pid] = data
+    return pid
+
+
+def _get_pending_produk_baru(context, pid):
+    if not pid:
+        return None
+    return context.bot_data.get("pending_produk_baru", {}).get(pid)
+
+
+def _clear_pending_produk_baru(context, pid):
+    context.bot_data.get("pending_produk_baru", {}).pop(pid, None)
+
+
+def _build_produk_baru_preview_text(data, kategori_baru):
+    harga_jual = data.get("harga_jual")
+    harga_dough = data.get("harga_dough")
+    lines = [
+        "*Produk Baru — Konfirmasi*",
+        "",
+        f"Kategori: *{data.get('kategori')}*" + ("  (kategori BARU)" if kategori_baru else "  (kategori udah ada)"),
+        f"Rasa: *{data.get('rasa')}*",
+        f"Harga Jual: *{documents.rupiah(harga_jual)}*",
+    ]
+    if harga_dough not in (None, ""):
+        lines.append(f"Harga Dough (supplier): *{documents.rupiah(harga_dough)}*")
+    elif kategori_baru:
+        lines.append(
+            "Harga Dough (supplier): _belum diisi_ — kategori ini baru, "
+            "jangan lupa isi manual di tab SupplierDough kalau perlu."
+        )
+    lines.append("")
+    lines.append("Simpan ke PriceList" + (" & SupplierDough" if (kategori_baru and harga_dough not in (None, "")) else "") + "?")
+    return "\n".join(lines)
+
+
+def build_produk_baru_keyboard(pid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Simpan", callback_data=f"confirm_produk:{pid}"),
+        InlineKeyboardButton("❌ Batal", callback_data=f"cancel_produk:{pid}"),
+    ]])
+
+
+async def _mulai_produk_baru(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_text: str):
+    """Dipanggil dari handle_text pas classify_intent() nangkep intent
+    'produk_baru' (admin chat bebas mau nambahin produk/kategori baru).
+    Parse detailnya, lalu kalau lengkap tampilin preview + tombol
+    Simpan/Batal (BELUM nulis ke Sheets sama sekali di sini)."""
+    sheets = get_sheets_client()
+    try:
+        existing_categories = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_existing_categories), timeout=15
+        )
+    except Exception as e:
+        logger.error(f"Gagal ambil daftar kategori existing buat parsing produk baru: {e}")
+        existing_categories = None  # tetep lanjut, AI cuma nggak dikasih konteks kategori lama
+
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(parse_produk_baru, raw_text, existing_categories), timeout=40
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Timeout — proses parsing produk baru kelamaan (lebih dari 40 detik). Coba kirim ulang."
+        )
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ada error pas parsing produk baru: {e}\nCoba kirim ulang.")
+        return
+
+    if data.get("error"):
+        await update.message.reply_text(f"⚠️ {data['error']}")
+        return
+
+    if data.get("kelengkapan") != "lengkap":
+        kurang = []
+        if not data.get("kategori"):
+            kurang.append("kategori")
+        if not data.get("rasa"):
+            kurang.append("rasa")
+        if data.get("harga_jual") in (None, ""):
+            kurang.append("harga jual")
+        detail_kurang = ", ".join(kurang) if kurang else "beberapa detail"
+        await update.message.reply_text(
+            f"Boleh diulang chat-nya lebih lengkap? Yang belum kebaca: {detail_kurang}.\n"
+            "Contoh: \"produk baru Dubai Coklat kategori Dubai harga jual 35000 harga dough 20000\""
+        )
+        return
+
+    kategori = str(data["kategori"]).strip()
+    rasa = str(data["rasa"]).strip()
+    kategori_lower = kategori.lower()
+    kategori_baru = not existing_categories or kategori_lower not in {c.lower() for c in existing_categories}
+
+    pid = _store_pending_produk_baru(context, {
+        "kategori": kategori,
+        "rasa": rasa,
+        "harga_jual": data.get("harga_jual"),
+        "harga_dough": data.get("harga_dough"),
+    })
+    preview = _build_produk_baru_preview_text(
+        {"kategori": kategori, "rasa": rasa, "harga_jual": data.get("harga_jual"), "harga_dough": data.get("harga_dough")},
+        kategori_baru,
+    )
+    keyboard = build_produk_baru_keyboard(pid)
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def handle_produk_baru_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action, _, pid = query.data.partition(":")
+
+    if action == "cancel_produk":
+        _clear_pending_produk_baru(context, pid)
+        await query.edit_message_text("Dibatalin ya.")
+        return
+
+    # Sama kayak saving_flags di handle_confirm -- cegah klik dobel per-id,
+    # DIBUNGKUS try/finally biar id ini DIJAMIN dilepas lagi APAPUN yang
+    # kejadian (termasuk kalau nulis ke Sheets-nya gagal/exception).
+    saving_flags = context.bot_data.setdefault("saving_produk_baru", set())
+    if pid in saving_flags:
+        return
+    saving_flags.add(pid)
+
+    try:
+        data = _get_pending_produk_baru(context, pid)
+        if not data:
+            await query.edit_message_text("Nggak ada data produk baru yang tersimpan. Kirim ulang chat-nya ya.")
+            return
+
+        await query.edit_message_text("Menyimpan ke Sheets...")
+
+        sheets = get_sheets_client()
+        try:
+            hasil = await asyncio.wait_for(
+                asyncio.to_thread(
+                    sheets.add_or_update_product,
+                    data["kategori"], data["rasa"], data["harga_jual"], data.get("harga_dough"),
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            await query.message.reply_text(
+                "Timeout — gagal simpan ke Sheets (lebih dari 30 detik). Coba lagi ya."
+            )
+            return
+        except Exception as e:
+            await query.message.reply_text(f"Gagal simpan ke Sheets: {e}\nCoba lagi ya.")
+            return
+
+        harga_jual_text = documents.rupiah(data["harga_jual"])
+        if hasil["aksi"] == "update_harga":
+            harga_lama_text = documents.rupiah(hasil["harga_lama"]) if hasil.get("harga_lama") is not None else "?"
+            pesan = (
+                f"✅ Harga *{data['kategori']} - {data['rasa']}* di-update: "
+                f"{harga_lama_text} → {harga_jual_text}."
+            )
+        else:
+            pesan = f"✅ Produk baru *{data['kategori']} - {data['rasa']}* ({harga_jual_text}) ditambahin ke PriceList."
+
+        if hasil.get("supplier_dough_ditambah"):
+            pesan += f"\nKategori *{data['kategori']}* juga baru ditambahin ke SupplierDough."
+        elif hasil.get("kategori_baru") and data.get("harga_dough") in (None, ""):
+            pesan += (
+                f"\n⚠️ Kategori *{data['kategori']}* ini baru, tapi harga dough belum diisi -- "
+                "jangan lupa isi manual di tab SupplierDough kalau perlu buat laporan bulanan."
+            )
+
+        await query.message.reply_text(pesan, parse_mode="Markdown")
+        _clear_pending_produk_baru(context, pid)
+    finally:
+        saving_flags.discard(pid)
 
 
 def _format_kurir_line(parsed):
@@ -1417,6 +1609,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if intent == "pricelist":
         await pricelist(update, context)
+        return
+
+    if intent == "produk_baru":
+        await _mulai_produk_baru(update, context, raw_text)
         return
 
     if intent == "invoice" and intent_result.get("nama_customer"):
@@ -2724,6 +2920,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_set_kurir, pattern="^set_kurir:"))
     app.add_handler(CallbackQueryHandler(handle_set_addon, pattern="^set_addon:"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
+    app.add_handler(CallbackQueryHandler(handle_produk_baru_confirm, pattern="^(confirm_produk|cancel_produk):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(global_error_handler)

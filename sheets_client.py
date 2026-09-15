@@ -758,6 +758,124 @@ class SheetsClient:
                 continue
         return result
 
+    # ---------- TAMBAH PRODUK BARU (via chat admin, fitur "produk_baru") ----------
+
+    def get_existing_categories(self):
+        """Return list kategori unik yang UDAH ADA di PriceList (urut abjad).
+        Dipakai buat dikasih sebagai konteks ke AI pas nge-parsing 'produk
+        baru' -- biar AI bisa nyocokin kategori yang disebut admin ke yang
+        udah ada (kalau memang sama/mirip), bukan asal nganggep semuanya
+        kategori baru."""
+        return sorted({kategori for (kategori, _rasa) in self.get_price_map().keys()})
+
+    def _row_dict_to_list(self, header_row, values_by_loose_name):
+        """Susun list nilai row baru sesuai URUTAN header asli di sheet
+        (header_row), dicocokin secara longgar (case/spasi/underscore-
+        insensitive) ke values_by_loose_name (dict {nama_field_longgar:
+        value}, key-nya harus hasil dari self._loose_key(...)). Kolom yang
+        nggak dikenalin (misal ada kolom tambahan lain di sheet yang nggak
+        kita isi) dibiarkan string kosong, biar nggak nge-geser/ngerusak
+        kolom lain."""
+        row = []
+        for h in header_row:
+            loose = self._loose_key(h)
+            row.append(values_by_loose_name.get(loose, ""))
+        return row
+
+    def add_or_update_product(self, kategori, rasa, harga_jual, harga_dough=None):
+        """Tambahin produk baru (kombinasi Kategori+Rasa) ke tab PriceList,
+        ATAU -- kalau kombinasi itu udah ada -- UPDATE harga di baris yang
+        sama (supaya nggak ada baris duplikat). Kalau kategorinya BENERAN
+        baru (belum ada di tab SupplierDough) DAN harga_dough dikasih
+        (nggak None/kosong), baris baru juga ditambahin ke SupplierDough.
+
+        Dipanggil dari bot.py setelah admin nge-confirm preview 'produk
+        baru' hasil parsing ai_parser.parse_produk_baru().
+
+        Return dict:
+          {
+            "aksi": "tambah_baru" atau "update_harga",
+            "harga_lama": int atau None (cuma keisi kalau aksi == "update_harga"),
+            "kategori_baru": bool (True kalau kategori ini belum ada di SupplierDough sebelumnya),
+            "supplier_dough_ditambah": bool,
+          }
+        """
+        kategori = str(kategori).strip()
+        rasa = str(rasa).strip()
+        harga_jual = int(harga_jual)
+
+        ws_price = self.sheet.worksheet(config.SHEET_PRICELIST)
+        values = ws_price.get_all_values()
+        header_row = values[0] if values else ["Kategori", "Rasa", "Harga"]
+
+        loose_kategori = self._loose_key("Kategori")
+        loose_rasa = self._loose_key("Rasa")
+        loose_harga = self._loose_key("Harga")
+
+        col_idx = {}
+        for i, h in enumerate(header_row):
+            col_idx.setdefault(self._loose_key(h), i)
+        kategori_col = col_idx.get(loose_kategori)
+        rasa_col = col_idx.get(loose_rasa)
+        harga_col = col_idx.get(loose_harga)
+
+        found_row_num = None
+        harga_lama = None
+        if kategori_col is not None and rasa_col is not None:
+            for i, row in enumerate(values[1:], start=2):  # baris 1 = header (gspread 1-indexed)
+                row_kategori = row[kategori_col].strip() if kategori_col < len(row) else ""
+                row_rasa = row[rasa_col].strip() if rasa_col < len(row) else ""
+                if row_kategori.lower() == kategori.lower() and row_rasa.lower() == rasa.lower():
+                    found_row_num = i
+                    if harga_col is not None and harga_col < len(row):
+                        try:
+                            harga_lama = int(row[harga_col])
+                        except (ValueError, TypeError):
+                            harga_lama = None
+                    break
+
+        if found_row_num is not None:
+            if harga_col is not None:
+                ws_price.update_cell(found_row_num, harga_col + 1, harga_jual)
+            aksi = "update_harga"
+        else:
+            new_row = self._row_dict_to_list(header_row, {
+                loose_kategori: kategori,
+                loose_rasa: rasa,
+                loose_harga: harga_jual,
+            })
+            ws_price.append_row(new_row, value_input_option="USER_ENTERED")
+            aksi = "tambah_baru"
+
+        # ---------- SupplierDough (cuma kalau kategorinya beneran baru) ----------
+        existing_dough = self.get_dough_price_map()
+        existing_dough_lower = {k.strip().lower() for k in existing_dough.keys()}
+        kategori_baru = kategori.lower() not in existing_dough_lower
+
+        supplier_dough_ditambah = False
+        if kategori_baru and harga_dough not in (None, ""):
+            try:
+                harga_dough_int = int(harga_dough)
+            except (ValueError, TypeError):
+                harga_dough_int = None
+            if harga_dough_int is not None:
+                ws_dough = self.sheet.worksheet(config.SHEET_SUPPLIER_DOUGH)
+                dough_values = ws_dough.get_all_values()
+                dough_header = dough_values[0] if dough_values else ["Kategori", "Harga_Dough_Per_Unit"]
+                new_dough_row = self._row_dict_to_list(dough_header, {
+                    self._loose_key("Kategori"): kategori,
+                    self._loose_key("Harga_Dough_Per_Unit"): harga_dough_int,
+                })
+                ws_dough.append_row(new_dough_row, value_input_option="USER_ENTERED")
+                supplier_dough_ditambah = True
+
+        return {
+            "aksi": aksi,
+            "harga_lama": harga_lama,
+            "kategori_baru": kategori_baru,
+            "supplier_dough_ditambah": supplier_dough_ditambah,
+        }
+
 
 # Cache koneksi biar nggak "kenalan ulang" ke Google tiap kali dipanggil
 # (proses autentikasi itu yang bikin lambat kalau diulang terus).

@@ -310,7 +310,7 @@ Baca pesan dari ADMIN (bukan dari customer), tentukan MAKSUD admin, balas HANYA
 JSON valid tanpa teks lain, tanpa markdown code fence:
 
 {{
-  "intent": salah satu dari "rekap_produksi", "laporan_bulanan", "pricelist", "edit_order", "invoice", "surat_jalan", "order_baru",
+  "intent": salah satu dari "rekap_produksi", "laporan_bulanan", "pricelist", "produk_baru", "edit_order", "invoice", "surat_jalan", "order_baru",
   "nama_customer": "nama customer yang disebut (kalau ada), atau null",
   "tanggal_mulai_rekap": "format YYYY-MM-DD (hitung dari hari ini {today} kalau istilahnya relatif kayak 'hari ini'/'besok'/'lusa') KALAU intent-nya rekap_produksi DAN admin minta rekap untuk TANGGAL/RENTANG TANGGAL tertentu (misal 'rekap produksi besok', 'rekap produksi hari ini', 'rekap produksi sampe besok', 'rekap produksi hari ini dan besok') -- ini tanggal AWAL rentangnya (atau tanggal tunggal kalau cuma 1 hari). Kalau permintaannya rekap biasa TANPA tanggal spesifik, atau rekap by NAMA CUSTOMER, biarkan null.",
   "tanggal_akhir_rekap": "format YYYY-MM-DD, isi HANYA kalau ada RENTANG tanggal (misal 'sampe besok' dari hari ini berarti tanggal_akhir_rekap = besok; 'hari ini dan besok' juga rentang 2 hari). Kalau cuma 1 hari tunggal, biarkan null (tanggal_mulai_rekap doang yang dipakai).",
@@ -326,6 +326,13 @@ Panduan milih intent:
   3. Kalau nggak disebut tanggal maupun nama -> biarkan nama_customer dan tanggal_mulai_rekap dua-duanya null, rekapnya jadi gabungan minggu aktif seperti biasa.
 - "laporan bulanan", "rekap bulanan", "mau tau total bulan ini", "berapa yang harus dibayar ke supplier" -> laporan_bulanan (kalau admin sebut RENTANG bulan, misal "laporan bulanan dari Januari sampai Agustus", "laporan bulanan Jan - Agustus", "minta laporan bulan 1-3", "laporan bulan 1 sampai 3", isi bulan_mulai DAN bulan_akhir sesuai rentangnya -- ANGKA bulan (1=Januari, 2=Februari, dst sampai 12=Desember) harus dikonversi ke nomor bulan yang sama, cuma beda cara nulis; kalau cuma 1 bulan/nggak disebut, cukup isi bulan_mulai. Kalau TAHUN nggak disebut sama sekali (baik nama bulan maupun angka), pakai tahun {today} secara default -- JANGAN nebak tahun lain.)
 - "harga berapa", "price list", "liat catalog/katalog", "kirim daftar harga" -> pricelist
+- Admin bilang mau NAMBAHIN produk/rasa/kategori BARU ke daftar harga toko
+  (BUKAN order customer) -- kata kunci: "produk baru", "tambah produk",
+  "nambah produk", "varian baru", "rasa baru", "ada menu baru", "masukin ke
+  pricelist", biasanya diikuti nama produk + harga (misal "produk baru
+  Dubai Coklat kategori Dubai harga jual 35000 harga dough 20000") ->
+  produk_baru. JANGAN isi nama_customer buat intent ini (detail produknya
+  diekstrak terpisah, bukan di sini).
 - Kalau nyebut nama customer TERTENTU dan maksudnya ubah pesanan yang SUDAH ADA
   (kata kunci: tambah, nambah, kurang, kurangin, hapus, ganti, ubah, edit, jadi) -> edit_order
 - "invoice buat X", "minta invoice X", "invoice-nya X mana" -> invoice (isi nama_customer)
@@ -516,4 +523,80 @@ def classify_intent(raw_text: str) -> dict:
 
     for key, val in default.items():
         result.setdefault(key, val)
+    return result
+
+
+PRODUK_BARU_SYSTEM_PROMPT = """Kamu adalah asisten admin toko roti "Miss Piggy".
+Admin mau NAMBAHIN PRODUK BARU (kategori dan/atau rasa baru) ke daftar harga
+toko, ditulis lewat kalimat bebas (BUKAN order customer). Tugasmu HANYA:
+ekstrak data produk barunya jadi JSON terstruktur.
+
+Balas HANYA dengan JSON valid, TANPA teks lain apapun, tanpa penjelasan,
+tanpa markdown code fence:
+
+{{
+  "kategori": "nama kategori produknya, PERSIS sama kayak salah satu di daftar kategori yang sudah ada di bawah kalau memang cocok kesitu, atau nama kategori BARU (tulis apa adanya sesuai yang disebut admin) kalau memang belum ada di daftar",
+  "rasa": "nama rasa/varian produknya",
+  "harga_jual": angka harga jual ke customer dalam rupiah (misal '35rb'/'35ribu' jadi 35000), atau null kalau admin tidak menyebutkan sama sekali,
+  "harga_dough": angka harga dough/bahan baku dari supplier dalam rupiah, atau null kalau admin tidak menyebutkan,
+  "kelengkapan": "lengkap" atau "kurang_lengkap"
+}}
+
+Set "kelengkapan" jadi "kurang_lengkap" KALAU salah satu dari kategori, rasa,
+atau harga_jual tidak disebutkan sama sekali oleh admin -- field yang tidak
+disebutkan itu diisi null, JANGAN mengarang/menebak nilainya sendiri.
+harga_dough SELALU boleh null (opsional, tidak menghalangi "kelengkapan" jadi
+"lengkap") -- kalau kategorinya BENERAN baru (tidak ada di daftar kategori
+yang sudah ada) dan admin tidak menyebutkan harga_dough, itu TETAP dianggap
+"lengkap" (sistem yang akan mengingatkan admin belakangan soal harga dough
+buat kategori baru itu, bukan tugasmu di sini).
+
+Kategori yang SUDAH ADA sekarang di toko: {existing_categories}
+"""
+
+
+def parse_produk_baru(raw_text: str, existing_categories: list = None) -> dict:
+    """Ekstrak data 'produk baru' (kategori, rasa, harga jual, harga dough)
+    dari kalimat bebas admin, misal "produk baru Dubai Coklat kategori
+    Dubai harga jual 35000 harga dough 20000" -- dipanggil setelah
+    classify_intent() mendeteksi intent == "produk_baru".
+
+    existing_categories: list nama kategori yang udah ada di PriceList
+    (dari sheets_client.get_existing_categories()), dikasih sebagai
+    konteks ke AI biar dia bisa nyocokin kategori yang disebut admin ke
+    yang udah ada (kalau memang sama) alih-alih nganggep semuanya baru.
+
+    Return dict: {"kategori", "rasa", "harga_jual", "harga_dough",
+    "kelengkapan", "error"} -- "error" cuma keisi (string) kalau
+    beneran gagal hubungi AI/parsing, dipakai bot.py buat nampilin
+    pesan gagal ke admin."""
+    existing_text = ", ".join(existing_categories) if existing_categories else "(belum ada data kategori)"
+    system_prompt = PRODUK_BARU_SYSTEM_PROMPT.format(existing_categories=existing_text)
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=300,
+            system=system_prompt,
+            messages=[{"role": "user", "content": raw_text}],
+        )
+    except Exception as e:
+        return {
+            "kategori": None, "rasa": None, "harga_jual": None, "harga_dough": None,
+            "kelengkapan": "kurang_lengkap", "error": f"Gagal hubungi AI: {e}. Coba lagi.",
+        }
+
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
+        return {
+            "kategori": None, "rasa": None, "harga_jual": None, "harga_dough": None,
+            "kelengkapan": "kurang_lengkap",
+            "error": "Gagal parsing otomatis, coba tulis ulang lebih jelas (kategori, rasa, harga jual).",
+        }
+    result.setdefault("kategori", None)
+    result.setdefault("rasa", None)
+    result.setdefault("harga_jual", None)
+    result.setdefault("harga_dough", None)
+    result.setdefault("kelengkapan", "kurang_lengkap")
+    result.setdefault("error", None)
     return result
