@@ -2246,6 +2246,19 @@ async def handle_pending_correction(update: Update, context: ContextTypes.DEFAUL
     parsed["items"] = result.get("items", [])
     if result.get("ongkir") is not None:
         parsed["ongkir"] = int(result.get("ongkir"))
+    # Jaring pengaman SAMA PERSIS kayak di handle_edit_instruction (order yang
+    # UDAH kesimpen): parse_order_edit (AI) di atas cuma fokus ke ITEM +
+    # ongkir, SAMA SEKALI nggak ngurusin tanggal kirim. Kalau instruksinya
+    # nyebut tanggal BARENGAN sama koreksi item (misal "tambahin baso 2 buat
+    # tanggal 4/09"), _try_parse_field_correction di atas gagal nangkep field
+    # tunggal (karena kalimatnya juga nyebut perubahan item), jadi tanpa ini
+    # tanggalnya keabaian diem-diem walau instruksinya jelas nyebut tanggal
+    # baru -- persis kejadian nyata: "Tanggal kirim 16 sept" awalnya GAGAL
+    # kedetect field_correction (waktu itu gara-gara "sept" belum dikenalin
+    # _BULAN_ID), jatuh ke jalur AI ini, dan tanggalnya nggak pernah keganti.
+    tanggal_dari_instruksi = _parse_tanggal_kirim(instruction)
+    if tanggal_dari_instruksi:
+        parsed["tanggal_kirim"] = tanggal_dari_instruksi
     # BUG NYATA yang ini benerin: "box_groups" (rincian "2 box: Baso x4,
     # Cream Cheese x4" dst yang ditampilin di invoice & surat jalan) DIISI
     # SEKALI pas parse AWAL doang, dan parse_order_edit yang dipanggil di
@@ -2331,9 +2344,24 @@ def _extract_after_splitter(lower_text, original_text):
 
 
 _BULAN_ID = {
-    "januari": 1, "februari": 2, "maret": 3, "april": 4, "mei": 5, "juni": 6,
-    "juli": 7, "agustus": 8, "september": 9, "oktober": 10, "november": 11,
-    "desember": 12,
+    # Nama lengkap DAN singkatan umum (orang jarang ngetik nama bulan
+    # lengkap pas ngetik cepet di chat, misal "16 sept" bukan "16
+    # september") -- tanpa ini, tanggal kayak gitu GAGAL kebaca sama
+    # sekali & diem-diem balik ke default (Kamis PO minggu ini), padahal
+    # keliatannya kayak berhasil diproses. \b di regex pemanggilnya jamin
+    # "jun" nggak nyangkut di tengah "juni" dsb, jadi aman ditumpuk gini.
+    "januari": 1, "jan": 1,
+    "februari": 2, "feb": 2,
+    "maret": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "mei": 5,
+    "juni": 6, "jun": 6,
+    "juli": 7, "jul": 7,
+    "agustus": 8, "agt": 8, "ags": 8,
+    "september": 9, "sept": 9, "sep": 9,
+    "oktober": 10, "okt": 10,
+    "november": 11, "nov": 11,
+    "desember": 12, "des": 12,
 }
 
 
