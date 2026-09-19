@@ -986,6 +986,69 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _kirim_teks_ke(context, update, _tujuan_pengiriman(update), text_ambil)
 
 
+async def _kirim_dokumen_bulan_lama(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                     nama: str, bulan_str: str, jenis: str):
+    """Dipanggil KHUSUS pas admin minta invoice/surat jalan customer dari
+    BULAN TERTENTU yang udah lewat (misal 'invoice apple bulan agustus',
+    'invoice apple agustus') -- BEDA sama invoice_cmd/suratjalan_cmd biasa
+    yang cuma ngecek minggu AKTIF sekarang, lalu fallback ke minggu PALING
+    BARU doang kalau kosong (nggak bisa nyasar ke bulan spesifik di masa
+    lalu). jenis: 'invoice' atau 'surat_jalan'. bulan_str format 'YYYY-MM'
+    (dari classify_intent di ai_parser.py).
+
+    Order yang udah 'Terkirim' TETEP diikutin di sini (beda sama
+    invoice_cmd yang cuma nampilin Pending) -- soalnya justru itu yang mau
+    diliat lagi (invoice/surat jalan lama buat direprint/dicek)."""
+    try:
+        year, month = (int(x) for x in bulan_str.split("-"))
+    except (ValueError, AttributeError):
+        await update.message.reply_text(f"⚠️ Format bulan nggak kebaca: {bulan_str}")
+        return
+
+    sheets = get_sheets_client()
+    try:
+        orders = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_orders_by_customer_month, nama, year, month), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas ambil data. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal ambil data: {e}")
+        return
+
+    if not orders:
+        await update.message.reply_text(
+            f"Nggak ada order atas nama {nama} di bulan {month:02d}/{year}."
+        )
+        return
+
+    # Customer bisa aja order lebih dari 1x dalam bulan yang sama (beda
+    # Minggu_PO) -- dikelompokin dulu, generate dokumen TERPISAH per
+    # Minggu_PO biar item-nya nggak ke-mix jadi 1 invoice/surat jalan yang
+    # salah total/rinciannya.
+    by_minggu = {}
+    for o in orders:
+        mp = str(o.get("Minggu_PO", "")).strip() or "-"
+        by_minggu.setdefault(mp, []).append(o)
+
+    for minggu_po, orders_minggu in sorted(by_minggu.items()):
+        try:
+            if jenis == "invoice":
+                img = invoice_image.generate_invoice_image(nama, minggu_po, orders_minggu)
+                caption = f"Invoice {nama} — Minggu PO {minggu_po} (bulan {month:02d}/{year})"
+                await _kirim_foto_ke(context, update, _tujuan_invoice(update), img, caption)
+            else:
+                img = receipt.generate_surat_jalan_image(nama, minggu_po, orders_minggu)
+                caption = f"Surat jalan {nama} — Minggu PO {minggu_po} (bulan {month:02d}/{year})"
+                await _kirim_foto_ke(context, update, _tujuan_suratjalan(update), img, caption)
+        except Exception as e:
+            logger.error(f"Gagal generate {jenis} bulan lama buat {nama} ({minggu_po}): {e}")
+            await update.message.reply_text(
+                f"⚠️ Gagal generate {jenis} buat {nama} (Minggu PO {minggu_po}): {e}"
+            )
+
+
 @owner_only
 async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nama = " ".join(context.args)
@@ -1616,11 +1679,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if intent == "invoice" and intent_result.get("nama_customer"):
+        bulan_invoice = intent_result.get("bulan_invoice")
+        if bulan_invoice:
+            await _kirim_dokumen_bulan_lama(
+                update, context, intent_result["nama_customer"], bulan_invoice, "invoice"
+            )
+            return
         context.args = intent_result["nama_customer"].split()
         await invoice_cmd(update, context)
         return
 
     if intent == "surat_jalan" and intent_result.get("nama_customer"):
+        bulan_invoice = intent_result.get("bulan_invoice")
+        if bulan_invoice:
+            await _kirim_dokumen_bulan_lama(
+                update, context, intent_result["nama_customer"], bulan_invoice, "surat_jalan"
+            )
+            return
         context.args = intent_result["nama_customer"].split()
         await suratjalan_cmd(update, context)
         return

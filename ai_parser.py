@@ -316,6 +316,7 @@ JSON valid tanpa teks lain, tanpa markdown code fence:
   "tanggal_akhir_rekap": "format YYYY-MM-DD, isi HANYA kalau ada RENTANG tanggal (misal 'sampe besok' dari hari ini berarti tanggal_akhir_rekap = besok; 'hari ini dan besok' juga rentang 2 hari). Kalau cuma 1 hari tunggal, biarkan null (tanggal_mulai_rekap doang yang dipakai).",
   "bulan_mulai": "format YYYY-MM (pakai tahun {today} kalau nggak disebut eksplisit) kalau admin minta laporan bulanan buat 1 bulan tertentu ATAU ini bulan AWAL dari sebuah rentang (misal 'dari Januari sampai Agustus' -> bulan_mulai Januari), atau null kalau nggak disebut sama sekali / minta bulan ini",
   "bulan_akhir": "format YYYY-MM, isi HANYA kalau admin eksplisit minta RENTANG beberapa bulan (misal 'Januari sampai Agustus', 'Jan - Agustus', 'dari bulan 1 ke bulan 8') -- isi bulan AKHIR rentangnya. Kalau cuma minta 1 bulan doang (bukan rentang), biarkan null.",
+  "bulan_invoice": "format YYYY-MM, isi HANYA kalau intent-nya invoice ATAU surat_jalan DAN admin JELAS minta dokumen customer dari BULAN TERTENTU yang udah lewat (bukan minggu aktif sekarang) -- dua pola yang dianggap JELAS: (1) ada kata 'bulan' diikuti nama/angka bulan (misal 'invoice apple bulan agustus'), ATAU (2) referensi customer-nya LEBIH DARI 1 KATA dan kata TERAKHIR-nya persis nama bulan (misal 'invoice apple agustus' -> nama_customer cuma 'apple', bulan_invoice bulan Agustus). Kalau tahun nggak disebut, pakai tahun {today}. JANGAN isi ini kalau referensi customer-nya CUMA 1 KATA doang yang kebetulan mirip nama bulan (misal 'surat jalan juni' TETAP nama_customer 'Juni' TANPA bulan_invoice -- liat aturan di bawah, itu kemungkinan besar nama orang beneran, bukan permintaan bulan). null kalau nggak relevan / minta minggu aktif seperti biasa.",
   "instruksi_edit": "kalau intent-nya edit_order, tulis ulang instruksi perubahannya (item apa ditambah/dikurangi/dihapus dan jumlahnya), atau null"
 }}
 
@@ -337,6 +338,7 @@ Panduan milih intent:
   (kata kunci: tambah, nambah, kurang, kurangin, hapus, ganti, ubah, edit, jadi) -> edit_order
 - "invoice buat X", "minta invoice X", "invoice-nya X mana" -> invoice (isi nama_customer)
 - "surat jalan X", "suratjalan buat X" -> surat_jalan (isi nama_customer) -- PENTING: kata yang PERSIS muncul setelah "surat jalan"/"suratjalan"/"invoice" itu HAMPIR SELALU nama customer, WALAUPUN kebetulan sama kayak nama bulan (Januari-Desember) atau kata umum lainnya. Contoh: "surat jalan juni" -> intent surat_jalan, nama_customer "Juni" (BUKAN merujuk ke bulan Juni, itu nama orang). Jangan biarkan kemiripan sama nama bulan bikin nama_customer jadi kosong/null.
+  TAPI kalau referensi customer-nya LEBIH DARI 1 KATA dan kata TERAKHIR persis nama bulan (atau ada kata "bulan" eksplisit sebelumnya), itu BUKAN lagi nama customer 1 kata yang ambigu -- kata bulan di akhir itu beneran permintaan BULAN, pisahin: nama_customer cuma bagian namanya doang, sisanya masuk bulan_invoice (lihat definisi field-nya di atas). Contoh: "invoice apple agustus" -> nama_customer "apple", bulan_invoice bulan Agustus tahun {today}. "invoice apple bulan agustus" -> sama persis. Bedain dari "surat jalan juni" (1 kata doang, TETAP dianggap nama orang, bulan_invoice null).
 - Nyebut nama customer TERTENTU dan cuma mau NGELIAT/NGECEK pesanan dia
   (bukan ubah), kayak "lihat orderan X", "liat order X", "orderan X apa aja",
   "cek pesanan X", "orderannya X mana" -> invoice (isi nama_customer) --
@@ -500,7 +502,8 @@ def classify_intent(raw_text: str) -> dict:
     default = {
         "intent": "order_baru", "nama_customer": None,
         "tanggal_mulai_rekap": None, "tanggal_akhir_rekap": None,
-        "bulan_mulai": None, "bulan_akhir": None, "instruksi_edit": None,
+        "bulan_mulai": None, "bulan_akhir": None, "bulan_invoice": None,
+        "instruksi_edit": None,
     }
 
     try:

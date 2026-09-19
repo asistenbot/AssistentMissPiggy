@@ -650,6 +650,28 @@ class SheetsClient:
         """Filter berdasarkan Minggu_PO (tanggal Kamis pengiriman) yang jatuh di bulan tsb."""
         return self.get_orders_by_month_range(year, month, year, month)
 
+    def get_orders_by_customer_month(self, nama_customer: str, year: int, month: int):
+        """Cari SEMUA order 1 customer yang Minggu_PO-nya jatuh di bulan/tahun
+        tertentu -- BEDA sama get_orders_by_customer_any_week (yang cuma ambil
+        Minggu_PO PALING BARU doang) dan get_pending_orders_by_customer_week
+        (yang cuma minggu AKTIF & buang yang udah Terkirim). Ini khusus buat
+        kasus admin minta invoice/surat jalan customer dari BULAN LAMA yang
+        spesifik (misal "invoice apple bulan agustus") -- sebelum ini nggak
+        ada jalan sama sekali buat nyari kayak gitu, jadi selalu nyasar balik
+        ke minggu aktif/terbaru walau bulan yang diminta udah lewat lama.
+
+        Status SENGAJA nggak difilter (order yang udah 'Terkirim' tetep
+        diikutin) -- justru itu yang mau diliat lagi/direprint, beda tujuan
+        sama pengecekan 'apa masih pending' yang dipakai fungsi2 minggu aktif.
+
+        Return: list order (dict), belum dikelompokin per Minggu_PO -- kalau
+        customer ternyata punya lebih dari 1 Minggu_PO dalam bulan yang sama,
+        itu tanggung jawab caller buat dikelompokin sebelum di-generate jadi
+        dokumen (lihat _kirim_dokumen_bulan_lama di bot.py)."""
+        nama_target = nama_customer.strip().lower()
+        bulanan = self.get_orders_by_month(year, month)
+        return [o for o in bulanan if str(o.get("Nama_Customer", "")).strip().lower() == nama_target]
+
     def _filter_by_month_range(self, records, year_start: int, month_start: int, year_end: int, month_end: int):
         """Helper bersama buat get_orders_by_month_range &
         get_historis_orders_by_month_range -- filter list record APAPUN
