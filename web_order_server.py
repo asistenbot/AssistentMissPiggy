@@ -24,6 +24,7 @@ from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
+from sheets_client import is_komposisi_bundling_valid, BUNDLING_HARGA_PAKET
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,25 @@ def _build_preview_text(parsed):
         addon_total = int(parsed.get("addon_total") or 0)
         addon_total_text = "Rp" + format(addon_total, ",").replace(",", ".")
         addon_line = f"Add-on: {addon_jenis} x{addon_qty} ({addon_total_text})\n"
+    # Baris "Paket Bundling" -- sama polanya kayak _format_bundling_line()
+    # versi bot.py. Order dari web itemnya udah terstruktur (bukan hasil
+    # tebakan AI), jadi validitas komposisinya BISA langsung dicek di sini
+    # (beda sama order paste-chat manual yang validasinya baru kejadian pas
+    # SIMPAN) -- kalau klaim "paket_bundling" tapi komposisinya nggak PAS,
+    # admin langsung dikasih tau dari preview-nya, nggak perlu nunggu abis
+    # klik Simpan baru ketauan. add_order_rows di sheets_client.py TETEP
+    # re-cek ulang independen pas simpan (jangan sampai cuma percaya
+    # perhitungan di sini doang).
+    bundling_line = ""
+    if parsed.get("paket_bundling"):
+        harga_text = format(BUNDLING_HARGA_PAKET, ",").replace(",", ".")
+        bundling_line = f"📦 Paket: *Bundling Spesial* (flat Rp{harga_text})\n"
+        if not is_komposisi_bundling_valid(parsed.get("items") or []):
+            bundling_line += (
+                "⚠️ Komposisi BUKAN persis 8 pcs Roti (non-Gandum/Donat) + 1 Dubai "
+                "Coklat -- kalau disimpan apa adanya, harganya bakal kehitung NORMAL "
+                "per item (BUKAN flat Rp150.000). Cek dulu sebelum Simpan.\n"
+            )
     return (
         f"*Order Baru dari Web:*\n"
         f"Nama: {parsed.get('nama') or '-'}\n"
@@ -76,6 +96,7 @@ def _build_preview_text(parsed):
         f"Metode: {parsed.get('metode') or '-'}\n"
         f"{kurir_line}"
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini)'}\n"
+        f"{bundling_line}"
         f"Items:\n{items_text}\n"
         f"Ongkir: {ongkir_text}\n"
         f"{addon_line}"
@@ -191,6 +212,16 @@ def create_web_order_app(application):
         addon_qty = max(1, int(body.get("addon_qty") or 1)) if addon_jenis else 0
         addon_total = config.ADDON_PRICES.get(addon_jenis, 0) * addon_qty if addon_jenis else 0
 
+        # Paket "Bundling Spesial" (8 Roti + 1 Dubai Coklat = flat Rp150.000)
+        # -- flag doang dari web (bool(...) biar apapun yang dikirim front-end
+        # nggak lolos jadi truthy aneh2, misal string "false"). Halaman web
+        # yang tanggung jawab nyusun "items" (8 pcs Roti pilihan customer +
+        # 1 Dubai Coklat) SEBELUM submit -- di sini cuma nyimpen klaimnya,
+        # validasi KOMPOSISI beneran dicek di _build_preview_text (buat kasih
+        # tau admin dari awal) DAN di add_order_rows/handle_confirm pas
+        # simpan (sumber kebenaran final, liat sheets_client.py).
+        paket_bundling = bool(body.get("paket_bundling"))
+
         parsed = {
             "nama": nama,
             "no_hp": no_hp,
@@ -202,6 +233,7 @@ def create_web_order_app(application):
             "addon_jenis": addon_jenis,
             "addon_qty": addon_qty,
             "addon_total": addon_total,
+            "paket_bundling": paket_bundling,
             "kelengkapan": "lengkap",
         }
 

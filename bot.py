@@ -23,7 +23,7 @@ import receipt
 import invoice_image
 import monthly_report_pdf
 import production_recap_pdf
-from sheets_client import get_sheets_client
+from sheets_client import get_sheets_client, is_komposisi_bundling_valid, BUNDLING_HARGA_PAKET
 from ai_parser import (
     parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
     parse_produk_baru,
@@ -616,6 +616,20 @@ def _format_kurir_line(parsed):
     return f"Kurir: {parsed.get('kurir') or '(armada sendiri)'}\n"
 
 
+def _format_bundling_line(parsed):
+    """Baris info paket 'Bundling Spesial' yang dipakai di SEMUA preview
+    order -- kosong (nggak nongol sama sekali) kalau order ini BUKAN klaim
+    paket bundling. Validasi KOMPOSISI beneran (8 Roti non-Gandum/Donat + 1
+    Dubai Coklat) baru dicek pas SIMPAN (lihat is_komposisi_bundling_valid di
+    sheets_client.py DAN pengecekan sama di handle_confirm) -- di preview ini
+    cuma nunjukkin klaimnya doang, biar admin bisa liat dari awal sebelum
+    diklik Simpan."""
+    if not parsed.get("paket_bundling"):
+        return ""
+    harga_text = format(BUNDLING_HARGA_PAKET, ",").replace(",", ".")
+    return f"📦 Paket: *Bundling Spesial* (flat Rp{harga_text})\n"
+
+
 def _format_addon_line(parsed):
     """Baris 'Add-on: ...' yang dipakai di SEMUA preview order -- beda sama
     Kurir (yang cuma muncul buat metode kirim), add-on ini SELALU dicek
@@ -759,6 +773,7 @@ def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
         f"Metode: {parsed.get('metode') or '-'}\n"
         f"{_format_kurir_line(parsed)}"
         f"Tanggal Kirim: {parsed.get('tanggal_kirim') or '(default: Kamis PO minggu ini, ketik tanggal kirim jadi ... buat ubah)'}\n"
+        f"{_format_bundling_line(parsed)}"
         f"Items:\n{items_text}\n"
         f"Ongkir: {('Rp' + format(int(parsed.get('ongkir')), ',').replace(',', '.')) if parsed.get('ongkir') else 'belum diisi (Rp0)'}\n"
         f"{_format_addon_line(parsed)}"
@@ -1960,10 +1975,19 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "addon_jenis": parsed.get("addon_jenis"),
             "addon_qty": parsed.get("addon_qty"),
             "addon_total": parsed.get("addon_total"),
+            "paket_bundling": bool(parsed.get("paket_bundling")),
         }
 
         sheets = get_sheets_client()
         minggu_po = date_helpers.current_po_week_thursday()
+
+        # Cek komposisinya DI SINI JUGA (bukan cuma di add_order_rows) --
+        # biar bisa kasih tau admin lewat chat kalau klaim bundling-nya
+        # ternyata nggak valid (harga ke-simpen NORMAL per item, bukan
+        # silent/nggak ketauan). add_order_rows sendiri tetep re-cek ulang
+        # independen (jangan sampai cuma percaya flag dari sini doang).
+        bundling_diklaim = bool(parsed.get("paket_bundling"))
+        bundling_valid = bundling_diklaim and is_komposisi_bundling_valid(order["items"])
 
         try:
             orders = await asyncio.wait_for(
@@ -1980,6 +2004,15 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.message.reply_text("Tersimpan!")
+
+        if bundling_diklaim and not bundling_valid:
+            await query.message.reply_text(
+                "⚠️ Order ini ditandain paket *Bundling Spesial*, tapi komposisi item-nya "
+                "BUKAN persis 8 pcs Roti (non-Gandum/Donat) + 1 Dubai Coklat -- harganya "
+                "kesimpen NORMAL per item dari PriceList (BUKAN flat Rp150.000). "
+                "Cek manual di Sheets kalau ini seharusnya bundling.",
+                parse_mode="Markdown",
+            )
 
         harga_kosong = sorted(set(
             o["Rasa"] for o in orders if int(o.get("Harga_Satuan", 0)) == 0

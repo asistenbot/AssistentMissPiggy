@@ -18,6 +18,41 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# ---------- PAKET BUNDLING "8 Roti + 1 Dubai Coklat" ----------
+# Harga paket di-HARDCODE di sini (BUKAN dipercaya dari input web/AI manapun)
+# -- server yang nentuin harga final, klien (web/chat) cuma ngirim/nyaranin
+# KOMPOSISI item-nya doang. Ini jaga-jaga biar nggak ada yang bisa "akalin"
+# harga cuma dengan ngirim payload/chat yang ngaku2 bundling.
+BUNDLING_HARGA_PAKET = 150000
+BUNDLING_QTY_ROTI = 8
+BUNDLING_KATEGORI_ROTI = "roti"  # match PERSIS ke kategori "Roti" (BUKAN "Roti Gandum") -- lower() dipakai pas cocokin
+BUNDLING_KATEGORI_DUBAI = "dubai"
+BUNDLING_RASA_DUBAI = "dubai coklat"
+
+
+def is_komposisi_bundling_valid(items: list) -> bool:
+    """True kalau daftar item PERSIS sesuai paket 'Bundling Spesial': 8 pcs
+    (boleh campur rasa apa aja) kategori "Roti" (BUKAN "Roti Gandum", BUKAN
+    "Donat", BUKAN "Roti Tawar"/"Roti Tawar Loaf" -- match STRING PERSIS
+    "roti" doang, jadi kategori mirip2 lain otomatis ketolak), ditambah PAS 1
+    pcs "Dubai Coklat". Item LAIN di luar itu (kategori apa pun) bikin
+    komposisinya dianggap TIDAK valid buat dapet harga paket -- order tetep
+    bisa disimpen, cuma harganya dihitung normal per item (lihat pemanggil
+    fungsi ini), bukan digagalin total."""
+    qty_roti = 0
+    qty_dubai_coklat = 0
+    for it in items:
+        kategori = str(it.get("kategori", "")).strip().lower()
+        rasa = str(it.get("rasa", "")).strip().lower()
+        qty = int(it.get("qty") or 0)
+        if kategori == BUNDLING_KATEGORI_ROTI:
+            qty_roti += qty
+        elif kategori == BUNDLING_KATEGORI_DUBAI and rasa == BUNDLING_RASA_DUBAI:
+            qty_dubai_coklat += qty
+        else:
+            return False  # ada item di luar 2 kategori itu -- bukan bundling murni
+    return qty_roti == BUNDLING_QTY_ROTI and qty_dubai_coklat == 1
+
 
 class SheetsClient:
     def __init__(self):
@@ -237,10 +272,56 @@ class SheetsClient:
         addon_jenis = order.get("addon_jenis") or ""
         addon_qty = int(order.get("addon_qty") or 0)
         addon_total = int(order.get("addon_total") or 0)
+
+        # ---------- Paket Bundling (opsional) ----------
+        # order["paket_bundling"] = True (dari bot.py/web_order_server.py)
+        # cuma NIAT/klaim admin/customer -- harga final TETEP dihitung ulang
+        # di sini berdasarkan is_komposisi_bundling_valid(), BUKAN dipercaya
+        # gitu aja. Kalau komposisinya nggak PAS 8 Roti + 1 Dubai Coklat,
+        # order tetep kesimpen normal (harga per item dari PriceList biasa
+        # kayak sebelumnya) -- cuma flag "bundling_diterapkan" balik False
+        # biar caller (bot.py) bisa kasih tau admin buat cek manual.
+        #
+        # Skema harganya: hitung dulu harga ASLI tiap baris Roti dari
+        # PriceList (biar rasa yang lebih mahal/murah tetep kerasa beda),
+        # skalakan proporsional biar TOTAL 8 roti + Dubai itu PAS
+        # BUNDLING_HARGA_PAKET, lalu bulatin tiap baris Roti ke kelipatan 500
+        # (biar angkanya rapi kayak harga PriceList biasa). Baris Dubai
+        # Coklat (qty SELALU 1, udah dijamin sama is_komposisi_bundling_valid)
+        # nampung SISA pembulatannya -- ini yang bikin totalnya PERSIS pas,
+        # bukan meleset beberapa rupiah gara-gara pembulatan per baris.
+        bundling_diterapkan = False
+        harga_override_by_index = {}
+        if order.get("paket_bundling") and is_komposisi_bundling_valid(order["items"]):
+            harga_asli_list = [
+                self._find_price(price_map, it["kategori"], it["rasa"])[0] for it in order["items"]
+            ]
+            total_asli = sum(h * it["qty"] for h, it in zip(harga_asli_list, order["items"]))
+            if total_asli > 0:
+                scale = BUNDLING_HARGA_PAKET / total_asli
+                subtotal_roti_terpakai = 0
+                idx_dubai = None
+                for idx, (h, it) in enumerate(zip(harga_asli_list, order["items"])):
+                    if str(it["kategori"]).strip().lower() == BUNDLING_KATEGORI_DUBAI:
+                        idx_dubai = idx
+                        continue
+                    harga_bulat = max(500, round(h * scale / 500) * 500)
+                    harga_override_by_index[idx] = harga_bulat
+                    subtotal_roti_terpakai += harga_bulat * it["qty"]
+                if idx_dubai is not None:
+                    # qty Dubai Coklat SELALU 1 (dijamin validator), jadi
+                    # harga satuan = subtotal = sisa pembulatan, PERSIS.
+                    harga_override_by_index[idx_dubai] = BUNDLING_HARGA_PAKET - subtotal_roti_terpakai
+                bundling_diterapkan = True
+
         rows = []
         order_records = []
-        for item in order["items"]:
-            harga, rasa_cocok = self._find_price(price_map, item["kategori"], item["rasa"])
+        for idx, item in enumerate(order["items"]):
+            if idx in harga_override_by_index:
+                harga = harga_override_by_index[idx]
+                rasa_cocok = item["rasa"]  # udah dijamin match persis lewat validator, ga perlu fuzzy-match lagi
+            else:
+                harga, rasa_cocok = self._find_price(price_map, item["kategori"], item["rasa"])
             subtotal = harga * item["qty"]
             rows.append([
                 timestamp,

@@ -37,7 +37,8 @@ Struktur JSON:
   "ongkir": angka ongkir dalam rupiah kalau admin menyebutkannya (misal "ongkir 15rb" jadi 15000), atau null kalau tidak disebutkan,
   "peringatan_ai": "peringatan OTOMATIS dari kamu buat admin kalau ada yang perlu dicek (info kurang, nama rasa ambigu, dst), atau null kalau semua jelas -- PENTING: field ini BUKAN catatan packing dari customer, JANGAN pernah diisi permintaan/instruksi packing customer di sini (kalau customer minta packing khusus, itu masuk 'catatan' di bawah, bukan sini)",
   "catatan": "instruksi/permintaan packing yang BENERAN disebut customer sendiri (misal 'donat sama gula dipisah', 'jangan dibungkus plastik'), atau null kalau customer nggak minta apa-apa soal packing -- field ini nanti kesimpen ke Sheets & DICETAK di surat jalan buat kurir/packing, jadi JANGAN isi kesimpulan/analisis kamu sendiri di sini, HANYA permintaan packing yang eksplisit disebut customer",
-  "kelengkapan": "lengkap" atau "kurang_lengkap"
+  "kelengkapan": "lengkap" atau "kurang_lengkap",
+  "paket_bundling": true atau false -- true HANYA kalau customer JELAS-JELAS minta paket "Bundling Spesial" (kata kunci: "bundling", "paket bundling", "paket 8 roti + dubai", atau sejenisnya) -- LIHAT ATURAN PAKET BUNDLING di bawah buat cara isi items_non_box-nya kalau true.
 }
 
 Kalau ada informasi penting yang tidak disebutkan customer (nama, alamat kalau kirim,
@@ -85,6 +86,27 @@ Contoh: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham cheese
   ]
 (Sistem yang bakal ngitung otomatis: baso ayam total 22+6=28, piscok 22, ham
 cheese 66, charsiu 6, coklat 5 -- kamu TIDAK perlu ngitung ini sama sekali.)
+
+ATURAN PAKET BUNDLING "Bundling Spesial" (8 Roti + 1 Dubai Coklat = flat
+Rp150.000): kalau customer JELAS minta paket ini, set "paket_bundling": true,
+dan isi "items_non_box" PERSIS begini (JANGAN pakai box_groups buat ini):
+- Baris-baris kategori "Roti" (PERSIS "Roti", BUKAN "Roti Gandum" dan BUKAN
+  "Donat"/"Roti Tawar"/"Roti Tawar Loaf") yang qty-nya TOTAL HARUS PAS 8 pcs
+  -- boleh campur rasa apa aja sesuai request customer (kalau customer bilang
+  "rasa campur"/"bebas"/nggak nyebut rincian rasa sama sekali, JANGAN
+  ngarang/nebak rincian rasanya sendiri -- cukup isi 1 baris qty 8 dengan rasa
+  yang paling umum/polos yang ada di daftar produk kategori Roti, DAN set
+  "kelengkapan": "kurang_lengkap" + jelaskan di "peringatan_ai" bahwa rincian
+  rasa bundling belum diisi customer, admin perlu konfirmasi/ubah manual).
+- TEPAT 1 baris kategori "Dubai" rasa "Dubai Coklat" qty 1 (WAJIB ada, jangan
+  sampai lupa/ketinggalan -- ini bagian tetap dari paketnya).
+- JANGAN tambahin item lain di luar 2 hal di atas buat order yang sama ini
+  (kalau customer nyebut item TAMBAHAN di luar paket bundling-nya, itu artinya
+  bukan bundling murni -- set "paket_bundling": false, proses semua itemnya
+  apa adanya kayak order biasa, JANGAN dipaksa jadi bundling).
+Total harga paket ini FLAT (BUKAN dijumlah dari harga satuan PriceList) --
+sistem yang bakal ngitung/nge-set harganya sendiri belakangan, kamu TIDAK
+perlu (dan JANGAN) mikirin harga sama sekali buat kasus ini.
 """
 
 PARSE_CATALOG_INSTRUCTION = """
@@ -182,6 +204,7 @@ def _empty_parse_result(pesan_error):
         "nama": None, "no_hp": None, "alamat": None, "metode": None,
         "items": [], "box_groups": [], "catatan": None,
         "peringatan_ai": pesan_error, "kelengkapan": "kurang_lengkap",
+        "paket_bundling": False,
     }
 
 
@@ -373,6 +396,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     if result is None:
         return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
+    result.setdefault("paket_bundling", False)
     result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
     # "catatan" sekarang KHUSUS permintaan packing yang BENERAN disebut
     # customer di chat-nya (misal "donat sama gula dipisah ya") -- boleh
@@ -442,6 +466,7 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
     if result is None:
         return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
+    result.setdefault("paket_bundling", False)
     result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
     # "catatan" sekarang KHUSUS permintaan packing yang BENERAN disebut
     # customer di chat-nya (misal "donat sama gula dipisah ya") -- boleh
