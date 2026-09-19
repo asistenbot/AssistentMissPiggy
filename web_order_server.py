@@ -25,7 +25,7 @@ from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
-from sheets_client import get_sheets_client, is_komposisi_bundling_valid, BUNDLING_HARGA_PAKET
+from sheets_client import get_sheets_client, is_komposisi_bundle_valid
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def _is_delivery_metode(metode):
     return "antar" in m or "kirim" in m
 
 
-def _build_preview_text(parsed):
+def _build_preview_text(parsed, bundle_def=None):
     items_text = "\n".join(
         f"  - {i.get('rasa')} ({i.get('kategori')}) x{i.get('qty')}"
         for i in parsed.get("items", [])
@@ -71,24 +71,35 @@ def _build_preview_text(parsed):
         addon_total_text = "Rp" + format(addon_total, ",").replace(",", ".")
         addon_line = f"Add-on: {addon_jenis} x{addon_qty} ({addon_total_text})\n"
     # Baris "Paket Bundling" -- sama polanya kayak _format_bundling_line()
-    # versi bot.py. Order dari web itemnya udah terstruktur (bukan hasil
+    # versi bot.py, tapi generalized (bisa paket apa aja, bukan cuma 1
+    # hardcode). Order dari web itemnya udah terstruktur (bukan hasil
     # tebakan AI), jadi validitas komposisinya BISA langsung dicek di sini
     # (beda sama order paste-chat manual yang validasinya baru kejadian pas
-    # SIMPAN) -- kalau klaim "paket_bundling" tapi komposisinya nggak PAS,
-    # admin langsung dikasih tau dari preview-nya, nggak perlu nunggu abis
-    # klik Simpan baru ketauan. add_order_rows di sheets_client.py TETEP
-    # re-cek ulang independen pas simpan (jangan sampai cuma percaya
-    # perhitungan di sini doang).
+    # SIMPAN) -- kalau klaim paket tapi komposisinya nggak PAS, admin
+    # langsung dikasih tau dari preview-nya, nggak perlu nunggu abis klik
+    # Simpan baru ketauan. add_order_rows di sheets_client.py TETEP re-cek
+    # ulang independen pas simpan (jangan sampai cuma percaya perhitungan
+    # di sini doang) -- bundle_def yang dioper ke sini juga snapshot pas
+    # order masuk, bisa aja beda sama definisi TERKINI kalau admin ubah
+    # paketnya di antara order masuk & tombol Simpan diklik.
     bundling_line = ""
-    if parsed.get("paket_bundling"):
-        harga_text = format(BUNDLING_HARGA_PAKET, ",").replace(",", ".")
-        bundling_line = f"📦 Paket: *Bundling Spesial* (flat Rp{harga_text})\n"
-        if not is_komposisi_bundling_valid(parsed.get("items") or []):
-            bundling_line += (
-                "⚠️ Komposisi BUKAN persis 8 pcs Roti (non-Gandum/Donat) + 1 Dubai "
-                "Coklat -- kalau disimpan apa adanya, harganya bakal kehitung NORMAL "
-                "per item (BUKAN flat Rp150.000). Cek dulu sebelum Simpan.\n"
+    nama_bundling = parsed.get("paket_bundling_nama")
+    if nama_bundling:
+        if not bundle_def:
+            bundling_line = (
+                f"📦 Paket: *{nama_bundling}* -- ⚠️ paket ini nggak ketemu/nggak aktif "
+                "lagi, kalau disimpan apa adanya harganya bakal kehitung NORMAL per "
+                "item. Cek dulu sebelum Simpan.\n"
             )
+        else:
+            harga_text = format(int(bundle_def["harga"]), ",").replace(",", ".")
+            bundling_line = f"📦 Paket: *{nama_bundling}* (flat Rp{harga_text})\n"
+            if not is_komposisi_bundle_valid(bundle_def, parsed.get("items") or []):
+                bundling_line += (
+                    f"⚠️ Komposisi item BUKAN persis sesuai isi paket *{nama_bundling}* -- "
+                    "kalau disimpan apa adanya, harganya bakal kehitung NORMAL per item "
+                    f"(BUKAN flat Rp{harga_text}). Cek dulu sebelum Simpan.\n"
+                )
     return (
         f"*Order Baru dari Web:*\n"
         f"Nama: {parsed.get('nama') or '-'}\n"
@@ -213,15 +224,30 @@ def create_web_order_app(application):
         addon_qty = max(1, int(body.get("addon_qty") or 1)) if addon_jenis else 0
         addon_total = config.ADDON_PRICES.get(addon_jenis, 0) * addon_qty if addon_jenis else 0
 
-        # Paket "Bundling Spesial" (8 Roti + 1 Dubai Coklat = flat Rp150.000)
-        # -- flag doang dari web (bool(...) biar apapun yang dikirim front-end
-        # nggak lolos jadi truthy aneh2, misal string "false"). Halaman web
-        # yang tanggung jawab nyusun "items" (8 pcs Roti pilihan customer +
-        # 1 Dubai Coklat) SEBELUM submit -- di sini cuma nyimpen klaimnya,
-        # validasi KOMPOSISI beneran dicek di _build_preview_text (buat kasih
-        # tau admin dari awal) DAN di add_order_rows/handle_confirm pas
-        # simpan (sumber kebenaran final, liat sheets_client.py).
-        paket_bundling = bool(body.get("paket_bundling"))
+        # Paket Bundling (opsional, multi-paket -- liat config.SHEET_PAKET_BUNDLING)
+        # -- NAMA paket doang dari web (string, bukan bool lagi kayak versi
+        # lama yang cuma 1 paket hardcode). Halaman web yang tanggung jawab
+        # nyusun "items" sesuai isi/slot paket itu SEBELUM submit -- di sini
+        # cuma nyimpen klaim namanya, definisi paket (harga & slot) diambil
+        # LANGSUNG dari Sheets (sumber kebenaran, liat get_bundle_by_name)
+        # buat validasi komposisi di _build_preview_text (kasih tau admin
+        # dari awal) DAN add_order_rows/handle_confirm pas simpan (final).
+        nama_bundling_raw = (body.get("paket_bundling_nama") or "").strip()
+        bundle_def = None
+        if nama_bundling_raw:
+            try:
+                sheets_check = get_sheets_client()
+                bundle_def = await asyncio.wait_for(
+                    asyncio.to_thread(sheets_check.get_bundle_by_name, nama_bundling_raw), timeout=15
+                )
+            except Exception as e:
+                logger.error(f"Gagal ambil definisi paket bundling '{nama_bundling_raw}': {e}")
+                bundle_def = None
+        # Nama yang kesimpen ke order pakai kapitalisasi PERSIS dari Sheets
+        # kalau ketemu (biar konsisten sama tampilan lain), fallback ke apa
+        # yang dikirim web kalau nggak ketemu (biar admin masih liat nama
+        # yang diklaim di preview, bukan ilang diem-diem).
+        nama_bundling = bundle_def["nama"] if bundle_def else (nama_bundling_raw or None)
 
         parsed = {
             "nama": nama,
@@ -234,7 +260,7 @@ def create_web_order_app(application):
             "addon_jenis": addon_jenis,
             "addon_qty": addon_qty,
             "addon_total": addon_total,
-            "paket_bundling": paket_bundling,
+            "paket_bundling_nama": nama_bundling,
             "kelengkapan": "lengkap",
         }
 
@@ -260,7 +286,7 @@ def create_web_order_app(application):
         application.bot_data.setdefault("pending_orders", {})[order_id] = parsed
         application.bot_data["active_pending_order_id"] = order_id
 
-        preview = _build_preview_text(parsed)
+        preview = _build_preview_text(parsed, bundle_def)
         keyboard = _build_confirm_keyboard(parsed, order_id)
 
         # Kirim preview-nya ke GRUP admin kalau ada (biar kelihatan bareng di
@@ -305,28 +331,41 @@ def create_web_order_app(application):
     async def handle_health(request: web.Request):
         return web.json_response({"ok": True, "service": "web-order"})
 
-    async def handle_bundling_status(request: web.Request):
+    async def handle_bundles(request: web.Request):
         """Dipanggil dari index.html pas halaman order dibuka customer --
-        nentuin tab 'Bundling Spesial' ditampilin atau disembunyiin. Admin
-        nyalain/matiinnya lewat chat ke bot Telegram ('aktifin bundling' /
-        '/bundling on', liat bundling_cmd & _try_parse_bundling_toggle di
-        bot.py) -- status-nya disimpen di tab Sheets 'Pengaturan', jadi
-        nggak perlu upload ulang apa-apa ke Netlify tiap toggle.
+        return daftar SEMUA paket bundling yang lagi AKTIF sekarang (bisa 0,
+        1, atau banyak sekaligus), lengkap sama harga & isi/slot-nya, biar
+        halaman web bisa render tab paket APA AJA secara dinamis -- BEDA
+        dari versi lama (endpoint /bundling-status, cuma balikin 1
+        true/false buat 1 paket hardcode). Admin ngatur paket (bikin/ubah/
+        hapus/aktifin/matiin) lewat chat ke bot Telegram (liat bot.py) --
+        status-nya disimpen di tab Sheets config.SHEET_PAKET_BUNDLING, jadi
+        nggak perlu upload ulang apa-apa ke Netlify tiap kali paketnya
+        berubah.
+
+        Format response: {"ok": true, "bundles": [{"nama":.., "harga":..,
+        "slots": [{"kategori":.., "rasa": .. atau null, "qty":..}, ...]},
+        ...]} -- field "aktif" SENGAJA nggak diikutin (semua yang balik di
+        sini UDAH PASTI aktif, liat only_active=True di bawah).
 
         GET publik (nggak pakai X-Web-Order-Secret) SENGAJA -- ini cuma
         status baca doang (bukan nulis data), dan halaman order butuh akses
-        ini SEBELUM customer isi apa-apa. APAPUN yang gagal di sini
-        (Sheets down dll) fallback ke enabled:false -- promo nggak keliatan
-        itu jauh lebih aman daripada keliatan padahal statusnya nggak jelas."""
+        ini SEBELUM customer isi apa-apa. APAPUN yang gagal di sini (Sheets
+        down dll) fallback ke list kosong -- semua tab paket nggak keliatan
+        itu jauh lebih aman daripada keliatan padahal datanya nggak jelas."""
         try:
             sheets = get_sheets_client()
-            enabled = await asyncio.wait_for(
-                asyncio.to_thread(sheets.get_bundling_enabled), timeout=10
+            bundles = await asyncio.wait_for(
+                asyncio.to_thread(sheets.get_all_bundles, True), timeout=10
             )
         except Exception as e:
-            logger.error(f"Gagal baca status bundling: {e}")
-            enabled = False
-        return web.json_response({"ok": True, "enabled": bool(enabled)})
+            logger.error(f"Gagal baca daftar paket bundling: {e}")
+            bundles = []
+        payload = [
+            {"nama": b["nama"], "harga": int(b["harga"]), "slots": b.get("slots", [])}
+            for b in bundles
+        ]
+        return web.json_response({"ok": True, "bundles": payload})
 
     @web.middleware
     async def cors_middleware(request, handler):
@@ -356,7 +395,7 @@ def create_web_order_app(application):
     web_app.router.add_post("/web-order", handle_web_order)
     web_app.router.add_route("OPTIONS", "/web-order", handle_web_order)
     web_app.router.add_get("/health", handle_health)
-    web_app.router.add_get("/bundling-status", handle_bundling_status)
+    web_app.router.add_get("/bundles", handle_bundles)
     return web_app
 
 

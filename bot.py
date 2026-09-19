@@ -23,10 +23,10 @@ import receipt
 import invoice_image
 import monthly_report_pdf
 import production_recap_pdf
-from sheets_client import get_sheets_client, is_komposisi_bundling_valid, BUNDLING_HARGA_PAKET
+from sheets_client import get_sheets_client, is_komposisi_bundle_valid
 from ai_parser import (
     parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
-    parse_produk_baru,
+    parse_produk_baru, parse_bundle_definition,
 )
 from scheduler_jobs import setup_scheduler
 
@@ -605,6 +605,280 @@ async def handle_produk_baru_confirm(update: Update, context: ContextTypes.DEFAU
         saving_flags.discard(pid)
 
 
+# ---------- PAKET BUNDLING (bikin/ubah/hapus paket lewat chat bebas) ----------
+#
+# Sama kayak PRODUK BARU di atas -- alurnya parse AI (buat bikin/ubah) atau
+# resolve nama (buat hapus) -> preview + tombol Ya/Batal -> baru nulis ke
+# Sheets pas dikonfirm, termasuk pola try/finally yang sama biar flag "lagi
+# nyimpen" nggak nyangkut kalau ada exception nggak ke-tangkep.
+
+def _store_pending_bundle_action(context, data, pid=None):
+    pending = context.bot_data.setdefault("pending_bundle_action", {})
+    if pid is None:
+        pid = _new_order_id()
+    pending[pid] = data
+    return pid
+
+
+def _get_pending_bundle_action(context, pid):
+    if not pid:
+        return None
+    return context.bot_data.get("pending_bundle_action", {}).get(pid)
+
+
+def _clear_pending_bundle_action(context, pid):
+    context.bot_data.get("pending_bundle_action", {}).pop(pid, None)
+
+
+def build_bundle_action_keyboard(pid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ya", callback_data=f"confirm_bundle:{pid}"),
+        InlineKeyboardButton("❌ Batal", callback_data=f"cancel_bundle:{pid}"),
+    ]])
+
+
+def _format_slot_text(slots):
+    descs = []
+    for s in slots:
+        if s.get("rasa"):
+            descs.append(f'{s["qty"]} pcs {s["kategori"]} ({s["rasa"]}, tetap)')
+        else:
+            descs.append(f'{s["qty"]} pcs {s["kategori"]} (bebas rasa)')
+    return "; ".join(descs) if descs else "(belum ada isi)"
+
+
+def _build_bundle_upsert_preview_text(data):
+    harga_text = documents.rupiah(data["harga"])
+    isi_text = _format_slot_text(data["slots"])
+    aksi_label = "UBAH paket yang udah ada" if data.get("is_existing") else "BIKIN paket BARU"
+    lines = [
+        f"*Paket Bundling — {aksi_label}*",
+        "",
+        f"Nama: *{data['nama_paket']}*",
+        f"Harga: *{harga_text}* (flat)",
+        f"Isi: {isi_text}",
+    ]
+    if data.get("peringatan_ai"):
+        lines.append(f"\n⚠️ {data['peringatan_ai']}")
+    if data.get("is_existing"):
+        status = "AKTIF ✅ (nggak berubah)" if data.get("aktif_lama") else "OFF 🚫 (nggak berubah)"
+        lines.append(f"\nStatus aktif: {status}")
+    else:
+        lines.append(
+            "\n_Paket baru default-nya OFF dulu -- ketik \"aktifin bundling "
+            f"{data['nama_paket']}\" abis ini kalau mau langsung tampil di web._"
+        )
+    lines.append("\nSimpan?")
+    return "\n".join(lines)
+
+
+async def _mulai_bundle_baru(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_text: str):
+    """Dipanggil dari handle_text kalau _try_parse_bundling_command nangkep
+    admin mau BIKIN paket bundling baru ATAU UBAH harga/isi paket yang udah
+    ada (kata 'bundling' + kata kerja bikin/tambah/ubah/dst). Parse pakai AI
+    (ai_parser.parse_bundle_definition), lalu kalau nama paketnya cocok sama
+    yang UDAH ADA, GABUNGIN sama definisi lama buat field yang nggak
+    disebutin admin -- biar admin nggak wajib sebut ulang SELURUH komposisi
+    cuma buat naikin harga doang (atau sebaliknya, nggak perlu sebut ulang
+    harga cuma buat ubah isi doang). Tampilin preview + tombol Ya/Batal --
+    BELUM nulis ke Sheets sama sekali di sini."""
+    sheets = get_sheets_client()
+    try:
+        catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
+    except Exception:
+        catalog = None
+    try:
+        existing_bundles = await asyncio.wait_for(asyncio.to_thread(sheets.get_all_bundles), timeout=15)
+    except Exception:
+        existing_bundles = []
+    existing_names = [b["nama"] for b in existing_bundles]
+
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(parse_bundle_definition, raw_text, catalog, existing_names), timeout=40
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Timeout — proses parsing paket bundling kelamaan (lebih dari 40 detik). Coba kirim ulang."
+        )
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ada error pas parsing paket bundling: {e}\nCoba kirim ulang.")
+        return
+
+    if data.get("error"):
+        await update.message.reply_text(f"⚠️ {data['error']}")
+        return
+
+    nama_paket = (data.get("nama_paket") or "").strip()
+    if not nama_paket:
+        await update.message.reply_text(
+            "Nama paketnya belum kebaca -- boleh diulang sebut nama paketnya? Contoh: "
+            "\"bikin paket bundling baru namanya Paket Lebaran, harga 200rb, isinya 6 pcs "
+            "roti gandum bebas rasa sama 4 pcs donat bebas rasa\""
+        )
+        return
+
+    existing = next(
+        (b for b in existing_bundles if b["nama"].strip().lower() == nama_paket.lower()), None
+    )
+
+    harga = data.get("harga")
+    slots = data.get("slots") or []
+    if existing:
+        # Paket UDAH ADA -- boleh cuma ubah SEBAGIAN (harga doang, atau isi
+        # doang), sisanya nurunin dari definisi lama.
+        nama_paket = existing["nama"]  # pakai kapitalisasi persis yang udah tersimpan
+        if harga is None:
+            harga = existing["harga"]
+        if not slots:
+            slots = existing["slots"]
+        aktif_lama = existing["aktif"]
+    else:
+        aktif_lama = False
+        if harga is None or not slots:
+            kurang = []
+            if harga is None:
+                kurang.append("harga")
+            if not slots:
+                kurang.append("isi/komposisi paketnya")
+            detail_kurang = " dan ".join(kurang)
+            await update.message.reply_text(
+                f"Ini paket BARU (belum ada sebelumnya), jadi {detail_kurang} wajib disebut "
+                "lengkap dulu. Contoh: \"bikin paket bundling baru namanya Paket Lebaran, "
+                "harga 200rb, isinya 6 pcs roti gandum bebas rasa sama 4 pcs donat bebas rasa\""
+            )
+            return
+
+    pid = _store_pending_bundle_action(context, {
+        "aksi": "upsert",
+        "nama_paket": nama_paket,
+        "harga": int(harga),
+        "slots": slots,
+        "aktif_lama": aktif_lama,
+        "is_existing": bool(existing),
+        "peringatan_ai": data.get("peringatan_ai"),
+    })
+    preview = _build_bundle_upsert_preview_text({
+        "nama_paket": nama_paket, "harga": int(harga), "slots": slots,
+        "is_existing": bool(existing), "aktif_lama": aktif_lama,
+        "peringatan_ai": data.get("peringatan_ai"),
+    })
+    keyboard = build_bundle_action_keyboard(pid)
+    await update.message.reply_text(preview, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def _mulai_hapus_bundle(update: Update, context: ContextTypes.DEFAULT_TYPE, fragment: str):
+    """Dipanggil kalau admin minta HAPUS paket bundling (kata 'hapus'/
+    'delete' dst + 'bundling'). Cari dulu nama paket yang cocok dari
+    fragment teksnya (liat _resolve_bundle_name), baru tampilin preview +
+    tombol Ya/Batal -- BELUM beneran ngehapus apa-apa di sini (hapus itu
+    PERMANEN & nggak ada undo, jadi sengaja tetep lewat konfirmasi kayak
+    alur lainnya, bukan langsung eksekusi dari 1 chat doang)."""
+    sheets = get_sheets_client()
+    try:
+        all_bundles = await asyncio.wait_for(asyncio.to_thread(sheets.get_all_bundles), timeout=15)
+    except Exception as e:
+        await update.message.reply_text(f"Gagal ambil daftar paket bundling: {e}")
+        return
+
+    if not all_bundles:
+        await update.message.reply_text("Belum ada paket bundling sama sekali yang bisa dihapus.")
+        return
+
+    nama, kandidat = _resolve_bundle_name(fragment, all_bundles)
+    if not nama:
+        daftar = "\n".join(f"- {n}" for n in kandidat)
+        await update.message.reply_text(
+            f"Paket bundling yang mana yang mau dihapus? Sebut namanya lebih jelas ya, "
+            f"yang ada sekarang:\n{daftar}"
+        )
+        return
+
+    pid = _store_pending_bundle_action(context, {"aksi": "hapus", "nama_paket": nama})
+    keyboard = build_bundle_action_keyboard(pid)
+    await update.message.reply_text(
+        f"Yakin mau HAPUS PERMANEN paket *{nama}*? Definisinya bakal ilang total (kalau "
+        f"mau nonaktifin doang tanpa hapus, pakai \"matiin bundling {nama}\" aja).",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_bundle_action_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action, _, pid = query.data.partition(":")
+
+    if action == "cancel_bundle":
+        _clear_pending_bundle_action(context, pid)
+        await query.edit_message_text("Dibatalin ya.")
+        return
+
+    saving_flags = context.bot_data.setdefault("saving_bundle_action", set())
+    if pid in saving_flags:
+        return
+    saving_flags.add(pid)
+
+    try:
+        data = _get_pending_bundle_action(context, pid)
+        if not data:
+            await query.edit_message_text("Nggak ada data paket bundling yang tersimpan. Kirim ulang chat-nya ya.")
+            return
+
+        await query.edit_message_text("Menyimpan ke Sheets...")
+
+        sheets = get_sheets_client()
+        nama = data["nama_paket"]
+
+        if data["aksi"] == "hapus":
+            try:
+                found = await asyncio.wait_for(asyncio.to_thread(sheets.delete_bundle, nama), timeout=30)
+            except asyncio.TimeoutError:
+                await query.message.reply_text("Timeout -- gagal hapus (lebih dari 30 detik). Coba lagi ya.")
+                return
+            except Exception as e:
+                await query.message.reply_text(f"Gagal hapus: {e}\nCoba lagi ya.")
+                return
+            if found:
+                await query.message.reply_text(f"✅ Paket *{nama}* udah dihapus permanen.", parse_mode="Markdown")
+            else:
+                await query.message.reply_text(
+                    f"Paket *{nama}* nggak ketemu (mungkin udah dihapus duluan).", parse_mode="Markdown"
+                )
+        else:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        sheets.upsert_bundle, nama, data["harga"], data["slots"], data.get("aktif_lama", False),
+                    ),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                await query.message.reply_text("Timeout -- gagal simpan (lebih dari 30 detik). Coba lagi ya.")
+                return
+            except Exception as e:
+                await query.message.reply_text(f"Gagal simpan: {e}\nCoba lagi ya.")
+                return
+
+            harga_text = documents.rupiah(data["harga"])
+            isi_text = _format_slot_text(data["slots"])
+            if data.get("is_existing"):
+                pesan = f"✅ Paket *{nama}* di-update. Harga: {harga_text}. Isi: {isi_text}."
+            else:
+                pesan = (
+                    f"✅ Paket baru *{nama}* ({harga_text}) tersimpan, isi: {isi_text}.\n"
+                    f"Status-nya masih OFF -- ketik \"aktifin bundling {nama}\" kalau mau "
+                    "langsung tampil di web (nggak perlu upload ulang apa-apa ke Netlify)."
+                )
+            await query.message.reply_text(pesan, parse_mode="Markdown")
+
+        _clear_pending_bundle_action(context, pid)
+    finally:
+        saving_flags.discard(pid)
+
+
 def _format_kurir_line(parsed):
     """Baris 'Kurir: ...' yang dipakai di SEMUA preview order -- cuma
     dimunculin kalau metode-nya kirim/antar (nggak relevan buat Ambil
@@ -617,17 +891,18 @@ def _format_kurir_line(parsed):
 
 
 def _format_bundling_line(parsed):
-    """Baris info paket 'Bundling Spesial' yang dipakai di SEMUA preview
-    order -- kosong (nggak nongol sama sekali) kalau order ini BUKAN klaim
-    paket bundling. Validasi KOMPOSISI beneran (8 Roti non-Gandum/Donat + 1
-    Dubai Coklat) baru dicek pas SIMPAN (lihat is_komposisi_bundling_valid di
-    sheets_client.py DAN pengecekan sama di handle_confirm) -- di preview ini
-    cuma nunjukkin klaimnya doang, biar admin bisa liat dari awal sebelum
-    diklik Simpan."""
-    if not parsed.get("paket_bundling"):
+    """Baris info paket bundling yang dipakai di SEMUA preview order --
+    kosong (nggak nongol sama sekali) kalau order ini BUKAN klaim paket
+    bundling. Beda dari versi lama (1 paket hardcode), sekarang nama paket
+    (dan harganya) dinamis sesuai apa yang diklaim di 'parsed' -- validasi
+    KOMPOSISI beneran (sesuai definisi slot paket itu di Sheets) baru dicek
+    pas SIMPAN (lihat is_komposisi_bundle_valid di sheets_client.py DAN
+    pengecekan sama di handle_confirm) -- di preview ini cuma nunjukkin
+    klaimnya doang, biar admin bisa liat dari awal sebelum diklik Simpan."""
+    nama = parsed.get("paket_bundling_nama")
+    if not nama:
         return ""
-    harga_text = format(BUNDLING_HARGA_PAKET, ",").replace(",", ".")
-    return f"📦 Paket: *Bundling Spesial* (flat Rp{harga_text})\n"
+    return f"📦 Paket: *{nama}* (harga flat sesuai definisi paket ini)\n"
 
 
 def _format_addon_line(parsed):
@@ -1189,18 +1464,55 @@ async def kirim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _tandai_terkirim(update, nama)
 
 
-async def _toggle_bundling_status(update: Update, enabled: bool):
-    """Nyalain/matiin tampilan tab 'Bundling Spesial' di web -- status-nya
-    disimpen di tab Sheets 'Pengaturan' (liat set_bundling_enabled di
-    sheets_client.py). Web (index.html) yang manggil endpoint
-    /bundling-status di web_order_server.py buat baca status ini pas
-    halaman dibuka customer -- jadi begitu admin toggle di sini, order
-    berikutnya yang buka web langsung ngikutin (nggak perlu upload ulang
-    apa-apa ke Netlify)."""
+def _format_bundle_summary(b):
+    """1 blok ringkasan paket bundling (nama, status, harga, isi) -- dipakai
+    di daftar (_kirim_daftar_bundle) dan bisa dipakai ulang di tempat lain
+    kalau perlu nampilin 1 paket aja."""
+    harga_text = documents.rupiah(b["harga"])
+    status = "AKTIF ✅" if b["aktif"] else "OFF 🚫"
+    slot_descs = []
+    for s in b.get("slots", []):
+        if s.get("rasa"):
+            slot_descs.append(f'{s["qty"]}x {s["kategori"]} ({s["rasa"]})')
+        else:
+            slot_descs.append(f'{s["qty"]}x {s["kategori"]} (bebas rasa)')
+    isi = ", ".join(slot_descs) if slot_descs else "(belum ada isi)"
+    return f"📦 *{b['nama']}* — {status}\n   Harga: {harga_text} | Isi: {isi}"
+
+
+async def _kirim_daftar_bundle(update: Update):
+    """Balesan buat perintah 'liat daftar paket bundling apa aja' -- baca
+    LANGSUNG dari Sheets (config.SHEET_PAKET_BUNDLING) tiap kali dipanggil,
+    jadi selalu nunjukkin data TERKINI walau baru aja diubah lewat chat."""
     sheets = get_sheets_client()
     try:
-        await asyncio.wait_for(
-            asyncio.to_thread(sheets.set_bundling_enabled, enabled), timeout=20
+        bundles = await asyncio.wait_for(asyncio.to_thread(sheets.get_all_bundles), timeout=15)
+    except Exception as e:
+        await update.message.reply_text(f"Gagal ambil daftar paket bundling: {e}")
+        return
+    if not bundles:
+        await update.message.reply_text(
+            "Belum ada paket bundling yang didefinisikan sama sekali. Bikin dulu lewat "
+            "chat bebas, misal: \"bikin paket bundling baru namanya Paket Lebaran, harga "
+            "200rb, isinya 6 pcs roti gandum bebas rasa sama 4 pcs donat bebas rasa\"."
+        )
+        return
+    teks = "*Daftar Paket Bundling:*\n\n" + "\n\n".join(_format_bundle_summary(b) for b in bundles)
+    await update.message.reply_text(teks, parse_mode="Markdown")
+
+
+async def _toggle_bundle_status(update: Update, nama: str, enabled: bool):
+    """Nyalain/matiin tampilan tab paket bundling TERTENTU (by nama) di web
+    -- status-nya disimpen per-baris di tab Sheets config.SHEET_PAKET_BUNDLING
+    (kolom Aktif, liat set_bundle_active di sheets_client.py). Web
+    (index.html) yang manggil endpoint /bundles di web_order_server.py buat
+    baca paket mana aja yang aktif pas halaman dibuka customer -- jadi
+    begitu admin toggle di sini, order berikutnya yang buka web langsung
+    ngikutin (nggak perlu upload ulang apa-apa ke Netlify)."""
+    sheets = get_sheets_client()
+    try:
+        found = await asyncio.wait_for(
+            asyncio.to_thread(sheets.set_bundle_active, nama, enabled), timeout=20
         )
     except asyncio.TimeoutError:
         await update.message.reply_text("Timeout pas update status bundling. Coba lagi.")
@@ -1209,43 +1521,86 @@ async def _toggle_bundling_status(update: Update, enabled: bool):
         await update.message.reply_text(f"Gagal update status bundling: {e}")
         return
 
+    if not found:
+        await update.message.reply_text(f"Paket *{nama}* nggak ketemu.", parse_mode="Markdown")
+        return
+
     if enabled:
         await update.message.reply_text(
-            "✅ Paket *Bundling Spesial* sekarang AKTIF -- tab-nya bakal keliatan "
-            "di web buat customer yang buka halaman order abis ini.",
+            f"✅ Paket *{nama}* sekarang AKTIF -- tab-nya bakal keliatan di web buat "
+            "customer yang buka halaman order abis ini.",
             parse_mode="Markdown",
         )
     else:
         await update.message.reply_text(
-            "🚫 Paket *Bundling Spesial* sekarang OFF -- tab-nya disembunyiin dari "
-            "web buat customer yang buka halaman order abis ini.",
+            f"🚫 Paket *{nama}* sekarang OFF -- tab-nya disembunyiin dari web buat "
+            "customer yang buka halaman order abis ini.",
             parse_mode="Markdown",
         )
+
+
+async def _handle_bundling_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE, enabled: bool, fragment: str):
+    """Resolve 'fragment' (potongan teks kasar hasil ekstrak dari kalimat
+    admin, liat _extract_bundle_name_fragment) ke nama paket BENERAN yang
+    ada di Sheets, baru toggle. Kalau nggak ketemu 1 match yang pasti
+    (fragment kosong & paket lebih dari 1, atau fragment cocok ke beberapa
+    paket sekaligus), tanya balik ke admin daripada nebak salah paket."""
+    sheets = get_sheets_client()
+    try:
+        all_bundles = await asyncio.wait_for(asyncio.to_thread(sheets.get_all_bundles), timeout=15)
+    except Exception as e:
+        await update.message.reply_text(f"Gagal ambil daftar paket bundling: {e}")
+        return
+
+    if not all_bundles:
+        await update.message.reply_text(
+            "Belum ada paket bundling yang didefinisikan sama sekali. Bikin dulu lewat "
+            "chat bebas, misal: \"bikin paket bundling baru namanya Paket Lebaran, harga "
+            "200rb, isinya 6 pcs roti gandum bebas rasa sama 4 pcs donat bebas rasa\"."
+        )
+        return
+
+    nama, kandidat = _resolve_bundle_name(fragment, all_bundles)
+    if not nama:
+        daftar = "\n".join(f"- {n}" for n in kandidat)
+        await update.message.reply_text(
+            f"Paket bundling yang mana? Sebut namanya lebih jelas ya, yang ada sekarang:\n{daftar}"
+        )
+        return
+
+    await _toggle_bundle_status(update, nama, enabled)
 
 
 @owner_only
 async def bundling_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Command eksplisit /bundling on|off|status -- alternatif buat chat
-    natural language ('aktifin bundling' dst, liat _try_parse_bundling_toggle)
-    kalau admin lebih suka command yang jelas."""
-    arg = (context.args[0].lower() if context.args else "").strip()
-    if arg in ("on", "aktif", "nyala"):
-        await _toggle_bundling_status(update, True)
-    elif arg in ("off", "nonaktif", "mati"):
-        await _toggle_bundling_status(update, False)
-    elif arg in ("status", "cek", ""):
-        sheets = get_sheets_client()
-        try:
-            enabled = await asyncio.wait_for(
-                asyncio.to_thread(sheets.get_bundling_enabled), timeout=20
-            )
-        except Exception as e:
-            await update.message.reply_text(f"Gagal cek status bundling: {e}")
-            return
-        status_text = "AKTIF ✅" if enabled else "OFF 🚫"
-        await update.message.reply_text(f"Status paket Bundling Spesial di web sekarang: {status_text}")
+    """Command eksplisit /bundling -- alternatif buat chat natural language
+    (aktifin/matiin/hapus/liat daftar, liat _try_parse_bundling_command)
+    kalau admin lebih suka command yang jelas. Bikin/ubah paket TETEP lewat
+    chat bebas biasa (perlu AI buat ekstrak komposisinya, nggak praktis
+    lewat command args)."""
+    args = context.args or []
+    sub = (args[0].lower() if args else "").strip()
+    rest = " ".join(args[1:]).strip()
+
+    if sub in ("", "list", "status", "cek", "daftar"):
+        await _kirim_daftar_bundle(update)
+    elif sub in ("on", "aktif", "nyala", "aktifin"):
+        await _handle_bundling_toggle_command(update, context, True, rest or None)
+    elif sub in ("off", "nonaktif", "mati", "matiin"):
+        await _handle_bundling_toggle_command(update, context, False, rest or None)
+    elif sub in ("hapus", "delete"):
+        await _mulai_hapus_bundle(update, context, rest or None)
     else:
-        await update.message.reply_text("Format: /bundling on | /bundling off | /bundling status")
+        await update.message.reply_text(
+            "Format:\n"
+            "/bundling — liat daftar semua paket\n"
+            "/bundling on <nama paket> — aktifin\n"
+            "/bundling off <nama paket> — matiin\n"
+            "/bundling hapus <nama paket> — hapus permanen\n\n"
+            "Buat bikin paket baru / ubah isi & harga, chat aja bebas, misal:\n"
+            "\"bikin paket bundling baru namanya Paket Lebaran, harga 200rb, isinya "
+            "6 pcs roti gandum bebas rasa sama 4 pcs donat bebas rasa\""
+        )
 
 
 _FILLER_DEPAN_KIRIM = re.compile(r"^(yg|yang|itu|order)\s+", re.IGNORECASE)
@@ -1300,22 +1655,91 @@ def _try_parse_delivered_mark(text):
     return nama
 
 
-# Deteksi deterministik (BUKAN AI) buat admin nyalain/matiin paket "Bundling
-# Spesial" di web lewat chat biasa -- misal "aktifin bundling", "matiin
-# paket bundling spesial dulu ya". WAJIB nyebut kata "bundling" di
+# Deteksi deterministik (BUKAN AI) buat SEMUA perintah admin soal paket
+# bundling lewat chat biasa -- nyalain/matiin, hapus, liat daftar, ATAU
+# bikin/ubah paket (yang terakhir ini nyerahin teksnya ke AI, liat
+# parse_bundle_definition di ai_parser.py). WAJIB nyebut kata "bundling" di
 # kalimatnya (bukan kata kerja doang) biar nggak ke-trigger nyasar dari
-# obrolan lain yang kebetulan mirip (mis. "nyalain lampu").
+# obrolan lain yang kebetulan mirip (mis. "nyalain lampu", "hapus donat dari
+# orderan Apple").
 _BUNDLING_ON_WORDS = re.compile(r"\b(aktifin|aktifkan|nyalain|nyalakan|hidupin|hidupkan|mulai(?:in|kan)?)\b", re.IGNORECASE)
 _BUNDLING_OFF_WORDS = re.compile(r"\b(matiin|matikan|nonaktifin|nonaktifkan|non[- ]?aktifkan|stop(?:in|kan)?|berhentiin|hentikan)\b", re.IGNORECASE)
+_BUNDLING_HAPUS_WORDS = re.compile(r"\b(hapus|delete|buang|hilangkan)\b", re.IGNORECASE)
+_BUNDLING_LIST_WORDS = re.compile(r"\b(lihat|liat|list|daftar|apa aja|ada apa)\b", re.IGNORECASE)
+_BUNDLING_BUAT_WORDS = re.compile(r"\b(bikin|buat|tambah(?:in|kan)?|nambah(?:in)?|ubah|ganti|edit|atur|update)\b", re.IGNORECASE)
+
+# Kata-kata yang dibuang pas nyoba nebak "nama paket" dari sisa kalimat
+# admin (misal "aktifin bundling lebaran" -> sisa "lebaran" abis kata kerja
+# + "bundling"/"paket" dibuang) -- hasilnya cuma FRAGMEN kasar, PASTI
+# dicocokin lagi ke nama paket yang BENERAN ada di Sheets lewat
+# _resolve_bundle_name (bukan langsung dipercaya), jadi nggak masalah kalau
+# regex ini kurang presisi.
+_BUNDLING_NAME_STRIP = re.compile(
+    r"\b(bundling|paket|"
+    r"aktifin|aktifkan|nyalain|nyalakan|hidupin|hidupkan|mulai(?:in|kan)?|"
+    r"matiin|matikan|nonaktifin|nonaktifkan|non[- ]?aktifkan|stop(?:in|kan)?|berhentiin|hentikan|"
+    r"hapus|delete|buang|hilangkan|"
+    r"lihat|liat|list|daftar|"
+    r"dong|donk|ya|yah|deh|dulu|nih|tolong|min|kak|please|udah|dl|sih)\b",
+    re.IGNORECASE,
+)
 
 
-def _try_parse_bundling_toggle(text):
-    """Return True (nyalain) / False (matiin) / None (bukan perintah ini).
+def _extract_bundle_name_fragment(text):
+    """Ekstrak KASAR nama paket dari sisa kalimat admin abis kata kerja +
+    kata 'bundling'/'paket' dibuang -- return None kalau abis dibuang
+    ternyata nggak nyisa apa-apa (berarti admin nggak nyebut nama spesifik
+    sama sekali, misal cuma 'aktifin bundling' doang)."""
+    cleaned = _BUNDLING_NAME_STRIP.sub(" ", text)
+    cleaned = re.sub(r"[.,!?]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _resolve_bundle_name(fragment, all_bundles):
+    """Cocokin 'fragment' (hasil ekstrak kasar dari kalimat admin, boleh
+    None) ke salah satu nama paket yang BENERAN ada di 'all_bundles' (list
+    dari sheets.get_all_bundles()). Return (nama_persis, []) kalau ketemu 1
+    match yang PASTI, atau (None, daftar_kandidat) kalau nggak yakin (nama
+    kosong padahal paket lebih dari 1, atau fragment cocok ke beberapa
+    paket sekaligus) -- daftar_kandidat itu yang ditampilin ke admin biar
+    dia bisa perjelas/pilih sendiri, daripada bot nebak salah paket."""
+    names = [b["nama"] for b in all_bundles]
+    if not names:
+        return None, []
+    if not fragment:
+        if len(names) == 1:
+            return names[0], []
+        return None, names
+    frag_lower = fragment.lower()
+    exact = [n for n in names if n.lower() == frag_lower]
+    if len(exact) == 1:
+        return exact[0], []
+    contains = [n for n in names if frag_lower in n.lower() or n.lower() in frag_lower]
+    if len(contains) == 1:
+        return contains[0], []
+    if len(contains) > 1:
+        return None, contains
+    return None, names
+
+
+def _try_parse_bundling_command(text):
+    """Return salah satu:
+      ("toggle", True/False, nama_fragment_atau_None)
+      ("hapus", None, nama_fragment_atau_None)
+      ("list", None, None)
+      ("buat_ubah", None, None)
+      None  -- bukan perintah bundling sama sekali
     Dicek SEBELUM classify_intent (AI) di handle_text, sama pola kayak
-    _try_parse_delivered_mark di atas -- toggle ini murni on/off doang,
-    nggak butuh AI buat nebak-nebak. _PENANDA_BUKAN_PERINTAH dipakai lagi
-    di sini biar kalimat kayak 'gimana cara aktifin bundling?' (pertanyaan,
-    bukan perintah) nggak salah ke-toggle."""
+    _try_parse_delivered_mark di atas -- murni deteksi kata kunci, nggak
+    butuh AI buat nebak-nebak MAKSUDNYA (nama paket & isi/harga buat
+    "buat_ubah" baru diserahin ke AI belakangan, liat _mulai_bundle_baru).
+    _PENANDA_BUKAN_PERINTAH dipakai lagi di sini biar kalimat kayak 'gimana
+    cara aktifin bundling?' (pertanyaan, bukan perintah) nggak salah
+    ke-eksekusi. Urutan pengecekan SENGAJA toggle/hapus/list duluan sebelum
+    buat_ubah (paling umum/generik) -- kata kerja kayak 'ubah'/'atur' juga
+    lumrah nempel di kalimat toggle/hapus (misal "ubah status bundling jadi
+    off"), jadi kata kerja yang lebih SPESIFIK menang duluan."""
     if not text:
         return None
     lower = text.strip().lower()
@@ -1324,9 +1748,15 @@ def _try_parse_bundling_toggle(text):
     if _PENANDA_BUKAN_PERINTAH.search(lower):
         return None
     if _BUNDLING_ON_WORDS.search(lower):
-        return True
+        return ("toggle", True, _extract_bundle_name_fragment(text))
     if _BUNDLING_OFF_WORDS.search(lower):
-        return False
+        return ("toggle", False, _extract_bundle_name_fragment(text))
+    if _BUNDLING_HAPUS_WORDS.search(lower):
+        return ("hapus", None, _extract_bundle_name_fragment(text))
+    if _BUNDLING_LIST_WORDS.search(lower):
+        return ("list", None, None)
+    if _BUNDLING_BUAT_WORDS.search(lower):
+        return ("buat_ubah", None, None)
     return None
 
 
@@ -1724,13 +2154,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _tandai_terkirim(update, nama_dikirim)
         return
 
-    # Deteksi deterministik buat nyalain/matiin paket "Bundling Spesial" di
-    # web -- misal "aktifin bundling", "matiin paket bundling spesial".
-    # Dicek SEBELUM classify_intent (AI) sama pola kayak di atas -- toggle
-    # on/off murni nggak butuh AI buat nebak.
-    toggle_bundling = _try_parse_bundling_toggle(raw_text)
-    if toggle_bundling is not None:
-        await _toggle_bundling_status(update, toggle_bundling)
+    # Deteksi deterministik buat SEMUA perintah admin soal paket bundling --
+    # nyalain/matiin, hapus, liat daftar, atau bikin/ubah paket (yang
+    # terakhir nyerahin ke AI, liat _mulai_bundle_baru). Dicek SEBELUM
+    # classify_intent (AI) sama pola kayak di atas.
+    bundling_cmd_hasil = _try_parse_bundling_command(raw_text)
+    if bundling_cmd_hasil is not None:
+        aksi, nilai, fragment = bundling_cmd_hasil
+        if aksi == "toggle":
+            await _handle_bundling_toggle_command(update, context, nilai, fragment)
+        elif aksi == "hapus":
+            await _mulai_hapus_bundle(update, context, fragment)
+        elif aksi == "list":
+            await _kirim_daftar_bundle(update)
+        elif aksi == "buat_ubah":
+            await _mulai_bundle_baru(update, context, raw_text)
         return
 
     # Coba tebak dulu maksud admin (bahasa natural, nggak wajib pakai '/')
@@ -1863,12 +2301,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
     except Exception:
         catalog = None  # kalau gagal ambil, tetep lanjut tanpa catalog (fallback)
+    try:
+        active_bundles = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_all_bundles, True), timeout=15
+        )
+    except Exception:
+        active_bundles = None  # gagal ambil -> AI dianggap nggak ada paket aktif (aman, liat _build_bundling_rules_text)
 
     try:
         # Jalanin pemanggilan AI di thread terpisah (bukan blocking event loop bot),
         # dan kasih batas waktu maksimal 40 detik biar nggak nge-gantung selamanya.
         parsed = await asyncio.wait_for(
-            asyncio.to_thread(parse_customer_chat, raw_text, catalog), timeout=40
+            asyncio.to_thread(parse_customer_chat, raw_text, catalog, active_bundles), timeout=40
         )
     except asyncio.TimeoutError:
         await update.message.reply_text(
@@ -1970,10 +2414,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         catalog = await asyncio.wait_for(asyncio.to_thread(sheets.get_catalog_list), timeout=15)
     except Exception:
         catalog = None
+    try:
+        active_bundles = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_all_bundles, True), timeout=15
+        )
+    except Exception:
+        active_bundles = None
 
     try:
         parsed = await asyncio.wait_for(
-            asyncio.to_thread(parse_customer_chat_image, image_bytes, "image/jpeg", caption, catalog),
+            asyncio.to_thread(parse_customer_chat_image, image_bytes, "image/jpeg", caption, catalog, active_bundles),
             timeout=40,
         )
     except asyncio.TimeoutError:
@@ -2073,7 +2523,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "addon_jenis": parsed.get("addon_jenis"),
             "addon_qty": parsed.get("addon_qty"),
             "addon_total": parsed.get("addon_total"),
-            "paket_bundling": bool(parsed.get("paket_bundling")),
+            "paket_bundling_nama": parsed.get("paket_bundling_nama"),
         }
 
         sheets = get_sheets_client()
@@ -2084,8 +2534,14 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ternyata nggak valid (harga ke-simpen NORMAL per item, bukan
         # silent/nggak ketauan). add_order_rows sendiri tetep re-cek ulang
         # independen (jangan sampai cuma percaya flag dari sini doang).
-        bundling_diklaim = bool(parsed.get("paket_bundling"))
-        bundling_valid = bundling_diklaim and is_komposisi_bundling_valid(order["items"])
+        # Nama paket bisa BEDA sama definisi paket beneran di Sheets (misal
+        # udah dihapus/diubah admin di antara AI nge-parse & tombol Simpan
+        # diklik) -- ambil definisi TERKINI langsung dari Sheets di sini,
+        # bukan percaya nama doang.
+        nama_bundling_diklaim = parsed.get("paket_bundling_nama")
+        bundle_def = sheets.get_bundle_by_name(nama_bundling_diklaim) if nama_bundling_diklaim else None
+        bundling_diklaim = bool(nama_bundling_diklaim)
+        bundling_valid = bool(bundle_def) and is_komposisi_bundle_valid(bundle_def, order["items"])
 
         try:
             orders = await asyncio.wait_for(
@@ -2103,11 +2559,18 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text("Tersimpan!")
 
-        if bundling_diklaim and not bundling_valid:
+        if bundling_diklaim and not bundle_def:
             await query.message.reply_text(
-                "⚠️ Order ini ditandain paket *Bundling Spesial*, tapi komposisi item-nya "
-                "BUKAN persis 8 pcs Roti (non-Gandum/Donat) + 1 Dubai Coklat -- harganya "
-                "kesimpen NORMAL per item dari PriceList (BUKAN flat Rp150.000). "
+                f"⚠️ Order ini ditandain paket *{nama_bundling_diklaim}*, tapi paket itu "
+                "nggak ketemu (mungkin udah dihapus/diganti nama) -- harganya kesimpen "
+                "NORMAL per item dari PriceList. Cek manual di Sheets kalau perlu.",
+                parse_mode="Markdown",
+            )
+        elif bundling_diklaim and not bundling_valid:
+            await query.message.reply_text(
+                f"⚠️ Order ini ditandain paket *{nama_bundling_diklaim}*, tapi komposisi "
+                "item-nya BUKAN persis sesuai isi paket itu -- harganya kesimpen NORMAL "
+                f"per item dari PriceList (BUKAN flat harga paket {nama_bundling_diklaim}). "
                 "Cek manual di Sheets kalau ini seharusnya bundling.",
                 parse_mode="Markdown",
             )
@@ -3156,6 +3619,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_set_addon, pattern="^set_addon:"))
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(CallbackQueryHandler(handle_produk_baru_confirm, pattern="^(confirm_produk|cancel_produk):"))
+    app.add_handler(CallbackQueryHandler(handle_bundle_action_confirm, pattern="^(confirm_bundle|cancel_bundle):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(global_error_handler)

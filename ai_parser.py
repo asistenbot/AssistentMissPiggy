@@ -38,7 +38,7 @@ Struktur JSON:
   "peringatan_ai": "peringatan OTOMATIS dari kamu buat admin kalau ada yang perlu dicek (info kurang, nama rasa ambigu, dst), atau null kalau semua jelas -- PENTING: field ini BUKAN catatan packing dari customer, JANGAN pernah diisi permintaan/instruksi packing customer di sini (kalau customer minta packing khusus, itu masuk 'catatan' di bawah, bukan sini)",
   "catatan": "instruksi/permintaan packing yang BENERAN disebut customer sendiri (misal 'donat sama gula dipisah', 'jangan dibungkus plastik'), atau null kalau customer nggak minta apa-apa soal packing -- field ini nanti kesimpen ke Sheets & DICETAK di surat jalan buat kurir/packing, jadi JANGAN isi kesimpulan/analisis kamu sendiri di sini, HANYA permintaan packing yang eksplisit disebut customer",
   "kelengkapan": "lengkap" atau "kurang_lengkap",
-  "paket_bundling": true atau false -- true HANYA kalau customer JELAS-JELAS minta paket "Bundling Spesial" (kata kunci: "bundling", "paket bundling", "paket 8 roti + dubai", atau sejenisnya) -- LIHAT ATURAN PAKET BUNDLING di bawah buat cara isi items_non_box-nya kalau true.
+  "paket_bundling_nama": "nama paket PERSIS sama seperti di daftar paket bundling AKTIF di bawah (kalau ada), diisi HANYA kalau customer JELAS-JELAS minta salah satu paket itu -- LIHAT ATURAN PAKET BUNDLING di bawah buat cara isi items_non_box-nya. null kalau customer nggak minta paket bundling apapun."
 }
 
 Kalau ada informasi penting yang tidak disebutkan customer (nama, alamat kalau kirim,
@@ -86,27 +86,6 @@ Contoh: kalau customer bilang "22 box isi baso ayam 1, piscok 1, ham cheese
   ]
 (Sistem yang bakal ngitung otomatis: baso ayam total 22+6=28, piscok 22, ham
 cheese 66, charsiu 6, coklat 5 -- kamu TIDAK perlu ngitung ini sama sekali.)
-
-ATURAN PAKET BUNDLING "Bundling Spesial" (8 Roti + 1 Dubai Coklat = flat
-Rp150.000): kalau customer JELAS minta paket ini, set "paket_bundling": true,
-dan isi "items_non_box" PERSIS begini (JANGAN pakai box_groups buat ini):
-- Baris-baris kategori "Roti" (PERSIS "Roti", BUKAN "Roti Gandum" dan BUKAN
-  "Donat"/"Roti Tawar"/"Roti Tawar Loaf") yang qty-nya TOTAL HARUS PAS 8 pcs
-  -- boleh campur rasa apa aja sesuai request customer (kalau customer bilang
-  "rasa campur"/"bebas"/nggak nyebut rincian rasa sama sekali, JANGAN
-  ngarang/nebak rincian rasanya sendiri -- cukup isi 1 baris qty 8 dengan rasa
-  yang paling umum/polos yang ada di daftar produk kategori Roti, DAN set
-  "kelengkapan": "kurang_lengkap" + jelaskan di "peringatan_ai" bahwa rincian
-  rasa bundling belum diisi customer, admin perlu konfirmasi/ubah manual).
-- TEPAT 1 baris kategori "Dubai" rasa "Dubai Coklat" qty 1 (WAJIB ada, jangan
-  sampai lupa/ketinggalan -- ini bagian tetap dari paketnya).
-- JANGAN tambahin item lain di luar 2 hal di atas buat order yang sama ini
-  (kalau customer nyebut item TAMBAHAN di luar paket bundling-nya, itu artinya
-  bukan bundling murni -- set "paket_bundling": false, proses semua itemnya
-  apa adanya kayak order biasa, JANGAN dipaksa jadi bundling).
-Total harga paket ini FLAT (BUKAN dijumlah dari harga satuan PriceList) --
-sistem yang bakal ngitung/nge-set harganya sendiri belakangan, kamu TIDAK
-perlu (dan JANGAN) mikirin harga sama sekali buat kasus ini.
 """
 
 PARSE_CATALOG_INSTRUCTION = """
@@ -194,6 +173,67 @@ def _prepare_catalog_prompt(system_prompt, catalog):
     return system_prompt + PARSE_CATALOG_INSTRUCTION.format(catalog_text=catalog_text, alias_text=_build_alias_text())
 
 
+def _build_bundling_rules_text(active_bundles):
+    """Bangun blok instruksi paket bundling secara DINAMIS dari daftar paket
+    yang lagi AKTIF di Sheets (liat sheets_client.get_all_bundles(only_active=True))
+    -- BUKAN di-hardcode lagi kayak versi lama (dulu cuma 1 paket "Bundling
+    Spesial"). Admin bisa nambah/ubah/nonaktifin paket kapan aja lewat chat
+    ke bot, jadi prompt AI ini WAJIB ikut paket yang lagi aktif SEKARANG,
+    bukan definisi lama yang ke-hardcode di kode.
+
+    Dipakai lewat concatenation biasa (BUKAN str.format() ke seluruh system
+    prompt) soalnya system prompt penuh contoh JSON yang isinya kurung
+    kurawal -- format() ke situ bakal error/kacau. Fungsi ini return teks
+    biasa yang tinggal ditempel (+) di akhir prompt."""
+    if not active_bundles:
+        return (
+            "\n\nNggak ada paket bundling yang lagi aktif sekarang -- JANGAN "
+            'PERNAH isi "paket_bundling_nama" (selalu null), proses semua '
+            "request bundling/paket dari customer sebagai order item biasa "
+            "apa adanya (item-nya kemungkinan besar nggak bakal ketemu exact "
+            "match di PriceList kalau memang bukan produk beneran -- tandain "
+            'kurang_lengkap + jelasin di "peringatan_ai" kalau begitu).'
+        )
+    lines = [
+        "\n\nATURAN PAKET BUNDLING -- ini daftar paket yang lagi AKTIF sekarang. "
+        'Kalau customer JELAS minta salah satu, set "paket_bundling_nama" PERSIS '
+        'nama paketnya (sama persis termasuk kapitalisasi), dan isi '
+        '"items_non_box" SESUAI SLOT paket itu (JANGAN pakai box_groups buat ini):'
+    ]
+    for b in active_bundles:
+        harga_text = "Rp" + format(int(b["harga"]), ",").replace(",", ".")
+        slot_descs = []
+        for s in b.get("slots", []):
+            if s.get("rasa"):
+                slot_descs.append(
+                    f'TEPAT {s["qty"]} pcs kategori "{s["kategori"]}" rasa "{s["rasa"]}" '
+                    f"(item tetap, WAJIB persis segini, jangan sampai lupa/ketinggalan)"
+                )
+            else:
+                slot_descs.append(
+                    f'{s["qty"]} pcs kategori "{s["kategori"]}" (PERSIS kategori ini, '
+                    f"boleh campur rasa apa aja dalam kategori itu sesuai request customer)"
+                )
+        lines.append(f'- "{b["nama"]}" = flat {harga_text}. Isinya: ' + "; ".join(slot_descs) + ".")
+    lines.append(
+        "Kalau customer nggak nyebut rincian rasa buat slot yang bebas pilih "
+        'rasa ("bebas"/"campur"/nggak nyebut sama sekali), JANGAN ngarang/nebak '
+        "rincian rasanya sendiri -- isi 1 baris qty PENUH slot itu dengan rasa "
+        'yang paling umum/polos di kategori itu, DAN set "kelengkapan": '
+        '"kurang_lengkap" + jelaskan di "peringatan_ai" bahwa rincian rasa '
+        "paket ini belum diisi customer, admin perlu konfirmasi/ubah manual.\n"
+        "JANGAN tambahin item lain di luar slot-slot paket yang diminta itu "
+        "buat order yang sama (kalau customer nyebut item TAMBAHAN di luar "
+        'paketnya, berarti bukan paket murni -- set "paket_bundling_nama": '
+        "null, proses semua itemnya apa adanya kayak order biasa, JANGAN "
+        "dipaksa jadi paket).\n"
+        "Total harga paket FLAT (BUKAN dijumlah dari harga satuan PriceList) "
+        "-- sistem yang ngitung/nge-set harganya sendiri belakangan, kamu "
+        "TIDAK perlu (dan JANGAN) mikirin harga sama sekali buat kasus ini."
+    )
+    return "\n".join(lines)
+
+
 def _empty_parse_result(pesan_error):
     """pesan_error (misal 'Gagal hubungi AI: ...') masuk ke 'peringatan_ai'
     (info buat admin doang), BUKAN ke 'catatan' -- 'catatan' HARUS selalu
@@ -204,7 +244,7 @@ def _empty_parse_result(pesan_error):
         "nama": None, "no_hp": None, "alamat": None, "metode": None,
         "items": [], "box_groups": [], "catatan": None,
         "peringatan_ai": pesan_error, "kelengkapan": "kurang_lengkap",
-        "paket_bundling": False,
+        "paket_bundling_nama": None,
     }
 
 
@@ -374,13 +414,19 @@ Panduan milih intent:
 """
 
 
-def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
+def parse_customer_chat(raw_text: str, catalog: list = None, active_bundles: list = None) -> dict:
     """
     catalog = list of (kategori, rasa) yang beneran ada di PriceList, opsional.
     Kalau dikasih, AI bakal cocokin item pesanan ke produk asli & nandain
     kalau ada yang ambigu -- jauh lebih akurat daripada nebak generik.
+
+    active_bundles = hasil sheets_client.get_all_bundles(only_active=True),
+    opsional. Kalau dikasih, AI ikut dikasih tau paket bundling apa aja yang
+    lagi aktif SEKARANG (bisa lebih dari 1) biar bisa nangkep request
+    customer yang minta salah satu paket itu -- liat _build_bundling_rules_text.
     """
     system_prompt = _prepare_catalog_prompt(PARSE_SYSTEM_PROMPT_BASE, catalog)
+    system_prompt += _build_bundling_rules_text(active_bundles)
 
     try:
         response = client.messages.create(
@@ -396,7 +442,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
     if result is None:
         return _empty_parse_result("Gagal parsing otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
-    result.setdefault("paket_bundling", False)
+    result.setdefault("paket_bundling_nama", None)
     result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
     # "catatan" sekarang KHUSUS permintaan packing yang BENERAN disebut
     # customer di chat-nya (misal "donat sama gula dipisah ya") -- boleh
@@ -415,7 +461,7 @@ def parse_customer_chat(raw_text: str, catalog: list = None) -> dict:
 
 
 def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg",
-                               caption: str = None, catalog: list = None) -> dict:
+                               caption: str = None, catalog: list = None, active_bundles: list = None) -> dict:
     """
     Sama kayak parse_customer_chat, TAPI input-nya SCREENSHOT (misal admin
     forward/kirim screenshot chat WA customer langsung ke bot, bukan
@@ -432,8 +478,12 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
     ada) -- ikut dikirim ke AI biar info yang kepisah antara gambar & caption
     (misal "ongkir 15rb" ditulis di caption, bukan kelihatan di screenshot)
     nggak ilang.
+
+    active_bundles = sama kayak parameter di parse_customer_chat (paket
+    bundling yang lagi aktif sekarang, opsional).
     """
     system_prompt = _prepare_catalog_prompt(PARSE_SYSTEM_PROMPT_BASE, catalog)
+    system_prompt += _build_bundling_rules_text(active_bundles)
 
     instruksi = PARSE_IMAGE_PREFIX
     if caption:
@@ -466,7 +516,7 @@ def parse_customer_chat_image(image_bytes: bytes, media_type: str = "image/jpeg"
     if result is None:
         return _empty_parse_result("Gagal baca gambar otomatis, isi manual ya.")
     result.setdefault("box_groups", [])
-    result.setdefault("paket_bundling", False)
+    result.setdefault("paket_bundling_nama", None)
     result["items"] = _compute_final_items(result.get("items_non_box"), result.get("box_groups"))
     # "catatan" sekarang KHUSUS permintaan packing yang BENERAN disebut
     # customer di chat-nya (misal "donat sama gula dipisah ya") -- boleh
@@ -626,5 +676,106 @@ def parse_produk_baru(raw_text: str, existing_categories: list = None) -> dict:
     result.setdefault("harga_jual", None)
     result.setdefault("harga_dough", None)
     result.setdefault("kelengkapan", "kurang_lengkap")
+    result.setdefault("error", None)
+    return result
+
+
+BUNDLE_DEFINISI_SYSTEM_PROMPT = """Kamu adalah asisten admin toko roti "Miss Piggy".
+Admin mau BIKIN PAKET BUNDLING BARU atau UBAH KOMPOSISI/HARGA paket bundling
+yang udah ada, ditulis lewat kalimat bebas (BUKAN order customer). Tugasmu
+HANYA: ekstrak data paketnya jadi JSON terstruktur.
+
+Balas HANYA dengan JSON valid, TANPA teks lain apapun, tanpa penjelasan,
+tanpa markdown code fence:
+
+{{
+  "nama_paket": "nama paket bundling-nya, tulis apa adanya persis sesuai yang disebut admin (misal 'Paket Lebaran'), atau null kalau admin sama sekali tidak menyebut nama",
+  "harga": angka harga TOTAL paket (flat, bukan per pcs) dalam rupiah, misal '200rb'/'200ribu' jadi 200000, atau null kalau tidak disebutkan,
+  "slots": [
+    {{
+      "kategori": "nama kategori produk PERSIS sama kayak salah satu di daftar kategori yang sudah ada di bawah kalau cocok, atau apa adanya kalau memang kategori itu belum ada",
+      "rasa": "nama rasa/varian SPESIFIK kalau slot ini WAJIB/FIXED rasa tertentu (misal 'Dubai Coklat'), atau null kalau slot ini bebas pilih rasa apa aja dalam kategori itu (misal admin bilang 'bebas rasa'/'campur'/nggak nyebut rasa)",
+      "qty": angka jumlah pcs untuk slot ini
+    }}
+  ],
+  "kelengkapan": "lengkap" atau "kurang_lengkap",
+  "peringatan_ai": "penjelasan singkat kalau ada bagian yang kurang jelas/ambigu/kemungkinan salah tangkap, atau null kalau semua jelas"
+}}
+
+Set "kelengkapan" jadi "kurang_lengkap" KALAU salah satu dari nama_paket,
+harga, atau slots (list-nya kosong / nggak ada satupun slot yang bisa
+diekstrak) tidak disebutkan sama sekali oleh admin -- field yang tidak
+disebutkan itu diisi null (untuk nama_paket/harga) atau [] (untuk slots),
+JANGAN mengarang/menebak nilainya sendiri. Setiap slot WAJIB ada "kategori"
+dan "qty" yang jelas -- kalau admin menyebutkan komposisi yang kategorinya
+nggak jelas/ambigu, JANGAN dipaksa ekstrak jadi slot, lebih baik skip slot
+itu dan jelaskan di "peringatan_ai".
+
+Kategori yang SUDAH ADA sekarang di toko: {existing_categories}
+Paket bundling yang SUDAH ADA sekarang (kalau admin maksudnya UBAH salah
+satu dari ini, cocokkan "nama_paket" PERSIS sama kayak nama yang sudah
+ada ini, jangan bikin nama baru yang mirip-mirip): {existing_bundle_names}
+"""
+
+
+def parse_bundle_definition(raw_text: str, catalog: list = None, existing_bundle_names: list = None) -> dict:
+    """Ekstrak data definisi 'paket bundling' (nama, harga flat, komposisi/slot)
+    dari kalimat bebas admin, misal "bikin paket baru namanya Paket Lebaran,
+    harga 200rb, isinya 6 pcs roti gandum bebas rasa sama 4 pcs donat bebas
+    rasa" -- dipanggil setelah classify_intent() (atau deterministic keyword
+    match di bot.py) mendeteksi admin lagi mau bikin/ubah paket bundling.
+
+    catalog: list kategori produk (dari sheets_client.get_catalog_list()),
+    dipakai buat ekstrak nama kategori yang ada di daftar 'existing_categories'
+    biar AI nyocokin nama kategori yang disebut admin ke yang udah ada.
+    existing_bundle_names: list nama paket bundling yang udah ada sekarang
+    (dari sheets_client.get_all_bundles()), dikasih sebagai konteks biar AI
+    bisa nyocokin kalau admin maksudnya UBAH paket yang udah ada, bukan bikin
+    paket baru dengan nama yang mirip2 doang.
+
+    Return dict: {"nama_paket", "harga", "slots": [{"kategori","rasa","qty"}],
+    "kelengkapan", "peringatan_ai", "error"} -- "error" cuma keisi (string)
+    kalau beneran gagal hubungi AI/parsing, dipakai bot.py buat nampilin
+    pesan gagal ke admin."""
+    if catalog:
+        # catalog = list of (kategori, rasa) tuples (liat sheets_client.get_catalog_list),
+        # SAMA formatnya kayak yang dipakai parse_customer_chat/_prepare_catalog_prompt --
+        # BUKAN list of dict.
+        existing_categories = sorted({kategori for kategori, _rasa in catalog if kategori})
+    else:
+        existing_categories = []
+    existing_categories_text = ", ".join(existing_categories) if existing_categories else "(belum ada data kategori)"
+    existing_bundle_names_text = ", ".join(existing_bundle_names) if existing_bundle_names else "(belum ada paket bundling)"
+    system_prompt = BUNDLE_DEFINISI_SYSTEM_PROMPT.format(
+        existing_categories=existing_categories_text,
+        existing_bundle_names=existing_bundle_names_text,
+    )
+
+    empty_result = {
+        "nama_paket": None, "harga": None, "slots": [],
+        "kelengkapan": "kurang_lengkap", "peringatan_ai": None,
+    }
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=600,
+            system=system_prompt,
+            messages=[{"role": "user", "content": raw_text}],
+        )
+    except Exception as e:
+        return {**empty_result, "error": f"Gagal hubungi AI: {e}. Coba lagi."}
+
+    result = _safe_json_loads(response.content[0].text)
+    if result is None:
+        return {
+            **empty_result,
+            "error": "Gagal parsing otomatis, coba tulis ulang lebih jelas (nama paket, harga, isi paketnya).",
+        }
+    result.setdefault("nama_paket", None)
+    result.setdefault("harga", None)
+    result.setdefault("slots", [])
+    result.setdefault("kelengkapan", "kurang_lengkap")
+    result.setdefault("peringatan_ai", None)
     result.setdefault("error", None)
     return result

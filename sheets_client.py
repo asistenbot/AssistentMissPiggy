@@ -18,40 +18,59 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# ---------- PAKET BUNDLING "8 Roti + 1 Dubai Coklat" ----------
-# Harga paket di-HARDCODE di sini (BUKAN dipercaya dari input web/AI manapun)
-# -- server yang nentuin harga final, klien (web/chat) cuma ngirim/nyaranin
-# KOMPOSISI item-nya doang. Ini jaga-jaga biar nggak ada yang bisa "akalin"
-# harga cuma dengan ngirim payload/chat yang ngaku2 bundling.
-BUNDLING_HARGA_PAKET = 150000
-BUNDLING_QTY_ROTI = 8
-BUNDLING_KATEGORI_ROTI = "roti"  # match PERSIS ke kategori "Roti" (BUKAN "Roti Gandum") -- lower() dipakai pas cocokin
-BUNDLING_KATEGORI_DUBAI = "dubai"
-BUNDLING_RASA_DUBAI = "dubai coklat"
+# ---------- PAKET BUNDLING (multi-paket, didefinisiin admin lewat chat) ----------
+# Beda dari versi awal yang HARDCODE 1 paket doang ("8 Roti + 1 Dubai
+# Coklat" = flat 150rb) -- sekarang definisi paket (nama, harga, isi/
+# komposisi) disimpen di tab Sheets config.SHEET_PAKET_BUNDLING, admin bisa
+# nambah/ubah/nonaktifin paket KAPAN AJA lewat chat ke bot (liat
+# upsert_bundle/set_bundle_active/set_bundle_harga di bawah), TANPA perlu
+# ubah kode/upload ulang web ke Netlify. 1 baris Sheets = 1 "slot" komposisi
+# (kategori + qty, rasa kosong berarti bebas pilih dalam kategori itu, rasa
+# keisi berarti item TETAP/terkunci kayak dulu Dubai Coklat); beberapa baris
+# Nama_Paket yang sama = 1 paket dengan beberapa slot.
+#
+# Harga paket TETEP nggak dipercaya dari input web/AI -- server yang baca
+# harga dari definisi paket di Sheets (get_bundle_by_name), klien cuma
+# ngirim/nyaranin nama paket + komposisi item-nya doang.
 
+def is_komposisi_bundle_valid(bundle: dict, items: list) -> bool:
+    """True kalau 'items' PERSIS nutupin semua slot di definisi 'bundle'
+    (dict hasil get_bundle_by_name/get_all_bundles) -- nggak boleh
+    kurang, nggak boleh lebih, nggak boleh ada item DI LUAR slot yang
+    didefinisiin. Slot rasa=None (bebas pilih) diitung TOTAL qty-nya
+    lintas rasa dalam kategori itu; slot rasa keisi (item tetap/terkunci,
+    kayak dulu Dubai Coklat) harus PERSIS kategori+rasa itu sejumlah qty
+    situ. Order tetep bisa disimpen walau komposisinya nggak valid --
+    cuma harganya dihitung normal per item (liat pemanggil fungsi ini di
+    add_order_rows), bukan digagalin total."""
+    free_targets = {}   # kategori(lower) -> total qty dibutuhin (bebas rasa)
+    fixed_targets = {}  # (kategori(lower), rasa(lower)) -> qty dibutuhin (rasa tetap)
+    for slot in bundle.get("slots", []):
+        kat = str(slot.get("kategori", "")).strip().lower()
+        rasa = slot.get("rasa")
+        qty = int(slot.get("qty") or 0)
+        if rasa:
+            key = (kat, str(rasa).strip().lower())
+            fixed_targets[key] = fixed_targets.get(key, 0) + qty
+        else:
+            free_targets[kat] = free_targets.get(kat, 0) + qty
 
-def is_komposisi_bundling_valid(items: list) -> bool:
-    """True kalau daftar item PERSIS sesuai paket 'Bundling Spesial': 8 pcs
-    (boleh campur rasa apa aja) kategori "Roti" (BUKAN "Roti Gandum", BUKAN
-    "Donat", BUKAN "Roti Tawar"/"Roti Tawar Loaf" -- match STRING PERSIS
-    "roti" doang, jadi kategori mirip2 lain otomatis ketolak), ditambah PAS 1
-    pcs "Dubai Coklat". Item LAIN di luar itu (kategori apa pun) bikin
-    komposisinya dianggap TIDAK valid buat dapet harga paket -- order tetep
-    bisa disimpen, cuma harganya dihitung normal per item (lihat pemanggil
-    fungsi ini), bukan digagalin total."""
-    qty_roti = 0
-    qty_dubai_coklat = 0
+    free_used = {k: 0 for k in free_targets}
+    fixed_used = {k: 0 for k in fixed_targets}
+
     for it in items:
         kategori = str(it.get("kategori", "")).strip().lower()
         rasa = str(it.get("rasa", "")).strip().lower()
         qty = int(it.get("qty") or 0)
-        if kategori == BUNDLING_KATEGORI_ROTI:
-            qty_roti += qty
-        elif kategori == BUNDLING_KATEGORI_DUBAI and rasa == BUNDLING_RASA_DUBAI:
-            qty_dubai_coklat += qty
+        fixed_key = (kategori, rasa)
+        if fixed_key in fixed_targets:
+            fixed_used[fixed_key] += qty
+        elif kategori in free_targets:
+            free_used[kategori] += qty
         else:
-            return False  # ada item di luar 2 kategori itu -- bukan bundling murni
-    return qty_roti == BUNDLING_QTY_ROTI and qty_dubai_coklat == 1
+            return False  # item di luar definisi slot manapun
+
+    return free_used == free_targets and fixed_used == fixed_targets
 
 
 class SheetsClient:
@@ -273,45 +292,66 @@ class SheetsClient:
         addon_qty = int(order.get("addon_qty") or 0)
         addon_total = int(order.get("addon_total") or 0)
 
-        # ---------- Paket Bundling (opsional) ----------
-        # order["paket_bundling"] = True (dari bot.py/web_order_server.py)
-        # cuma NIAT/klaim admin/customer -- harga final TETEP dihitung ulang
-        # di sini berdasarkan is_komposisi_bundling_valid(), BUKAN dipercaya
-        # gitu aja. Kalau komposisinya nggak PAS 8 Roti + 1 Dubai Coklat,
-        # order tetep kesimpen normal (harga per item dari PriceList biasa
-        # kayak sebelumnya) -- cuma flag "bundling_diterapkan" balik False
-        # biar caller (bot.py) bisa kasih tau admin buat cek manual.
+        # ---------- Paket Bundling (opsional, multi-paket) ----------
+        # order["paket_bundling_nama"] (dari bot.py/web_order_server.py) cuma
+        # NAMA paket yang DIKLAIM admin/customer -- harga & validitas
+        # komposisi TETEP dihitung ulang di sini berdasarkan definisi paket
+        # yang beneran ada di Sheets (get_bundle_by_name) + validator
+        # is_komposisi_bundle_valid(), BUKAN dipercaya gitu aja. Kalau nama
+        # paketnya nggak ketemu / komposisinya nggak PAS, order tetep
+        # kesimpen normal (harga per item dari PriceList biasa) -- cuma flag
+        # "bundling_diterapkan" balik False biar caller (bot.py) bisa kasih
+        # tau admin buat cek manual.
         #
-        # Skema harganya: hitung dulu harga ASLI tiap baris Roti dari
-        # PriceList (biar rasa yang lebih mahal/murah tetep kerasa beda),
-        # skalakan proporsional biar TOTAL 8 roti + Dubai itu PAS
-        # BUNDLING_HARGA_PAKET, lalu bulatin tiap baris Roti ke kelipatan 500
-        # (biar angkanya rapi kayak harga PriceList biasa). Baris Dubai
-        # Coklat (qty SELALU 1, udah dijamin sama is_komposisi_bundling_valid)
-        # nampung SISA pembulatannya -- ini yang bikin totalnya PERSIS pas,
-        # bukan meleset beberapa rupiah gara-gara pembulatan per baris.
+        # Skema harganya: hitung dulu harga ASLI tiap baris dari PriceList
+        # (biar rasa yang lebih mahal/murah tetep kerasa beda), skalakan
+        # proporsional biar TOTAL semua baris PAS harga paket, lalu bulatin
+        # tiap baris ke kelipatan 500 (biar angkanya rapi kayak harga
+        # PriceList biasa). SATU baris "anchor" (item qty=1 yang cocok slot
+        # rasa-tetap kalau ada -- kayak dulu Dubai Coklat -- atau baris
+        # TERAKHIR kalau paketnya semua slot bebas pilih) nampung SISA
+        # pembulatan, biar totalnya PERSIS pas, bukan meleset beberapa
+        # rupiah gara-gara pembulatan per baris.
         bundling_diterapkan = False
         harga_override_by_index = {}
-        if order.get("paket_bundling") and is_komposisi_bundling_valid(order["items"]):
+        nama_paket_diklaim = order.get("paket_bundling_nama")
+        bundle_def = self.get_bundle_by_name(nama_paket_diklaim) if nama_paket_diklaim else None
+        if bundle_def and is_komposisi_bundle_valid(bundle_def, order["items"]):
             harga_asli_list = [
                 self._find_price(price_map, it["kategori"], it["rasa"])[0] for it in order["items"]
             ]
             total_asli = sum(h * it["qty"] for h, it in zip(harga_asli_list, order["items"]))
-            if total_asli > 0:
-                scale = BUNDLING_HARGA_PAKET / total_asli
-                subtotal_roti_terpakai = 0
-                idx_dubai = None
+            harga_paket = int(bundle_def.get("harga") or 0)
+            if total_asli > 0 and harga_paket > 0:
+                scale = harga_paket / total_asli
+
+                fixed_rasa_set = {
+                    (str(s.get("kategori", "")).strip().lower(), str(s.get("rasa", "")).strip().lower())
+                    for s in bundle_def.get("slots", []) if s.get("rasa")
+                }
+                anchor_idx = None
+                for idx, it in enumerate(order["items"]):
+                    key = (str(it["kategori"]).strip().lower(), str(it["rasa"]).strip().lower())
+                    if key in fixed_rasa_set and int(it.get("qty") or 0) == 1:
+                        anchor_idx = idx
+                        break
+                if anchor_idx is None:
+                    anchor_idx = len(order["items"]) - 1
+
+                subtotal_selain_anchor = 0
                 for idx, (h, it) in enumerate(zip(harga_asli_list, order["items"])):
-                    if str(it["kategori"]).strip().lower() == BUNDLING_KATEGORI_DUBAI:
-                        idx_dubai = idx
+                    if idx == anchor_idx:
                         continue
                     harga_bulat = max(500, round(h * scale / 500) * 500)
                     harga_override_by_index[idx] = harga_bulat
-                    subtotal_roti_terpakai += harga_bulat * it["qty"]
-                if idx_dubai is not None:
-                    # qty Dubai Coklat SELALU 1 (dijamin validator), jadi
-                    # harga satuan = subtotal = sisa pembulatan, PERSIS.
-                    harga_override_by_index[idx_dubai] = BUNDLING_HARGA_PAKET - subtotal_roti_terpakai
+                    subtotal_selain_anchor += harga_bulat * it["qty"]
+                qty_anchor = int(order["items"][anchor_idx].get("qty") or 1) or 1
+                sisa = harga_paket - subtotal_selain_anchor
+                # qty_anchor hampir selalu 1 (slot rasa-tetap kayak Dubai
+                # Coklat SELALU qty 1 -- kalau paketnya semua bebas pilih dan
+                # anchor kebetulan qty > 1, sisa pembulatan dibagi rata,
+                # meleset PALING BANYAK beberapa rupiah doang, nggak masalah).
+                harga_override_by_index[anchor_idx] = sisa // qty_anchor
                 bundling_diterapkan = True
 
         rows = []
@@ -800,21 +840,14 @@ class SheetsClient:
         records = self._normalize_records(ws)
         return self._filter_by_month_range(records, year_start, month_start, year_end, month_end)
 
-    # ---------- PENGATURAN (on/off paket Bundling Spesial dari chat) ----------
-    # Tab config.SHEET_PENGATURAN ("Pengaturan"), key-value 2 kolom (A=Key,
-    # B=Value) -- SENGAJA dipisah dari tab Orders/PriceList biar admin bisa
-    # liat/ubah manual juga langsung di Sheets kalau perlu, nggak WAJIB lewat
-    # chat. Tab ini OPSIONAL/auto-dibikin (sama kayak pola SHEET_RIWAYAT_HISTORIS
-    # di atas) -- kalau belum ada baris/tab-nya, dianggap default AMAN (paket
-    # bundling OFF, nggak keliatan di web) sampe admin beneran nyalain sendiri.
-
+    # ---------- PENGATURAN (key-value umum, dipertahanin buat setting lain
+    # di masa depan) ----------
     def _get_or_create_pengaturan_ws(self):
         try:
             return self.sheet.worksheet(config.SHEET_PENGATURAN)
         except gspread.exceptions.WorksheetNotFound:
             ws = self.sheet.add_worksheet(title=config.SHEET_PENGATURAN, rows=20, cols=2)
             ws.update(values=[["Key", "Value"]], range_name="A1:B1")
-            ws.update(values=[["bundling_enabled", "FALSE"]], range_name="A2:B2")
             return ws
 
     def _read_pengaturan_value(self, ws, key):
@@ -832,27 +865,157 @@ class SheetsClient:
                 return
         ws.append_row([key, value])  # key belum ada -- tambahin baris baru
 
-    def get_bundling_enabled(self) -> bool:
-        """Status skarang paket 'Bundling Spesial' -- True kalau tab
-        Web (index.html) manggil endpoint /bundling-status di
-        web_order_server.py yang ujung2nya manggil fungsi ini, buat nentuin
-        tab 'Bundling Spesial' ditampilin atau disembunyiin. APAPUN yang
-        gagal di sini (tab kehapus, koneksi Sheets bermasalah, dst) FALLBACK
-        ke False -- promo nggak keliatan itu jauh lebih aman daripada
-        keliatan padahal admin sebenernya udah matiin/belum pernah nyalain."""
-        try:
-            ws = self._get_or_create_pengaturan_ws()
-            val = self._read_pengaturan_value(ws, "bundling_enabled")
-            return str(val).strip().upper() == "TRUE"
-        except Exception:
-            return False
+    # ---------- PAKET BUNDLING (multi-paket, tab Sheets config.SHEET_PAKET_BUNDLING) ----------
+    # Kolom: Nama_Paket | Kategori | Rasa | Qty | Harga_Paket | Aktif.
+    # 1 baris = 1 slot komposisi; beberapa baris Nama_Paket sama = 1 paket
+    # dengan beberapa slot. Rasa kosong = bebas pilih rasa apa aja dalam
+    # kategori itu; Rasa keisi = item TETAP/terkunci (kayak dulu Dubai
+    # Coklat). Harga_Paket & Aktif DIULANG di tiap baris paket yang sama
+    # (denormalisasi sengaja -- lebih gampang dibaca/diedit manual langsung
+    # di Sheets kalau admin perlu, nggak WAJIB lewat chat).
 
-    def set_bundling_enabled(self, enabled: bool):
-        """Dipanggil dari bot.py pas admin chat 'aktifin/matiin bundling'
-        (atau /bundling on|off). Nulis ulang baris 'bundling_enabled' di
-        tab Pengaturan -- tab/baris-nya auto-dibikin kalau belum ada."""
-        ws = self._get_or_create_pengaturan_ws()
-        self._write_pengaturan_value(ws, "bundling_enabled", "TRUE" if enabled else "FALSE")
+    def _get_or_create_paket_bundling_ws(self):
+        try:
+            return self.sheet.worksheet(config.SHEET_PAKET_BUNDLING)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = self.sheet.add_worksheet(title=config.SHEET_PAKET_BUNDLING, rows=50, cols=6)
+            ws.update(values=[["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif"]], range_name="A1:F1")
+            # Migrasi 1x dari versi lama (single hardcoded bundle + toggle
+            # global di tab Pengaturan) -- seed paket "Bundling Spesial"
+            # (8 Roti bebas rasa + 1 Dubai Coklat = flat 150rb), Aktif-nya
+            # ngikutin status toggle lama kalau ada, biar setting admin yang
+            # udah pernah di-set nggak ilang gara-gara migrasi ini.
+            aktif_lama = "FALSE"
+            try:
+                pengaturan_ws = self.sheet.worksheet(config.SHEET_PENGATURAN)
+                val = self._read_pengaturan_value(pengaturan_ws, "bundling_enabled")
+                if val and str(val).strip().upper() == "TRUE":
+                    aktif_lama = "TRUE"
+            except Exception:
+                pass
+            ws.update(values=[
+                ["Bundling Spesial", "Roti", "", 8, 150000, aktif_lama],
+                ["Bundling Spesial", "Dubai", "Dubai Coklat", 1, 150000, aktif_lama],
+            ], range_name="A2:F3")
+            return ws
+
+    def _read_all_bundle_rows(self):
+        ws = self._get_or_create_paket_bundling_ws()
+        rows = ws.get_all_values()
+        result = []
+        for row in rows[1:]:
+            if len(row) < 6:
+                row = row + [""] * (6 - len(row))
+            nama, kategori, rasa, qty, harga, aktif = row[:6]
+            nama = str(nama).strip()
+            if not nama:
+                continue
+            try:
+                qty = int(qty)
+            except (ValueError, TypeError):
+                continue
+            try:
+                harga = int(harga)
+            except (ValueError, TypeError):
+                harga = 0
+            result.append({
+                "nama": nama,
+                "kategori": str(kategori).strip(),
+                "rasa": str(rasa).strip() or None,
+                "qty": qty,
+                "harga": harga,
+                "aktif": str(aktif).strip().upper() == "TRUE",
+            })
+        return result
+
+    def get_all_bundles(self, only_active: bool = False) -> list:
+        """Return [{"nama":.., "harga":.., "aktif":.., "slots":[{"kategori":..,
+        "rasa": .. atau None, "qty":..}, ...]}, ...] -- 1 dict per paket
+        (baris2 Sheets yang Nama_Paket-nya sama digabung jadi slots)."""
+        rows = self._read_all_bundle_rows()
+        by_nama = {}
+        order = []
+        for r in rows:
+            if r["nama"] not in by_nama:
+                by_nama[r["nama"]] = {"nama": r["nama"], "harga": r["harga"], "aktif": r["aktif"], "slots": []}
+                order.append(r["nama"])
+            by_nama[r["nama"]]["slots"].append({"kategori": r["kategori"], "rasa": r["rasa"], "qty": r["qty"]})
+        bundles = [by_nama[n] for n in order]
+        if only_active:
+            bundles = [b for b in bundles if b["aktif"]]
+        return bundles
+
+    def get_bundle_by_name(self, nama: str):
+        if not nama:
+            return None
+        nama_target = nama.strip().lower()
+        for b in self.get_all_bundles():
+            if b["nama"].strip().lower() == nama_target:
+                return b
+        return None
+
+    def upsert_bundle(self, nama: str, harga: int, slots: list, aktif: bool = True):
+        """Bikin paket BARU (nama belum ada) atau GANTI TOTAL definisi lama
+        (nama udah ada -- semua baris slot lama punya nama itu dihapus,
+        ditulis ulang dari 'slots' yang baru). Dipakai buat 'bikin paket
+        baru' DAN 'ubah isi/komposisi paket X' lewat chat."""
+        ws = self._get_or_create_paket_bundling_ws()
+        rows = ws.get_all_values()
+        nama_target = nama.strip().lower()
+        header = rows[0] if rows else ["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif"]
+        keep_rows = [header] + [
+            row for row in rows[1:] if not row or str(row[0]).strip().lower() != nama_target
+        ]
+        new_rows = [
+            [nama, s["kategori"], s.get("rasa") or "", s["qty"], harga, "TRUE" if aktif else "FALSE"]
+            for s in slots
+        ]
+        ws.clear()
+        ws.update(values=keep_rows + new_rows, range_name="A1")
+
+    def set_bundle_active(self, nama: str, aktif: bool) -> bool:
+        """Return True kalau nama paketnya ketemu & keupdate, False kalau
+        nggak ketemu sama sekali (caller kasih tau admin nama-nya salah)."""
+        ws = self._get_or_create_paket_bundling_ws()
+        rows = ws.get_all_values()
+        nama_target = nama.strip().lower()
+        found = False
+        for idx, row in enumerate(rows[1:], start=2):
+            if row and str(row[0]).strip().lower() == nama_target:
+                ws.update(values=[["TRUE" if aktif else "FALSE"]], range_name=f"F{idx}")
+                found = True
+        return found
+
+    def set_bundle_harga(self, nama: str, harga: int) -> bool:
+        ws = self._get_or_create_paket_bundling_ws()
+        rows = ws.get_all_values()
+        nama_target = nama.strip().lower()
+        found = False
+        for idx, row in enumerate(rows[1:], start=2):
+            if row and str(row[0]).strip().lower() == nama_target:
+                ws.update(values=[[harga]], range_name=f"E{idx}")
+                found = True
+        return found
+
+    def delete_bundle(self, nama: str) -> bool:
+        """Hapus PERMANEN semua baris punya paket ini -- beda sama
+        set_bundle_active(nama, False) yang cuma nonaktifin sementara
+        (definisinya tetep ada, bisa dinyalain lagi kapan aja)."""
+        ws = self._get_or_create_paket_bundling_ws()
+        rows = ws.get_all_values()
+        nama_target = nama.strip().lower()
+        header = rows[0] if rows else ["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif"]
+        keep_rows = [header]
+        found = False
+        for row in rows[1:]:
+            if row and str(row[0]).strip().lower() == nama_target:
+                found = True
+                continue
+            keep_rows.append(row)
+        if found:
+            ws.clear()
+            ws.update(values=keep_rows, range_name="A1")
+        return found
 
     # ---------- PRICE LIST ----------
 
