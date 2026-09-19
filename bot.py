@@ -1189,6 +1189,65 @@ async def kirim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _tandai_terkirim(update, nama)
 
 
+async def _toggle_bundling_status(update: Update, enabled: bool):
+    """Nyalain/matiin tampilan tab 'Bundling Spesial' di web -- status-nya
+    disimpen di tab Sheets 'Pengaturan' (liat set_bundling_enabled di
+    sheets_client.py). Web (index.html) yang manggil endpoint
+    /bundling-status di web_order_server.py buat baca status ini pas
+    halaman dibuka customer -- jadi begitu admin toggle di sini, order
+    berikutnya yang buka web langsung ngikutin (nggak perlu upload ulang
+    apa-apa ke Netlify)."""
+    sheets = get_sheets_client()
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(sheets.set_bundling_enabled, enabled), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas update status bundling. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal update status bundling: {e}")
+        return
+
+    if enabled:
+        await update.message.reply_text(
+            "✅ Paket *Bundling Spesial* sekarang AKTIF -- tab-nya bakal keliatan "
+            "di web buat customer yang buka halaman order abis ini.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "🚫 Paket *Bundling Spesial* sekarang OFF -- tab-nya disembunyiin dari "
+            "web buat customer yang buka halaman order abis ini.",
+            parse_mode="Markdown",
+        )
+
+
+@owner_only
+async def bundling_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command eksplisit /bundling on|off|status -- alternatif buat chat
+    natural language ('aktifin bundling' dst, liat _try_parse_bundling_toggle)
+    kalau admin lebih suka command yang jelas."""
+    arg = (context.args[0].lower() if context.args else "").strip()
+    if arg in ("on", "aktif", "nyala"):
+        await _toggle_bundling_status(update, True)
+    elif arg in ("off", "nonaktif", "mati"):
+        await _toggle_bundling_status(update, False)
+    elif arg in ("status", "cek", ""):
+        sheets = get_sheets_client()
+        try:
+            enabled = await asyncio.wait_for(
+                asyncio.to_thread(sheets.get_bundling_enabled), timeout=20
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Gagal cek status bundling: {e}")
+            return
+        status_text = "AKTIF ✅" if enabled else "OFF 🚫"
+        await update.message.reply_text(f"Status paket Bundling Spesial di web sekarang: {status_text}")
+    else:
+        await update.message.reply_text("Format: /bundling on | /bundling off | /bundling status")
+
+
 _FILLER_DEPAN_KIRIM = re.compile(r"^(yg|yang|itu|order)\s+", re.IGNORECASE)
 _FILLER_BELAKANG_KIRIM = re.compile(
     r"^(hari ini|tadi|barusan|dong|ya|yah)\b.*$", re.IGNORECASE
@@ -1239,6 +1298,36 @@ def _try_parse_delivered_mark(text):
     if not nama or len(nama) < 2 or len(nama.split()) > 4:
         return None
     return nama
+
+
+# Deteksi deterministik (BUKAN AI) buat admin nyalain/matiin paket "Bundling
+# Spesial" di web lewat chat biasa -- misal "aktifin bundling", "matiin
+# paket bundling spesial dulu ya". WAJIB nyebut kata "bundling" di
+# kalimatnya (bukan kata kerja doang) biar nggak ke-trigger nyasar dari
+# obrolan lain yang kebetulan mirip (mis. "nyalain lampu").
+_BUNDLING_ON_WORDS = re.compile(r"\b(aktifin|aktifkan|nyalain|nyalakan|hidupin|hidupkan|mulai(?:in|kan)?)\b", re.IGNORECASE)
+_BUNDLING_OFF_WORDS = re.compile(r"\b(matiin|matikan|nonaktifin|nonaktifkan|non[- ]?aktifkan|stop(?:in|kan)?|berhentiin|hentikan)\b", re.IGNORECASE)
+
+
+def _try_parse_bundling_toggle(text):
+    """Return True (nyalain) / False (matiin) / None (bukan perintah ini).
+    Dicek SEBELUM classify_intent (AI) di handle_text, sama pola kayak
+    _try_parse_delivered_mark di atas -- toggle ini murni on/off doang,
+    nggak butuh AI buat nebak-nebak. _PENANDA_BUKAN_PERINTAH dipakai lagi
+    di sini biar kalimat kayak 'gimana cara aktifin bundling?' (pertanyaan,
+    bukan perintah) nggak salah ke-toggle."""
+    if not text:
+        return None
+    lower = text.strip().lower()
+    if "bundling" not in lower:
+        return None
+    if _PENANDA_BUKAN_PERINTAH.search(lower):
+        return None
+    if _BUNDLING_ON_WORDS.search(lower):
+        return True
+    if _BUNDLING_OFF_WORDS.search(lower):
+        return False
+    return None
 
 
 _KATA_PEMICU_GABUNG = re.compile(r"\b(gabung(?:in|kan)?|satuin|satukan)\b", re.IGNORECASE)
@@ -1633,6 +1722,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nama_dikirim = _try_parse_delivered_mark(raw_text)
     if nama_dikirim:
         await _tandai_terkirim(update, nama_dikirim)
+        return
+
+    # Deteksi deterministik buat nyalain/matiin paket "Bundling Spesial" di
+    # web -- misal "aktifin bundling", "matiin paket bundling spesial".
+    # Dicek SEBELUM classify_intent (AI) sama pola kayak di atas -- toggle
+    # on/off murni nggak butuh AI buat nebak.
+    toggle_bundling = _try_parse_bundling_toggle(raw_text)
+    if toggle_bundling is not None:
+        await _toggle_bundling_status(update, toggle_bundling)
         return
 
     # Coba tebak dulu maksud admin (bahasa natural, nggak wajib pakai '/')
@@ -3047,6 +3145,7 @@ def main():
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("kirim", kirim_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
+    app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --
     # soalnya callback_data sekarang bawa order_id juga, misal
     # "confirm_order:a1b2c3d4", biar tombol tetep bener walau ada beberapa

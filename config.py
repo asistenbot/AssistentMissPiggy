@@ -65,6 +65,11 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SHEET_ORDERS = "Orders"
 SHEET_PRICELIST = "PriceList"
 SHEET_SUPPLIER_DOUGH = "SupplierDough"
+# Tab OPSIONAL berisi setting on/off kayak status paket "Bundling Spesial"
+# (key-value, kolom A=Key kolom B=Value) -- kalau belum ada, otomatis
+# DIBIKIN sendiri sama sheets_client.py pas pertama kali dibutuhin (liat
+# _get_or_create_pengaturan_ws), admin nggak perlu bikin manual duluan.
+SHEET_PENGATURAN = "Pengaturan"
 # Tab OPSIONAL berisi data qty historis (per kategori, dari SEBELUM order
 # dicatet lewat bot) yang dipindahin admin keluar dari Orders biar nggak
 # ganggu pivot table/chart di situ -- /laporanbulanan tetep ikut baca tab

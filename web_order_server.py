@@ -16,6 +16,7 @@ Jalanin: dipanggil otomatis dari on_startup() di bot.py, nggak perlu
 dijalanin manual.
 """
 
+import asyncio
 import logging
 import os
 import uuid
@@ -24,7 +25,7 @@ from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
-from sheets_client import is_komposisi_bundling_valid, BUNDLING_HARGA_PAKET
+from sheets_client import get_sheets_client, is_komposisi_bundling_valid, BUNDLING_HARGA_PAKET
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,29 @@ def create_web_order_app(application):
     async def handle_health(request: web.Request):
         return web.json_response({"ok": True, "service": "web-order"})
 
+    async def handle_bundling_status(request: web.Request):
+        """Dipanggil dari index.html pas halaman order dibuka customer --
+        nentuin tab 'Bundling Spesial' ditampilin atau disembunyiin. Admin
+        nyalain/matiinnya lewat chat ke bot Telegram ('aktifin bundling' /
+        '/bundling on', liat bundling_cmd & _try_parse_bundling_toggle di
+        bot.py) -- status-nya disimpen di tab Sheets 'Pengaturan', jadi
+        nggak perlu upload ulang apa-apa ke Netlify tiap toggle.
+
+        GET publik (nggak pakai X-Web-Order-Secret) SENGAJA -- ini cuma
+        status baca doang (bukan nulis data), dan halaman order butuh akses
+        ini SEBELUM customer isi apa-apa. APAPUN yang gagal di sini
+        (Sheets down dll) fallback ke enabled:false -- promo nggak keliatan
+        itu jauh lebih aman daripada keliatan padahal statusnya nggak jelas."""
+        try:
+            sheets = get_sheets_client()
+            enabled = await asyncio.wait_for(
+                asyncio.to_thread(sheets.get_bundling_enabled), timeout=10
+            )
+        except Exception as e:
+            logger.error(f"Gagal baca status bundling: {e}")
+            enabled = False
+        return web.json_response({"ok": True, "enabled": bool(enabled)})
+
     @web.middleware
     async def cors_middleware(request, handler):
         if request.method == "OPTIONS":
@@ -332,6 +356,7 @@ def create_web_order_app(application):
     web_app.router.add_post("/web-order", handle_web_order)
     web_app.router.add_route("OPTIONS", "/web-order", handle_web_order)
     web_app.router.add_get("/health", handle_health)
+    web_app.router.add_get("/bundling-status", handle_bundling_status)
     return web_app
 
 

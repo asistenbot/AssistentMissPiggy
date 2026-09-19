@@ -800,6 +800,60 @@ class SheetsClient:
         records = self._normalize_records(ws)
         return self._filter_by_month_range(records, year_start, month_start, year_end, month_end)
 
+    # ---------- PENGATURAN (on/off paket Bundling Spesial dari chat) ----------
+    # Tab config.SHEET_PENGATURAN ("Pengaturan"), key-value 2 kolom (A=Key,
+    # B=Value) -- SENGAJA dipisah dari tab Orders/PriceList biar admin bisa
+    # liat/ubah manual juga langsung di Sheets kalau perlu, nggak WAJIB lewat
+    # chat. Tab ini OPSIONAL/auto-dibikin (sama kayak pola SHEET_RIWAYAT_HISTORIS
+    # di atas) -- kalau belum ada baris/tab-nya, dianggap default AMAN (paket
+    # bundling OFF, nggak keliatan di web) sampe admin beneran nyalain sendiri.
+
+    def _get_or_create_pengaturan_ws(self):
+        try:
+            return self.sheet.worksheet(config.SHEET_PENGATURAN)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = self.sheet.add_worksheet(title=config.SHEET_PENGATURAN, rows=20, cols=2)
+            ws.update(values=[["Key", "Value"]], range_name="A1:B1")
+            ws.update(values=[["bundling_enabled", "FALSE"]], range_name="A2:B2")
+            return ws
+
+    def _read_pengaturan_value(self, ws, key):
+        rows = ws.get_all_values()
+        for row in rows[1:]:  # skip header
+            if len(row) >= 2 and str(row[0]).strip().lower() == key.lower():
+                return row[1]
+        return None
+
+    def _write_pengaturan_value(self, ws, key, value):
+        rows = ws.get_all_values()
+        for idx, row in enumerate(rows[1:], start=2):
+            if len(row) >= 1 and str(row[0]).strip().lower() == key.lower():
+                ws.update(values=[[value]], range_name=f"B{idx}")
+                return
+        ws.append_row([key, value])  # key belum ada -- tambahin baris baru
+
+    def get_bundling_enabled(self) -> bool:
+        """Status skarang paket 'Bundling Spesial' -- True kalau tab
+        Web (index.html) manggil endpoint /bundling-status di
+        web_order_server.py yang ujung2nya manggil fungsi ini, buat nentuin
+        tab 'Bundling Spesial' ditampilin atau disembunyiin. APAPUN yang
+        gagal di sini (tab kehapus, koneksi Sheets bermasalah, dst) FALLBACK
+        ke False -- promo nggak keliatan itu jauh lebih aman daripada
+        keliatan padahal admin sebenernya udah matiin/belum pernah nyalain."""
+        try:
+            ws = self._get_or_create_pengaturan_ws()
+            val = self._read_pengaturan_value(ws, "bundling_enabled")
+            return str(val).strip().upper() == "TRUE"
+        except Exception:
+            return False
+
+    def set_bundling_enabled(self, enabled: bool):
+        """Dipanggil dari bot.py pas admin chat 'aktifin/matiin bundling'
+        (atau /bundling on|off). Nulis ulang baris 'bundling_enabled' di
+        tab Pengaturan -- tab/baris-nya auto-dibikin kalau belum ada."""
+        ws = self._get_or_create_pengaturan_ws()
+        self._write_pengaturan_value(ws, "bundling_enabled", "TRUE" if enabled else "FALSE")
+
     # ---------- PRICE LIST ----------
 
     def get_price_map(self):
