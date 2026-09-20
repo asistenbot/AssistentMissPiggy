@@ -21,7 +21,7 @@ def _is_delivery_metode(metode):
     ini, fungsi-fungsi di bawah nyocokin metode pake '== \"Kirim\"' persis,
     jadi order dari web ('Diantar') ke-skip diam-diam dari daftar kurir
     (kejadian di order Ratna: kehitung di rekap produksi tapi ilang dari
-    'DIKIRIM')."""
+    'DIKIRIM KURIR')."""
     m = (metode or "").strip().lower()
     return "antar" in m or "kirim" in m
 
@@ -35,31 +35,37 @@ def build_invoice(nama_customer: str, minggu_po: str, orders: list) -> str:
     lines.append(f"Kepada: {nama_customer}")
     lines.append(f"Tanggal Kirim/Ambil: {minggu_po}")
     lines.append(f"Metode: {orders[0].get('Metode', '-')}")
-    if _is_delivery_metode(orders[0].get("Metode")) and orders[0].get("Kurir"):
-        lines.append(f"Kurir: {orders[0]['Kurir']}")
     lines.append("")
     lines.append("Rincian Pesanan:")
 
     total = 0
+    ada_bundling = False
     for o in orders:
         qty = int(o["Qty"])
         harga = int(o["Harga_Satuan"])
         subtotal = qty * harga
         total += subtotal
-        lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{qty} @ {rupiah(harga)} = {rupiah(subtotal)}")
+        # o.get("Paket_Bundling") cuma keisi kalau item ini bagian dari paket
+        # bundling yang KETERAPAN (harga flat-nya udah dibagi rata ke tiap
+        # item, liat sheets_client.add_order_rows) -- ditandain 📦 biar
+        # customer nggak bingung liat harga satuannya beda dari harga normal
+        # di Price List (bukan salah hitung, emang harga hasil bagi paket).
+        paket = (o.get("Paket_Bundling") or "").strip()
+        tag = f" 📦 {paket}" if paket else ""
+        if paket:
+            ada_bundling = True
+        lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{qty} @ {rupiah(harga)} = {rupiah(subtotal)}{tag}")
 
     ongkir = int(orders[0].get("Ongkir", 0) or 0)
-    addon_jenis = orders[0].get("Addon_Jenis") or None
-    addon_qty = int(orders[0].get("Addon_Qty", 0) or 0)
-    addon_total = int(orders[0].get("Addon_Total", 0) or 0)
-    grand_total = total + ongkir + addon_total
+    grand_total = total + ongkir
 
     lines.append("")
     lines.append(f"Subtotal: {rupiah(total)}")
     lines.append(f"Ongkir: {rupiah(ongkir)}")
-    if addon_jenis and addon_qty:
-        lines.append(f"Add-on: {addon_jenis} x{addon_qty} ({rupiah(addon_total)})")
     lines.append(f"*Total: {rupiah(grand_total)}*")
+    if ada_bundling:
+        lines.append("")
+        lines.append("_📦 = item bagian dari paket bundling (harga flat paket, bukan harga satuan biasa)._")
     lines.append("")
     lines.append("Pembayaran transfer ke:")
     lines.append(f"{config.BANK_NAME} — {config.BANK_ACCOUNT_NUMBER}")
@@ -86,26 +92,14 @@ def build_surat_jalan(nama_customer: str, minggu_po: str, orders: list) -> str:
     # dikirim ke alamat customer). Sekarang disamain pake _is_delivery_metode.
     if _is_delivery_metode(orders[0].get("Metode")):
         lines.append(f"Alamat: {orders[0].get('Alamat', '-')}")
-        kurir = orders[0].get("Kurir")
-        if kurir:
-            lines.append(f"Kurir: {kurir}")
     else:
         lines.append(f"Ambil di: {config.PICKUP_ADDRESS}")
     lines.append("")
     lines.append("Barang:")
     for o in orders:
-        lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}")
-
-    addon_jenis = orders[0].get("Addon_Jenis")
-    addon_qty = int(orders[0].get("Addon_Qty", 0) or 0)
-    if addon_jenis and addon_qty:
-        lines.append("")
-        lines.append(f"Add-on: {addon_jenis} x{addon_qty}")
-
-    catatan = orders[0].get("Catatan")
-    if catatan:
-        lines.append("")
-        lines.append(f"Catatan: {catatan}")
+        paket = (o.get("Paket_Bundling") or "").strip()
+        tag = f" — 📦 {paket}" if paket else ""
+        lines.append(f"- {o['Rasa']} ({o['Kategori']}) x{int(o['Qty'])}{tag}")
 
     return "\n".join(lines)
 
@@ -124,7 +118,7 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
     for (kategori, rasa), qty in recap.items():
         by_category.setdefault(kategori, []).append((rasa, qty))
 
-    lines = [f"*REKAP PRODUKSI — Kamis PO {minggu_po}*"]
+    lines = [f"*REKAP PRODUKSI — Minggu PO {minggu_po}*"]
     lines.append(f"(Kirim: {config.DELIVERY_DAY.upper()} {config.DELIVERY_WINDOW})")
     grand_total = 0
     for kategori, items in by_category.items():
@@ -140,147 +134,10 @@ def build_production_recap(minggu_po: str, orders: list) -> str:
     return "\n".join(lines)
 
 
-def build_production_recap_customer(nama_customer: str, minggu_po: str, orders: list) -> str:
-    """Rekap produksi TAPI cuma buat 1 customer tertentu -- dipanggil manual
-    kalau admin EKSPLISIT minta (misal '/rekap Ci Meyvany' atau bahasa
-    natural 'minta rekap produksi Ci Meyvany'), BUKAN bagian dari rekap
-    mingguan otomatis (yang tetap gabungan semua customer seperti biasa,
-    lihat build_production_recap -- TIDAK diubah/disentuh sama sekali).
-
-    Berguna buat ngecek kebutuhan produksi 1 pesanan gede/khusus secara
-    terpisah, apalagi kalau tanggal kirimnya beda dari minggu PO biasa
-    (Tanggal_Kirim custom, misal order borongan yang mesti dikirim lebih
-    cepat/lambat dari Kamis PO biasa) -- makanya tanggal kirim customer ini
-    ditampilin jelas di baris kedua."""
-    if not orders:
-        return f"Nggak ada order atas nama *{nama_customer}* untuk minggu PO {minggu_po}."
-
-    tanggal_kirim = orders[0].get("Tanggal_Kirim") or minggu_po
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {nama_customer}*"]
-    lines.append(f"(Tanggal Kirim: {tanggal_kirim})")
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_multi(daftar_nama: list, orders: list) -> str:
-    """Rekap produksi buat BEBERAPA customer sekaligus dalam 1 pesan -- dipanggil
-    kalau admin nyebut lebih dari 1 nama dalam satu instruksi (misal 'rekap
-    produksi Franky sama Kelvin', yang di-pecah _split_nama_customer() jadi
-    ['Franky', 'Kelvin']). Orders yang dikirim ke sini udah digabung dari
-    SEMUA nama itu oleh pemanggilnya (lihat bot.py), jadi di sini tinggal
-    agregasi qty per kategori+rasa kayak build_production_recap_customer,
-    cuma judulnya nyebutin semua nama."""
-    nama_text = ", ".join(daftar_nama)
-
-    if not orders:
-        return f"Nggak ada order atas nama *{nama_text}* untuk minggu ini."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {nama_text}*"]
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def build_production_recap_tanggal(label: str, orders: list) -> str:
-    """Rekap produksi berdasarkan RENTANG TANGGAL KIRIM (BUKAN Minggu_PO) --
-    gabungan SEMUA customer yang tanggal kirimnya jatuh di rentang itu,
-    nggak peduli Minggu_PO-nya beda-beda. Dipanggil manual kalau admin minta
-    tanggal spesifik (misal '/rekap 2026-08-29' atau bahasa natural 'rekap
-    produksi besok'/'rekap produksi sampe besok').
-
-    Berguna khusus buat kasus tanggal kirim custom (besok/lusa) yang bikin
-    Minggu_PO-nya beda dari minggu aktif -- customer kayak gitu nggak nongol
-    di rekap mingguan biasa (build_production_recap) ataupun rekap per-nama
-    (build_production_recap_customer) kalau nama-nya nggak disebut satu-satu,
-    tapi tetep kejaring di sini asal Tanggal_Kirim-nya masuk rentang.
-
-    label: teks buat judul, misal '2026-08-29' atau '2026-08-28 s/d 2026-08-29'."""
-    if not orders:
-        return f"Belum ada order untuk tanggal {label}."
-
-    recap = {}  # {(kategori, rasa): total_qty}
-    for o in orders:
-        key = (o["Kategori"], o["Rasa"])
-        recap[key] = recap.get(key, 0) + int(o["Qty"])
-
-    by_category = {}
-    for (kategori, rasa), qty in recap.items():
-        by_category.setdefault(kategori, []).append((rasa, qty))
-
-    lines = [f"*REKAP PRODUKSI — {label}*"]
-    grand_total = 0
-    for kategori, items in by_category.items():
-        lines.append(f"\n*{kategori}*")
-        subtotal_kategori = 0
-        for rasa, qty in sorted(items, key=lambda x: -x[1]):
-            lines.append(f"  {rasa}: {qty} pcs")
-            subtotal_kategori += qty
-        lines.append(f"  → Subtotal {kategori}: {subtotal_kategori} pcs")
-        grand_total += subtotal_kategori
-
-    lines.append(f"\n*Total semua produk: {grand_total} pcs*")
-    return "\n".join(lines)
-
-
-def _kategori_pengiriman(metode, kurir) -> str:
-    """3 kategori cara pesenan nyampe ke customer -- dipake misahin /rekap
-    jadi 3 daftar terpisah di topic Pengiriman (atas permintaan admin, biar
-    beda perlakuan: yang lewat ekspedisi pihak ketiga perlu di-drop ke
-    agen/dijemput kurirnya, yang armada sendiri diater langsung, yang ambil
-    sendiri nunggu di toko):
-    - "ambil"  -- metode-nya Ambil Sendiri.
-    - "kurir"  -- metode-nya Kirim/Diantar DAN ada nama ekspedisi kesimpen
-                  di kolom Kurir (diisi admin lewat tombol 'Isi Kurir' pas
-                  konfirmasi order, misal 'JNE'/'Paxel'/'J&T').
-    - "kirim"  -- metode-nya Kirim/Diantar TAPI kolom Kurir kosong, artinya
-                  dianter pake armada/kurir toko sendiri (bukan ekspedisi)."""
-    if not _is_delivery_metode(metode):
-        return "ambil"
-    return "kurir" if str(kurir or "").strip() else "kirim"
-
-
 def _group_per_customer(orders: list) -> dict:
-    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan cara
-    pengirimannya diringkas jadi 3 kategori lewat _kategori_pengiriman --
-    BUKAN metode/nama literal apa adanya.
+    """Key-nya SENGAJA dinormalisir -- nama di-strip+lower, dan metode
+    diringkas jadi boolean 'ini pengiriman apa bukan' lewat
+    _is_delivery_metode -- BUKAN metode/nama literal apa adanya.
 
     DULU key-nya `(metode, nama)` mentah, jadi 1 customer yang SAMA tapi
     kebetulan punya order dari 2 SUMBER beda (web selalu nulis 'Diantar',
@@ -291,23 +148,22 @@ def _group_per_customer(orders: list) -> dict:
     per_customer = {}
     for o in orders:
         nama = str(o.get("Nama_Customer", "-")).strip()
-        kategori = _kategori_pengiriman(o.get("Metode", "-"), o.get("Kurir"))
-        key = (kategori, nama.lower())
+        metode = o.get("Metode", "-")
+        key = (_is_delivery_metode(metode), nama.lower())
         per_customer.setdefault(key, []).append(o)
     return per_customer
 
 
 def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
-    """Daftar customer yang DIKIRIM pake ARMADA/KURIR TOKO SENDIRI (bukan
-    ekspedisi pihak ketiga) -- liat build_delivery_kurir buat yang lewat
-    JNE/Paxel/J&T/dst, dan build_delivery_ambil buat yang ambil sendiri."""
+    """Daftar customer yang DIKIRIM KURIR aja -- pesan terpisah, siap forward
+    ke bagian gudang/kurir tanpa perlu crop screenshot."""
     per_customer = _group_per_customer(orders)
-    kirim_entries = {k: v for k, v in per_customer.items() if k[0] == "kirim"}
+    kirim_entries = {k: v for k, v in per_customer.items() if k[0]}
     if not kirim_entries:
         return None
 
-    lines = [f"🛵 *DIKIRIM — Kamis PO {minggu_po}*\n"]
-    for (_kategori, nama_key), items in kirim_entries.items():
+    lines = [f"🛵 *DIKIRIM KURIR — Minggu PO {minggu_po}*\n"]
+    for (is_delivery, nama_key), items in kirim_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
         alamat = items[0].get("Alamat", "-")
@@ -315,38 +171,15 @@ def build_delivery_kirim(minggu_po: str, orders: list) -> str | None:
     return "\n".join(lines)
 
 
-def build_delivery_kurir(minggu_po: str, orders: list) -> str | None:
-    """Daftar customer yang dikirim lewat EKSPEDISI pihak ketiga (JNE,
-    Paxel, J&T, dst) -- DIPISAH dari build_delivery_kirim (armada toko
-    sendiri) atas permintaan admin, biar gampang misahin mana yang perlu
-    di-drop/dijemput agen ekspedisi vs mana yang dianter langsung sama
-    armada toko. Nama ekspedisinya (kolom Kurir di Sheets, diisi admin
-    lewat tombol 'Isi Kurir' pas konfirmasi order) ikut ditampilin per
-    customer biar jelas mau dikirim pake apa."""
-    per_customer = _group_per_customer(orders)
-    kurir_entries = {k: v for k, v in per_customer.items() if k[0] == "kurir"}
-    if not kurir_entries:
-        return None
-
-    lines = [f"📦 *DIKIRIM (KURIR) — Kamis PO {minggu_po}*\n"]
-    for (_kategori, nama_key), items in kurir_entries.items():
-        nama = items[0].get("Nama_Customer", "-")
-        no_hp = items[0].get("No_HP", "-")
-        alamat = items[0].get("Alamat", "-")
-        kurir = items[0].get("Kurir", "-")
-        lines.append(f"• {nama} — via {kurir} — {alamat} — {no_hp}")
-    return "\n".join(lines)
-
-
 def build_delivery_ambil(minggu_po: str, orders: list) -> str | None:
     """Daftar customer yang AMBIL SENDIRI aja -- pesan terpisah."""
     per_customer = _group_per_customer(orders)
-    ambil_entries = {k: v for k, v in per_customer.items() if k[0] == "ambil"}
+    ambil_entries = {k: v for k, v in per_customer.items() if not k[0]}
     if not ambil_entries:
         return None
 
-    lines = [f"🏠 *DIAMBIL SENDIRI — Kamis PO {minggu_po}*\n"]
-    for (_kategori, nama_key), items in ambil_entries.items():
+    lines = [f"🏠 *DIAMBIL SENDIRI — Minggu PO {minggu_po}*\n"]
+    for (is_delivery, nama_key), items in ambil_entries.items():
         nama = items[0].get("Nama_Customer", "-")
         no_hp = items[0].get("No_HP", "-")
         lines.append(f"• {nama} — {no_hp}")
