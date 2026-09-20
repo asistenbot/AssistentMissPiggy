@@ -344,9 +344,12 @@ def create_web_order_app(application):
         berubah.
 
         Format response: {"ok": true, "bundles": [{"nama":.., "harga":..,
-        "slots": [{"kategori":.., "rasa": .. atau null, "qty":..}, ...]},
-        ...]} -- field "aktif" SENGAJA nggak diikutin (semua yang balik di
-        sini UDAH PASTI aktif, liat only_active=True di bawah).
+        "slots": [{"kategori":.., "rasa": .. atau null, "qty":.., "kecuali":
+        [..]}, ...]}, ...]} -- "kecuali" cuma relevan/keisi buat slot bebas
+        rasa (rasa null), daftar nama rasa yang HARUS DISEMBUNYIKAN dari
+        picker halaman web buat slot itu. field "aktif" SENGAJA nggak
+        diikutin (semua yang balik di sini UDAH PASTI aktif, liat
+        only_active=True di bawah).
 
         GET publik (nggak pakai X-Web-Order-Secret) SENGAJA -- ini cuma
         status baca doang (bukan nulis data), dan halaman order butuh akses

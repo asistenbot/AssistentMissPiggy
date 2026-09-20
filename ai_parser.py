@@ -695,7 +695,8 @@ tanpa markdown code fence:
     {{
       "kategori": "nama kategori produk PERSIS sama kayak salah satu di daftar kategori yang sudah ada di bawah kalau cocok, atau apa adanya kalau memang kategori itu belum ada",
       "rasa": "nama rasa/varian SPESIFIK kalau slot ini WAJIB/FIXED rasa tertentu (misal 'Dubai Coklat'), atau null kalau slot ini bebas pilih rasa apa aja dalam kategori itu (misal admin bilang 'bebas rasa'/'campur'/nggak nyebut rasa)",
-      "qty": angka jumlah pcs untuk slot ini
+      "qty": angka jumlah pcs untuk slot ini,
+      "kecuali": ["daftar nama rasa/varian yang DIKECUALIKAN dari slot bebas-pilih ini -- CUMA diisi kalau \\"rasa\\" di atas null DAN admin secara eksplisit bilang sesuatu kayak 'kecuali X', 'selain X', 'tanpa X', 'nggak termasuk X', 'jangan ada X' setelah nyebut slot bebas rasa itu. List kosong [] kalau nggak ada pengecualian disebut, atau kalau slot ini rasa-nya FIXED (bukan bebas pilih)."]
     }}
   ],
   "kelengkapan": "lengkap" atau "kurang_lengkap",
@@ -709,7 +710,9 @@ disebutkan itu diisi null (untuk nama_paket/harga) atau [] (untuk slots),
 JANGAN mengarang/menebak nilainya sendiri. Setiap slot WAJIB ada "kategori"
 dan "qty" yang jelas -- kalau admin menyebutkan komposisi yang kategorinya
 nggak jelas/ambigu, JANGAN dipaksa ekstrak jadi slot, lebih baik skip slot
-itu dan jelaskan di "peringatan_ai".
+itu dan jelaskan di "peringatan_ai". Nama-nama di "kecuali" JANGAN dipaksa
+dicocokkan ke kategori manapun -- tulis apa adanya persis sesuai yang
+disebut admin (misal "Bun Polos").
 
 Kategori yang SUDAH ADA sekarang di toko: {existing_categories}
 Paket bundling yang SUDAH ADA sekarang (kalau admin maksudnya UBAH salah
@@ -778,4 +781,16 @@ def parse_bundle_definition(raw_text: str, catalog: list = None, existing_bundle
     result.setdefault("kelengkapan", "kurang_lengkap")
     result.setdefault("peringatan_ai", None)
     result.setdefault("error", None)
+    # Jaga-jaga kalau AI lupa/nggak nulis field "kecuali" di salah satu slot
+    # (atau nulisnya bukan list) -- pastiin selalu ada list (boleh kosong)
+    # biar kode pemanggil (bot.py, sheets_client.upsert_bundle) nggak perlu
+    # cek None/KeyError di tiap tempat.
+    for slot in result.get("slots") or []:
+        if not isinstance(slot, dict):
+            continue
+        kecuali = slot.get("kecuali")
+        if not isinstance(kecuali, list):
+            slot["kecuali"] = []
+        else:
+            slot["kecuali"] = [str(r).strip() for r in kecuali if str(r).strip()]
     return result

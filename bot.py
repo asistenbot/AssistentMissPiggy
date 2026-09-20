@@ -643,7 +643,11 @@ def _format_slot_text(slots):
         if s.get("rasa"):
             descs.append(f'{s["qty"]} pcs {s["kategori"]} ({s["rasa"]}, tetap)')
         else:
-            descs.append(f'{s["qty"]} pcs {s["kategori"]} (bebas rasa)')
+            kecuali = s.get("kecuali") or []
+            if kecuali:
+                descs.append(f'{s["qty"]} pcs {s["kategori"]} (bebas rasa, kecuali {", ".join(kecuali)})')
+            else:
+                descs.append(f'{s["qty"]} pcs {s["kategori"]} (bebas rasa)')
     return "; ".join(descs) if descs else "(belum ada isi)"
 
 
@@ -1475,7 +1479,11 @@ def _format_bundle_summary(b):
         if s.get("rasa"):
             slot_descs.append(f'{s["qty"]}x {s["kategori"]} ({s["rasa"]})')
         else:
-            slot_descs.append(f'{s["qty"]}x {s["kategori"]} (bebas rasa)')
+            kecuali = s.get("kecuali") or []
+            if kecuali:
+                slot_descs.append(f'{s["qty"]}x {s["kategori"]} (bebas rasa, kecuali {", ".join(kecuali)})')
+            else:
+                slot_descs.append(f'{s["qty"]}x {s["kategori"]} (bebas rasa)')
     isi = ", ".join(slot_descs) if slot_descs else "(belum ada isi)"
     return f"📦 *{b['nama']}* — {status}\n   Harga: {harga_text} | Isi: {isi}"
 

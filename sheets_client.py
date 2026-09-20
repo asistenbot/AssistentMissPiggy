@@ -38,12 +38,16 @@ def is_komposisi_bundle_valid(bundle: dict, items: list) -> bool:
     (dict hasil get_bundle_by_name/get_all_bundles) -- nggak boleh
     kurang, nggak boleh lebih, nggak boleh ada item DI LUAR slot yang
     didefinisiin. Slot rasa=None (bebas pilih) diitung TOTAL qty-nya
-    lintas rasa dalam kategori itu; slot rasa keisi (item tetap/terkunci,
-    kayak dulu Dubai Coklat) harus PERSIS kategori+rasa itu sejumlah qty
-    situ. Order tetep bisa disimpen walau komposisinya nggak valid --
-    cuma harganya dihitung normal per item (liat pemanggil fungsi ini di
+    lintas rasa dalam kategori itu (KECUALI rasa yang ada di slot["kecuali"]
+    -- rasa yang di-exclude nggak boleh dihitung masuk slot bebas-pilih
+    itu sama sekali, jadi kalau ada di order, order dianggap DI LUAR
+    definisi slot manapun); slot rasa keisi (item tetap/terkunci, kayak
+    dulu Dubai Coklat) harus PERSIS kategori+rasa itu sejumlah qty situ.
+    Order tetep bisa disimpen walau komposisinya nggak valid -- cuma
+    harganya dihitung normal per item (liat pemanggil fungsi ini di
     add_order_rows), bukan digagalin total."""
     free_targets = {}   # kategori(lower) -> total qty dibutuhin (bebas rasa)
+    free_kecuali = {}   # kategori(lower) -> set rasa(lower) yang di-exclude dari slot bebas itu
     fixed_targets = {}  # (kategori(lower), rasa(lower)) -> qty dibutuhin (rasa tetap)
     for slot in bundle.get("slots", []):
         kat = str(slot.get("kategori", "")).strip().lower()
@@ -54,6 +58,8 @@ def is_komposisi_bundle_valid(bundle: dict, items: list) -> bool:
             fixed_targets[key] = fixed_targets.get(key, 0) + qty
         else:
             free_targets[kat] = free_targets.get(kat, 0) + qty
+            kecuali_set = {str(r).strip().lower() for r in (slot.get("kecuali") or []) if str(r).strip()}
+            free_kecuali.setdefault(kat, set()).update(kecuali_set)
 
     free_used = {k: 0 for k in free_targets}
     fixed_used = {k: 0 for k in fixed_targets}
@@ -65,10 +71,10 @@ def is_komposisi_bundle_valid(bundle: dict, items: list) -> bool:
         fixed_key = (kategori, rasa)
         if fixed_key in fixed_targets:
             fixed_used[fixed_key] += qty
-        elif kategori in free_targets:
+        elif kategori in free_targets and rasa not in free_kecuali.get(kategori, set()):
             free_used[kategori] += qty
         else:
-            return False  # item di luar definisi slot manapun
+            return False  # item di luar definisi slot manapun (atau rasa-nya di-exclude)
 
     return free_used == free_targets and fixed_used == fixed_targets
 
@@ -866,20 +872,26 @@ class SheetsClient:
         ws.append_row([key, value])  # key belum ada -- tambahin baris baru
 
     # ---------- PAKET BUNDLING (multi-paket, tab Sheets config.SHEET_PAKET_BUNDLING) ----------
-    # Kolom: Nama_Paket | Kategori | Rasa | Qty | Harga_Paket | Aktif.
+    # Kolom: Nama_Paket | Kategori | Rasa | Qty | Harga_Paket | Aktif | Kecuali_Rasa.
     # 1 baris = 1 slot komposisi; beberapa baris Nama_Paket sama = 1 paket
     # dengan beberapa slot. Rasa kosong = bebas pilih rasa apa aja dalam
     # kategori itu; Rasa keisi = item TETAP/terkunci (kayak dulu Dubai
-    # Coklat). Harga_Paket & Aktif DIULANG di tiap baris paket yang sama
-    # (denormalisasi sengaja -- lebih gampang dibaca/diedit manual langsung
-    # di Sheets kalau admin perlu, nggak WAJIB lewat chat).
+    # Coklat). Kecuali_Rasa CUMA berlaku buat baris bebas-pilih (Rasa
+    # kosong) -- isinya daftar rasa yang DIKECUALIKAN dari slot itu,
+    # dipisah koma (misal "Bun Polos, Roti Polos"), biar admin bisa bilang
+    # "8 roti bebas rasa kecuali bun polos" tanpa perlu ubah kategori
+    # produk di PriceList. Harga_Paket & Aktif DIULANG di tiap baris
+    # paket yang sama (denormalisasi sengaja -- lebih gampang dibaca/diedit
+    # manual langsung di Sheets kalau admin perlu, nggak WAJIB lewat chat).
+
+    _PAKET_BUNDLING_HEADER = ["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif", "Kecuali_Rasa"]
 
     def _get_or_create_paket_bundling_ws(self):
         try:
-            return self.sheet.worksheet(config.SHEET_PAKET_BUNDLING)
+            ws = self.sheet.worksheet(config.SHEET_PAKET_BUNDLING)
         except gspread.exceptions.WorksheetNotFound:
-            ws = self.sheet.add_worksheet(title=config.SHEET_PAKET_BUNDLING, rows=50, cols=6)
-            ws.update(values=[["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif"]], range_name="A1:F1")
+            ws = self.sheet.add_worksheet(title=config.SHEET_PAKET_BUNDLING, rows=50, cols=7)
+            ws.update(values=[self._PAKET_BUNDLING_HEADER], range_name="A1:G1")
             # Migrasi 1x dari versi lama (single hardcoded bundle + toggle
             # global di tab Pengaturan) -- seed paket "Bundling Spesial"
             # (8 Roti bebas rasa + 1 Dubai Coklat = flat 150rb), Aktif-nya
@@ -894,19 +906,31 @@ class SheetsClient:
             except Exception:
                 pass
             ws.update(values=[
-                ["Bundling Spesial", "Roti", "", 8, 150000, aktif_lama],
-                ["Bundling Spesial", "Dubai", "Dubai Coklat", 1, 150000, aktif_lama],
-            ], range_name="A2:F3")
+                ["Bundling Spesial", "Roti", "", 8, 150000, aktif_lama, ""],
+                ["Bundling Spesial", "Dubai", "Dubai Coklat", 1, 150000, aktif_lama, ""],
+            ], range_name="A2:G3")
             return ws
+        # Self-heal: sheet yang udah ada dari SEBELUM kolom Kecuali_Rasa
+        # ditambahin (bikin paket bundling udah pernah dipakai admin) cuma
+        # punya 6 kolom -- tambahin header G1 aja tanpa nyentuh data yang
+        # udah ada, biar baris lama (Kecuali_Rasa kosong = nggak exclude
+        # apa-apa, perilaku sama kayak sebelumnya) tetep aman.
+        try:
+            header_row = ws.row_values(1)
+            if len(header_row) < 7 or str(header_row[6] if len(header_row) > 6 else "").strip() != "Kecuali_Rasa":
+                ws.update(values=[["Kecuali_Rasa"]], range_name="G1")
+        except Exception:
+            pass
+        return ws
 
     def _read_all_bundle_rows(self):
         ws = self._get_or_create_paket_bundling_ws()
         rows = ws.get_all_values()
         result = []
         for row in rows[1:]:
-            if len(row) < 6:
-                row = row + [""] * (6 - len(row))
-            nama, kategori, rasa, qty, harga, aktif = row[:6]
+            if len(row) < 7:
+                row = row + [""] * (7 - len(row))
+            nama, kategori, rasa, qty, harga, aktif, kecuali_raw = row[:7]
             nama = str(nama).strip()
             if not nama:
                 continue
@@ -918,6 +942,7 @@ class SheetsClient:
                 harga = int(harga)
             except (ValueError, TypeError):
                 harga = 0
+            kecuali = [s.strip() for s in str(kecuali_raw).split(",") if s.strip()]
             result.append({
                 "nama": nama,
                 "kategori": str(kategori).strip(),
@@ -925,13 +950,16 @@ class SheetsClient:
                 "qty": qty,
                 "harga": harga,
                 "aktif": str(aktif).strip().upper() == "TRUE",
+                "kecuali": kecuali,
             })
         return result
 
     def get_all_bundles(self, only_active: bool = False) -> list:
         """Return [{"nama":.., "harga":.., "aktif":.., "slots":[{"kategori":..,
-        "rasa": .. atau None, "qty":..}, ...]}, ...] -- 1 dict per paket
-        (baris2 Sheets yang Nama_Paket-nya sama digabung jadi slots)."""
+        "rasa": .. atau None, "qty":.., "kecuali": [..]}, ...]}, ...] -- 1
+        dict per paket (baris2 Sheets yang Nama_Paket-nya sama digabung
+        jadi slots). "kecuali" cuma relevan/keisi buat slot bebas-pilih
+        (rasa None) -- daftar nama rasa yang dikecualikan dari kategori itu."""
         rows = self._read_all_bundle_rows()
         by_nama = {}
         order = []
@@ -939,7 +967,12 @@ class SheetsClient:
             if r["nama"] not in by_nama:
                 by_nama[r["nama"]] = {"nama": r["nama"], "harga": r["harga"], "aktif": r["aktif"], "slots": []}
                 order.append(r["nama"])
-            by_nama[r["nama"]]["slots"].append({"kategori": r["kategori"], "rasa": r["rasa"], "qty": r["qty"]})
+            by_nama[r["nama"]]["slots"].append({
+                "kategori": r["kategori"],
+                "rasa": r["rasa"],
+                "qty": r["qty"],
+                "kecuali": r["kecuali"],
+            })
         bundles = [by_nama[n] for n in order]
         if only_active:
             bundles = [b for b in bundles if b["aktif"]]
@@ -958,16 +991,26 @@ class SheetsClient:
         """Bikin paket BARU (nama belum ada) atau GANTI TOTAL definisi lama
         (nama udah ada -- semua baris slot lama punya nama itu dihapus,
         ditulis ulang dari 'slots' yang baru). Dipakai buat 'bikin paket
-        baru' DAN 'ubah isi/komposisi paket X' lewat chat."""
+        baru' DAN 'ubah isi/komposisi paket X' lewat chat. Tiap slot bisa
+        punya slot["kecuali"] = list nama rasa yang dikecualikan (cuma
+        relevan kalau slot["rasa"] kosong/None -- bebas pilih)."""
         ws = self._get_or_create_paket_bundling_ws()
         rows = ws.get_all_values()
         nama_target = nama.strip().lower()
-        header = rows[0] if rows else ["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif"]
+        header = rows[0] if rows else self._PAKET_BUNDLING_HEADER
         keep_rows = [header] + [
             row for row in rows[1:] if not row or str(row[0]).strip().lower() != nama_target
         ]
         new_rows = [
-            [nama, s["kategori"], s.get("rasa") or "", s["qty"], harga, "TRUE" if aktif else "FALSE"]
+            [
+                nama,
+                s["kategori"],
+                s.get("rasa") or "",
+                s["qty"],
+                harga,
+                "TRUE" if aktif else "FALSE",
+                ", ".join(s.get("kecuali") or []),
+            ]
             for s in slots
         ]
         ws.clear()
@@ -1004,7 +1047,7 @@ class SheetsClient:
         ws = self._get_or_create_paket_bundling_ws()
         rows = ws.get_all_values()
         nama_target = nama.strip().lower()
-        header = rows[0] if rows else ["Nama_Paket", "Kategori", "Rasa", "Qty", "Harga_Paket", "Aktif"]
+        header = rows[0] if rows else self._PAKET_BUNDLING_HEADER
         keep_rows = [header]
         found = False
         for row in rows[1:]:
