@@ -43,14 +43,6 @@ def rupiah(n):
     return "Rp" + f"{int(n):,}".replace(",", ".")
 
 
-def _is_delivery_metode(metode):
-    """Sama persis kayak versi di bot.py/receipt.py/documents.py -- dicek
-    berbasis substring (bukan '==' persis) biar "Kirim" (dari AI parser chat
-    manual) sama "Diantar" (dari order web) dua-duanya kena."""
-    m = (metode or "").strip().lower()
-    return "antar" in m or "kirim" in m
-
-
 def _dashed_line(draw, x1, y, x2, color, dash=5, gap=4, width=1):
     x = x1
     while x < x2:
@@ -59,85 +51,18 @@ def _dashed_line(draw, x1, y, x2, color, dash=5, gap=4, width=1):
         x += dash + gap
 
 
-def _wrap_text(text, font, max_width, draw):
-    """Pecah teks jadi beberapa baris biar nggak kepotong keluar canvas --
-    dipakai buat baris 'Rincian Box' yang panjangnya nggak nentu (nggak
-    kayak nama produk yang udah dipotong manual jadi 18 karakter).
-
-    Dipecah per BARIS ASLI dulu (split "\\n") SEBELUM di-word-wrap per kata
-    -- draw.textlength() dari Pillow nolak TOTAL (raise ValueError "can't
-    measure length of multiline text") kalau dikasih string yang ada
-    karakter baris barunya. Sama persis kayak bug yang bikin
-    generate_surat_jalan_image() crash total di receipt.py -- dibenerin di
-    sini juga biar invoice-nya nggak kena kasus yang sama kalau kebetulan
-    ada teks multi-baris yang lewat sini."""
-    all_lines = []
-    for raw_line in text.split("\n"):
-        words = raw_line.split(" ")
-        lines = []
-        current = ""
-        for w in words:
-            test = (current + " " + w).strip()
-            if draw.textlength(test, font=font) <= max_width:
-                current = test
-            else:
-                if current:
-                    lines.append(current)
-                current = w
-        if current:
-            lines.append(current)
-        all_lines.extend(lines or [""])
-    return all_lines or [""]
-
-
-def _format_box_group_lines(box_groups, font, max_width, draw):
-    """Ubah box_groups (list of {"jumlah_box", "items":[{"rasa","qty_per_box"}]})
-    jadi list baris teks yang siap digambar, sudah di-wrap biar muat lebar
-    invoice. Return list kosong kalau box_groups kosong/None."""
-    if not box_groups:
-        return []
-    wrapped = []
-    for grp in box_groups:
-        jumlah = grp.get("jumlah_box", "?")
-        desc = ", ".join(
-            f"{i.get('rasa', '?')} x{i.get('qty_per_box', '?')}" for i in grp.get("items", [])
-        )
-        text = f"• {jumlah} box: {desc}"
-        wrapped.extend(_wrap_text(text, font, max_width, draw))
-    return wrapped
-
-
-def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box_groups: list = None) -> BytesIO:
+def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list) -> BytesIO:
     x_left = PADDING
     x_right = WIDTH - PADDING
     col_qty = x_left + 230
     col_harga = x_right - 100
     CATEGORY_ROW_HEIGHT = 28
-    BOX_LINE_HEIGHT = 19
 
     # Tanggal_Kirim itu kolom OPSIONAL di Sheets -- kalau admin nggak nentuin
     # tanggal custom (misal 'besok'), balik ke default lama: minggu_po
     # (Kamis PO minggu berjalan), jadi invoice yang udah ada nggak berubah
     # kalau fitur ini nggak dipakai sama sekali.
     tanggal_kirim = (orders[0].get("Tanggal_Kirim") if orders else None) or minggu_po
-
-    # Kolom Kurir (diisi admin lewat tombol "Isi Kurir" pas konfirmasi order)
-    # -- kosong berarti armada/kurir toko sendiri, ada isinya (misal "JNE",
-    # "Paxel") berarti lewat ekspedisi pihak ketiga. Baris "Kurir: ..." cuma
-    # digambar kalau metode-nya kirim/antar DAN kolom ini keisi.
-    metode_awal = orders[0].get("Metode", "-") if orders else "-"
-    kurir = orders[0].get("Kurir") if orders else None
-    tampilkan_kurir = bool(_is_delivery_metode(metode_awal) and kurir)
-
-    # Kolom Addon_Jenis/Addon_Qty/Addon_Total (diisi admin lewat tombol "Isi
-    # Add-on" pas konfirmasi order, misal "Tali Pita" qty 2) -- SELALU dicek
-    # (nggak digantung metode kirim/ambil kayak Kurir), soalnya add-on bisa
-    # dipesan mau order-nya dikirim atau diambil sendiri. Harganya ikut
-    # ditambahin ke grand_total di bawah.
-    addon_jenis = orders[0].get("Addon_Jenis") if orders else None
-    addon_qty = int(orders[0].get("Addon_Qty", 0) or 0) if orders else 0
-    addon_total = int(orders[0].get("Addon_Total", 0) or 0) if orders else 0
-    tampilkan_addon = bool(addon_jenis and addon_qty)
 
     # Kelompokin item per kategori, Donat selalu di paling atas, sisanya
     # ikutin urutan config.CATEGORIES.
@@ -154,33 +79,29 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
         grouped.setdefault(o["Kategori"], []).append(o)
     kategori_list = sorted(grouped.keys(), key=kategori_rank)
 
-    # Ukur dulu baris "Rincian Box" (kalau ada) pakai canvas dummy, biar bisa
-    # dipakai buat hitung total tinggi gambar DAN dipakai lagi pas gambar
-    # beneran -- dihitung sekali aja biar konsisten antara pass pertama
-    # (hitung tinggi) dan pass kedua (gambar).
-    dummy_img = Image.new("RGB", (WIDTH, 10), COLOR_BG)
-    dummy_draw = ImageDraw.Draw(dummy_img)
-    box_lines = _format_box_group_lines(box_groups, F_SMALL, x_right - x_left, dummy_draw)
+    # Item yang punya o["Paket_Bundling"] keisi (dari sheets_client.add_order_rows,
+    # cuma keisi kalau item itu bener bagian dari paket bundling yang VALID
+    # harganya udah dihitung proporsional dari harga flat paket, BUKAN harga
+    # satuan normal) ditandain 📦 di baris item-nya, biar customer nggak
+    # bingung liat harganya beda dari Price List biasa -- ada 1 baris
+    # keterangan tambahan di bawah kalau minimal 1 item ketandain.
+    ada_bundling = any((o.get("Paket_Bundling") or "").strip() for o in orders)
 
     # ---- Hitung total tinggi gambar dulu ----
     y = HEADER_HEIGHT + PADDING
     y += 24 + 22 + 22 + 20
-    if tampilkan_kurir:
-        y += 22
     y += 6
     y += ROW_HEIGHT
     for kategori in kategori_list:
         y += CATEGORY_ROW_HEIGHT
         y += len(grouped[kategori]) * ROW_HEIGHT
-    if box_lines:
-        y += 24 + len(box_lines) * BOX_LINE_HEIGHT + 8
     y += 10
     y += 22 + 22 + 16
-    if tampilkan_addon:
-        y += 22
     y += 50  # kotak total
     y += 16
     y += 20 + 22 + 22
+    if ada_bundling:
+        y += 18
     y += 20
     y += 34
     total_height = y + PADDING
@@ -233,9 +154,6 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
     metode = orders[0].get("Metode", "-") if orders else "-"
     draw.text((x_left, y), f"Metode: {metode}", font=F_BODY, fill=COLOR_MUTED)
     y += 20
-    if tampilkan_kurir:
-        draw.text((x_left, y), f"Kurir: {kurir}", font=F_BODY, fill=COLOR_MUTED)
-        y += 22
 
     _dashed_line(draw, x_left, y, x_right, COLOR_GOLD)
     y += 6
@@ -267,44 +185,41 @@ def generate_invoice_image(nama_customer: str, minggu_po: str, orders: list, box
                 draw.rectangle([x_left - 8, y - 6, x_right + 8, y + ROW_HEIGHT - 8], fill=COLOR_ROW_ALT)
             row_i += 1
 
-            draw.text((x_left, y), str(o["Rasa"])[:18], font=F_BODY, fill=COLOR_TEXT)
+            # NOTE: pakai simbol ★ (bukan emoji 📦) -- font DejaVuSans yang
+            # dipakai draw.text() nggak punya glyph emoji, jadi 📦 kegambar
+            # jadi kotak kosong (notdef) di gambar PNG-nya. ★ ada di
+            # DejaVuSans, kegambar bener.
+            paket = (o.get("Paket_Bundling") or "").strip()
+            nama_item = str(o["Rasa"])[:15] + " ★" if paket else str(o["Rasa"])[:18]
+            draw.text((x_left, y), nama_item, font=F_BODY, fill=COLOR_TEXT)
             draw.text((col_qty, y), f"x{qty}", font=F_BODY, fill=COLOR_TEXT)
             draw.text((col_harga, y), rupiah(harga), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
             draw.text((x_right, y), rupiah(subtotal), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
             y += ROW_HEIGHT
 
-    # ---- Rincian Box (opsional, cuma muncul kalau order-nya pakai satuan box) ----
-    if box_lines:
-        draw.text((x_left, y), "Rincian Box:", font=F_BODY_BOLD, fill=COLOR_TEXT)
-        y += 22
-        for line in box_lines:
-            draw.text((x_left, y), line, font=F_SMALL, fill=COLOR_MUTED)
-            y += BOX_LINE_HEIGHT
-        y += 10
-
     _dashed_line(draw, x_left, y, x_right, COLOR_LINE)
     y += 14
 
     ongkir = int(orders[0].get("Ongkir", 0) or 0) if orders else 0
-    grand_total = total + ongkir + addon_total
+    grand_total = total + ongkir
 
     draw.text((x_left, y), "Subtotal", font=F_BODY, fill=COLOR_MUTED)
     draw.text((x_right, y), rupiah(total), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
     y += 22
     draw.text((x_left, y), "Ongkir", font=F_BODY, fill=COLOR_MUTED)
     draw.text((x_right, y), rupiah(ongkir), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
-    y += 22
-    if tampilkan_addon:
-        draw.text((x_left, y), f"Add-on ({addon_jenis} x{addon_qty})", font=F_BODY, fill=COLOR_MUTED)
-        draw.text((x_right, y), rupiah(addon_total), font=F_BODY, fill=COLOR_TEXT, anchor="ra")
-        y += 22
-    y += 4
+    y += 26
 
     # ---- Kotak Total (rounded, emas) ----
     draw.rounded_rectangle([x_left - 8, y, x_right + 8, y + 46], radius=10, fill=COLOR_TOTAL_BG)
     draw.text((x_left + 4, y + 23), "TOTAL", font=F_TOTAL_LABEL, fill=COLOR_TOTAL_TEXT, anchor="lm")
     draw.text((x_right - 4, y + 23), rupiah(grand_total), font=F_TOTAL_VALUE, fill=COLOR_TOTAL_TEXT, anchor="rm")
     y += 62
+
+    if ada_bundling:
+        draw.text((x_left, y), "★ = item bagian dari paket bundling (harga flat)",
+                  font=F_SMALL, fill=COLOR_MUTED)
+        y += 18
 
     # ---- Info Pembayaran ----
     _dashed_line(draw, x_left, y, x_right, COLOR_GOLD)
