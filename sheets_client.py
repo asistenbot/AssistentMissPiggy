@@ -360,6 +360,19 @@ class SheetsClient:
                 harga_override_by_index[anchor_idx] = sisa // qty_anchor
                 bundling_diterapkan = True
 
+        # Nama paket bundling (kalau beneran KETERAPAN -- validasi lolos,
+        # harga dihitung ulang proporsional) DISIMPEN juga ke tiap baris item
+        # order ini, kolom Paket_Bundling, PALING BELAKANG (setelah
+        # Addon_Total). Dulu nama paketnya nggak kesimpen sama sekali abis
+        # dipakai buat hitung harga -- jadi invoice/surat jalan yang
+        # digenerate ULANG belakangan (/invoice, /suratjalan) nggak ada
+        # petunjuk lagi item mana yang bagian dari paket apa. WAJIB nambahin
+        # kolom header "Paket_Bundling" PALING BELAKANG di Google Sheet
+        # Orders-nya dulu, manual, sebelum fitur ini kepake -- kalau belum
+        # ada, bot tetep jalan normal, cuma keterangan paketnya nggak
+        # kesimpen/ke-pakai di invoice/surat jalan.
+        paket_bundling_label = bundle_def["nama"] if (bundling_diterapkan and bundle_def) else ""
+
         rows = []
         order_records = []
         for idx, item in enumerate(order["items"]):
@@ -392,6 +405,7 @@ class SheetsClient:
                 self._safe_text(addon_jenis),  # kolom BARU lagi, paling belakang setelah Kurir
                 addon_qty,  # kolom BARU lagi, paling belakang setelah Addon_Jenis
                 addon_total,  # kolom BARU lagi, paling belakang setelah Addon_Qty
+                self._safe_text(paket_bundling_label),  # kolom BARU lagi, paling belakang setelah Addon_Total
             ])
             order_records.append({
                 "Kategori": item["kategori"],
@@ -409,6 +423,7 @@ class SheetsClient:
                 "Addon_Jenis": addon_jenis,
                 "Addon_Qty": addon_qty,
                 "Addon_Total": addon_total,
+                "Paket_Bundling": paket_bundling_label,
             })
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         return order_records
