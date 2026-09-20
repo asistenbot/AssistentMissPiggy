@@ -53,32 +53,20 @@ def _is_delivery_metode(metode):
 
 
 def _wrap_text(text, font, max_width, draw):
-    """Word-wrap `text` biar muat di `max_width`. Dipecah per BARIS ASLI
-    dulu (split "\\n") SEBELUM di-word-wrap per kata -- soalnya
-    draw.textlength() dari Pillow itu nolak TOTAL (raise ValueError "can't
-    measure length of multiline text") kalau dikasih string yang ada
-    karakter baris barunya. Alamat/catatan yang customer/admin ketik
-    multi-baris (lumayan sering kejadian, misal alamat 2 baris) sebelumnya
-    bikin generate_surat_jalan_image() CRASH TOTAL gara-gara ini -- baris
-    barunya kebawa utuh ke draw.textlength() lewat text.split(" ") yang
-    emang cuma misahin per SPASI, bukan per baris."""
-    all_lines = []
-    for raw_line in text.split("\n"):
-        words = raw_line.split(" ")
-        lines = []
-        current = ""
-        for w in words:
-            test = (current + " " + w).strip()
-            if draw.textlength(test, font=font) <= max_width:
-                current = test
-            else:
-                if current:
-                    lines.append(current)
-                current = w
-        if current:
-            lines.append(current)
-        all_lines.extend(lines or [""])
-    return all_lines or [""]
+    words = text.split(" ")
+    lines = []
+    current = ""
+    for w in words:
+        test = (current + " " + w).strip()
+        if draw.textlength(test, font=font) <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = w
+    if current:
+        lines.append(current)
+    return lines or [""]
 
 
 def _group_by_category(orders):
@@ -95,7 +83,7 @@ def _group_by_category(orders):
     return [(k, by_kategori[k]) for k in urutan]
 
 
-def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list, box_groups: list = None) -> BytesIO:
+def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list) -> BytesIO:
     usable_width = RECEIPT_WIDTH - 2 * MARGIN
 
     # Tanggal_Kirim itu kolom BARU (opsional) di Sheets -- kalau admin nggak
@@ -105,10 +93,6 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     metode = orders[0].get("Metode", "-") if orders else "-"
     no_hp = orders[0].get("No_HP", "-") if orders else "-"
     alamat = orders[0].get("Alamat", "-") if orders else "-"
-    # Kolom Kurir (diisi admin lewat tombol "Isi Kurir" pas konfirmasi order)
-    # -- kosong berarti dikirim pake armada/kurir toko sendiri, ada isinya
-    # (misal "JNE", "Paxel", "J&T") berarti lewat ekspedisi pihak ketiga.
-    kurir = (orders[0].get("Kurir") if orders else None) or None
 
     # Susun dulu daftar baris konten (belum digambar), biar tinggi gambar
     # bisa dihitung pas -- nggak kepotong, nggak kelebihan kosong.
@@ -127,26 +111,21 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     lines.append(("-" * 22, FONT_SMALL, "center", 0))
     lines.append(("PESANAN:", FONT_BOLD, "left", 0))
 
-    total_qty = sum(int(o["Qty"]) for o in orders)
-
-    if box_groups:
-        # Order ini pakai satuan box -- langsung tampilin rincian per box aja
-        # (BUKAN daftar per-kategori/rasa biasa), soalnya buat packing lebih
-        # jelas ngikutin pembagian box aslinya drpd total per rasa yang udah
-        # digabung. Total per rasa tetep bisa dicek di invoice kalau perlu.
-        for grp in box_groups:
-            jumlah = grp.get("jumlah_box", "?")
-            desc = ", ".join(
-                f"{i.get('rasa', '?')} x{i.get('qty_per_box', '?')}" for i in grp.get("items", [])
-            )
-            lines.append((f"{jumlah} box: {desc}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
-            lines.append(("", FONT_SMALL, "left", 0))
-    else:
-        for kategori, items in _group_by_category(orders):
-            lines.append((f"» {kategori}", FONT_HEADER, "left", 0))
-            for o in items:
-                qty = int(o["Qty"])
-                lines.append((f"{o['Rasa']}  x{qty}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
+    total_qty = 0
+    for kategori, items in _group_by_category(orders):
+        lines.append((f"» {kategori}", FONT_HEADER, "left", 0))
+        for o in items:
+            qty = int(o["Qty"])
+            total_qty += qty
+            # o.get("Paket_Bundling") cuma keisi kalau item ini bagian dari
+            # paket bundling yang VALID (liat sheets_client.add_order_rows) --
+            # ditandain ★ biar tukang packing tau item ini kudu disatuin jadi
+            # 1 paket, bukan pesanan lepas biasa. Pakai ★ bukan emoji 📦 --
+            # font DejaVuSansMono yang dipakai draw.text() di sini nggak
+            # punya glyph emoji, 📦 kegambar jadi kotak kosong di gambar PNG.
+            paket = (o.get("Paket_Bundling") or "").strip()
+            tag = "  ★" if paket else ""
+            lines.append((f"{o['Rasa']}  x{qty}{tag}", FONT_NORMAL, "left_wrap", INDENT_ITEM))
 
     lines.append(("-" * 22, FONT_SMALL, "center", 0))
     lines.append((f"Total item: {total_qty} pcs", FONT_BOLD, "left", 0))
@@ -156,43 +135,14 @@ def generate_surat_jalan_image(nama_customer: str, minggu_po: str, orders: list,
     # biar paling gampang kebaca sama bagian packing pas terakhir liat
     # surat jalan ini sebelum barangnya dibungkus/diberangkatin.
     is_delivery = _is_delivery_metode(metode)
+    metode_label = "DIANTAR" if is_delivery else "AMBIL SENDIRI"
     lines.append(("", FONT_SMALL, "left", 0))
-    if is_delivery and kurir:
-        # Dipisah jadi 2 baris (label + nama kurir) alih-alih 1 baris
-        # gabungan "CARA: KIRIM VIA JNE" -- biar nama ekspedisinya (panjang
-        # bervariasi, admin ketik bebas) nggak beresiko kepotong/nembus tepi
-        # kertas di font segede FONT_HUGE yang emang nggak auto-wrap.
-        lines.append(("CARA: KIRIM VIA KURIR", FONT_HUGE, "center", 0))
-        lines.append((kurir.upper(), FONT_HUGE, "center", 0))
-    elif is_delivery:
-        lines.append(("CARA: DIANTAR", FONT_HUGE, "center", 0))
-    else:
-        lines.append(("CARA: AMBIL SENDIRI", FONT_HUGE, "center", 0))
+    lines.append((f"CARA: {metode_label}", FONT_HUGE, "center", 0))
     if is_delivery:
         lines.append(("Alamat:", FONT_BOLD, "left", 0))
         lines.append((alamat, FONT_NORMAL, "left_wrap", 0))
     else:
         lines.append((f"Ambil di: {config.PICKUP_ADDRESS}", FONT_NORMAL, "left_wrap", 0))
-
-    # Add-on packing (tali pita/kartu ucapan, diisi admin lewat tombol "Isi
-    # Add-on" pas konfirmasi order) -- ditaruh SEBELUM Catatan, alasan sama
-    # kayak kenapa CARA/Catatan ditaruh di bawah: paling gampang kebaca sama
-    # yang packing tepat sebelum barangnya dibungkus.
-    addon_jenis = (orders[0].get("Addon_Jenis") if orders else None) or None
-    addon_qty = int((orders[0].get("Addon_Qty") if orders else 0) or 0)
-    if addon_jenis and addon_qty:
-        lines.append(("", FONT_SMALL, "left", 0))
-        lines.append((f"ADD-ON: {addon_jenis} x{addon_qty}", FONT_BOLD, "left_wrap", 0))
-
-    # Catatan (kolom Catatan di Sheets, misal "Donat & Gula dipisah") SENGAJA
-    # ditaruh PALING BAWAH, nempel abis info CARA/Alamat -- alasan sama kayak
-    # kenapa CARA ditaruh di bawah: ini bagian yang paling gampang kebaca sama
-    # yang packing tepat sebelum barangnya dibungkus/diberangkatin.
-    catatan = (orders[0].get("Catatan") if orders else None) or None
-    if catatan:
-        lines.append(("", FONT_SMALL, "left", 0))
-        lines.append(("CATATAN:", FONT_BOLD, "left", 0))
-        lines.append((catatan, FONT_NORMAL, "left_wrap", 0))
 
     lines.append(("", FONT_SMALL, "left", 0))  # spasi kosong buat sobek kertas
 
