@@ -33,6 +33,25 @@ SCOPES = [
 # harga dari definisi paket di Sheets (get_bundle_by_name), klien cuma
 # ngirim/nyaranin nama paket + komposisi item-nya doang.
 
+def _norm_nama(s):
+    """Normalisasi nama customer buat DIBANDINGIN (bukan buat disimpen) --
+    strip+lower doang KURANG, soalnya spasi ganda/nggak konsisten (misal
+    kepencet 2 spasi nggak sengaja, atau nama kecopy dari WA yang
+    formatnya beda) bikin exact-match GAGAL padahal nama-nya SAMA PERSIS
+    kalau dibaca manusia.
+
+    Kejadian nyata yang bikin ini perlu: order "Bianca ( untuk pak
+    Joshua )" nggak ketemu sama sekali lewat /edit, walaupun admin udah
+    COPY-PASTE PERSIS dari cell Sheets-nya -- ternyata nama itu kesimpen
+    dengan spasi ganda yang nggak keliatan di surat jalan (soalnya
+    word-wrap di situ ngerapiin spasi ganda jadi 1 tanpa sengaja pas
+    nge-render ke gambar), padahal di data mentah Sheets spasinya masih
+    ganda. Collapse semua whitespace beruntun jadi 1 spasi SEBELUM
+    strip+lower, biar pencocokan nama nggak kesandung beda spasi kayak
+    gini lagi -- dipakai di SEMUA tempat yang nyocokin Nama_Customer."""
+    return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+
+
 def is_komposisi_bundle_valid(bundle: dict, items: list) -> bool:
     """True kalau 'items' PERSIS nutupin semua slot di definisi 'bundle'
     (dict hasil get_bundle_by_name/get_all_bundles) -- nggak boleh
@@ -470,12 +489,12 @@ class SheetsClient:
             # Kolom nggak ketemu sama sekali -- jangan hapus apa-apa, lebih aman diem
             return 0
 
-        nama_target = nama_customer.strip().lower()
+        nama_target = _norm_nama(nama_customer)
         rows_to_delete = []
         for i, row in enumerate(all_values[1:], start=2):  # baris 1 = header, gspread 1-indexed
             if len(row) <= max(idx_minggu, idx_nama):
                 continue
-            row_nama = row[idx_nama].strip().lower()
+            row_nama = _norm_nama(row[idx_nama])
             row_minggu = row[idx_minggu]
             if row_nama == nama_target and self._minggu_po_cocok(row_minggu, minggu_po):
                 rows_to_delete.append(i)
@@ -602,12 +621,12 @@ class SheetsClient:
         except ValueError:
             return 0
 
-        nama_target = nama_customer.strip().lower()
+        nama_target = _norm_nama(nama_customer)
         rows_to_update = []
         for i, row in enumerate(all_values[1:], start=2):
             if len(row) <= max(idx_status, idx_minggu, idx_nama):
                 continue
-            row_nama = row[idx_nama].strip().lower()
+            row_nama = _norm_nama(row[idx_nama])
             row_minggu = row[idx_minggu]
             row_status = row[idx_status].strip()
             if row_nama == nama_target and row_status.lower() == "pending" \
@@ -715,9 +734,10 @@ class SheetsClient:
         return belum_terkirim if belum_terkirim else semua
 
     def get_orders_by_customer_week(self, nama_customer: str, minggu_po: str):
+        nama_target = _norm_nama(nama_customer)
         return [
             o for o in self.get_orders_by_week(minggu_po)
-            if o.get("Nama_Customer", "").strip().lower() == nama_customer.strip().lower()
+            if _norm_nama(o.get("Nama_Customer", "")) == nama_target
         ]
 
     def get_orders_by_customer_any_week(self, nama_customer: str):
@@ -738,10 +758,10 @@ class SheetsClient:
 
         Return: (list_order, minggu_po_string) atau ([], None) kalau nggak
         ketemu sama sekali."""
-        nama_target = nama_customer.strip().lower()
+        nama_target = _norm_nama(nama_customer)
         semua = [
             o for o in self.get_all_orders()
-            if o.get("Nama_Customer", "").strip().lower() == nama_target
+            if _norm_nama(o.get("Nama_Customer", "")) == nama_target
         ]
         if not semua:
             return [], None
@@ -810,9 +830,9 @@ class SheetsClient:
         customer ternyata punya lebih dari 1 Minggu_PO dalam bulan yang sama,
         itu tanggung jawab caller buat dikelompokin sebelum di-generate jadi
         dokumen (lihat _kirim_dokumen_bulan_lama di bot.py)."""
-        nama_target = nama_customer.strip().lower()
+        nama_target = _norm_nama(nama_customer)
         bulanan = self.get_orders_by_month(year, month)
-        return [o for o in bulanan if str(o.get("Nama_Customer", "")).strip().lower() == nama_target]
+        return [o for o in bulanan if _norm_nama(o.get("Nama_Customer", "")) == nama_target]
 
     def _filter_by_month_range(self, records, year_start: int, month_start: int, year_end: int, month_end: int):
         """Helper bersama buat get_orders_by_month_range &
