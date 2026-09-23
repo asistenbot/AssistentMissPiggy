@@ -740,6 +740,43 @@ class SheetsClient:
             if _norm_nama(o.get("Nama_Customer", "")) == nama_target
         ]
 
+    @staticmethod
+    def _cari_nama_by_prefix(records, nama_prefix):
+        """Cari nama customer ASLI (persis apa adanya, BUKAN yang
+        dinormalisasi) yang DIAWALI sama nama_prefix (case/spasi-insensitive)
+        -- dipake sebagai fallback TERAKHIR kalau exact match (get_orders_by_
+        customer_week/any_week) gagal, biar admin nggak perlu ngetik nama
+        lengkap + embel2 (misal '/edit Bianca' cukup buat nemuin order
+        'Bianca ( untuk pak Joshua )', nggak perlu ngetik semuanya).
+
+        SENGAJA prefix match (nama HARUS diawali persis dari situ), BUKAN
+        substring bebas di posisi mana pun -- biar nggak gampang nyasar
+        nyantol ke nama yang nggak nyambung (misal ngetik 'Rian' jangan
+        sampe ketarik ke 'Adrian' yang beda orang).
+
+        Return: list nama ASLI yang unik & diurutin -- kalau hasilnya lebih
+        dari 1 (ada beberapa customer beda yang nama-nya sama-sama diawali
+        prefix itu), caller WAJIB minta admin sebutin nama lengkap yang mana
+        (jangan asal pilih salah satu -- resiko nyasar ke order/customer
+        yang salah buat dokumen keuangan kayak invoice)."""
+        prefix = _norm_nama(nama_prefix)
+        if not prefix:
+            return []
+        ditemukan = {}
+        for o in records:
+            asli = str(o.get("Nama_Customer", "")).strip()
+            if asli and _norm_nama(asli).startswith(prefix):
+                ditemukan[_norm_nama(asli)] = asli
+        return sorted(ditemukan.values())
+
+    def cari_nama_by_prefix_week(self, nama_prefix: str, minggu_po: str):
+        """Versi minggu aktif dari _cari_nama_by_prefix -- lihat docstring-nya."""
+        return self._cari_nama_by_prefix(self.get_orders_by_week(minggu_po), nama_prefix)
+
+    def cari_nama_by_prefix_any_week(self, nama_prefix: str):
+        """Versi SEMUA minggu dari _cari_nama_by_prefix -- lihat docstring-nya."""
+        return self._cari_nama_by_prefix(self.get_all_orders(), nama_prefix)
+
     def get_orders_by_customer_any_week(self, nama_customer: str):
         """Cari order customer ini di SEMUA Minggu_PO (bukan cuma minggu yang
         lagi aktif) -- dipakai sebagai FALLBACK oleh /edit, /invoice,
