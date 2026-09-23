@@ -1343,14 +1343,36 @@ async def _kirim_dokumen_bulan_lama(update: Update, context: ContextTypes.DEFAUL
             )
 
 
-@owner_only
-async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nama = " ".join(context.args)
-    if not nama:
-        await update.message.reply_text("Format: /invoice Nama Customer")
-        return
-    sheets = get_sheets_client()
-    minggu_po = date_helpers.current_po_week_thursday()
+async def _cari_orders_pending_dgn_prefix(update: Update, sheets, nama: str, minggu_po: str):
+    """Cari order PENDING atas nama tertentu, dipake bareng oleh /edit,
+    /invoice, /suratjalan. 3 tingkat pencarian, dari paling ketat ke paling
+    longgar:
+    (1) exact match (udah dinormalisasi spasi/huruf besar-kecil) di minggu
+        PO yang lagi aktif,
+    (2) exact match di MINGGU MANAPUN (fallback lama, buat order yang
+        Tanggal_Kirim-nya custom jadi Minggu_PO-nya geser),
+    (3) BARU KALAU dua-duanya nggak ketemu sama sekali -- coba PREFIX match
+        (nama DIAWALI teks yang diketik admin), biar nggak perlu ngetik
+        nama lengkap + embel2 tiap kali (misal '/edit Bianca' cukup buat
+        nemuin order 'Bianca ( untuk pak Joshua )').
+
+    Prefix match SENGAJA cuma dipake sebagai upaya TERAKHIR (bukan
+    langsung), dan kalau ternyata nyangkut ke LEBIH DARI 1 customer beda,
+    fungsi ini LANGSUNG balas ke admin minta nama lengkap -- BUKAN asal
+    milih salah satu, soalnya ini dipake buat generate dokumen keuangan
+    (invoice) & edit order, ketuker customer resikonya gede.
+
+    Return (orders, minggu_po, catatan_minggu_lama, nama):
+    - orders == None berarti UDAH DIBALES di sini (kasus ambigu) -- caller
+      WAJIB langsung `return` tanpa proses apa-apa lagi.
+    - orders == [] (falsy tapi bukan None) berarti BENERAN nggak ketemu
+      sama sekali -- caller nunjukin pesan 'nggak ada order'-nya sendiri
+      (formatnya beda dikit antar command, makanya nggak disatuin di sini).
+    - orders ada isinya berarti ketemu -- 'nama' yang dibalikin udah
+      dikoreksi jadi nama LENGKAP asli kalau ketemunya lewat prefix match
+      (poin 3), jadi caller pakai 'nama' hasil balikan ini, bukan yang asli
+      diketik admin, biar caption/judul dokumen nunjukin nama lengkap yang
+      bener."""
     orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
     catatan_minggu_lama = None
     if not orders:
@@ -1359,6 +1381,42 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             orders = orders_fallback
             minggu_po = minggu_fallback
             catatan_minggu_lama = minggu_fallback
+
+    if not orders:
+        kandidat = sheets.cari_nama_by_prefix_week(nama, minggu_po) or sheets.cari_nama_by_prefix_any_week(nama)
+        if len(kandidat) == 1:
+            nama = kandidat[0]
+            orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
+            if not orders:
+                orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
+                if orders_fallback:
+                    orders = orders_fallback
+                    minggu_po = minggu_fallback
+                    catatan_minggu_lama = minggu_fallback
+        elif len(kandidat) > 1:
+            daftar = "\n".join(f"- {k}" for k in kandidat)
+            await update.message.reply_text(
+                f"Ada beberapa order yang namanya diawali \"{nama}\":\n{daftar}\n\n"
+                f"Ketik nama LENGKAP yang mana ya."
+            )
+            return None, minggu_po, catatan_minggu_lama, nama
+
+    return orders, minggu_po, catatan_minggu_lama, nama
+
+
+@owner_only
+async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nama = " ".join(context.args)
+    if not nama:
+        await update.message.reply_text("Format: /invoice Nama Customer")
+        return
+    sheets = get_sheets_client()
+    minggu_po = date_helpers.current_po_week_thursday()
+    orders, minggu_po, catatan_minggu_lama, nama = await _cari_orders_pending_dgn_prefix(
+        update, sheets, nama, minggu_po
+    )
+    if orders is None:
+        return
     if not orders:
         text = documents.build_invoice(nama, minggu_po, orders)
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -1389,14 +1447,11 @@ async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
-    catatan_minggu_lama = None
-    if not orders:
-        orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
-        if orders_fallback:
-            orders = orders_fallback
-            minggu_po = minggu_fallback
-            catatan_minggu_lama = minggu_fallback
+    orders, minggu_po, catatan_minggu_lama, nama = await _cari_orders_pending_dgn_prefix(
+        update, sheets, nama, minggu_po
+    )
+    if orders is None:
+        return
     if not orders:
         text = documents.build_surat_jalan(nama, minggu_po, orders)
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -2043,15 +2098,11 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sheets = get_sheets_client()
     minggu_po = date_helpers.current_po_week_thursday()
-    orders = sheets.get_pending_orders_by_customer_week(nama, minggu_po)
-
-    catatan_minggu_lama = None
-    if not orders:
-        orders_fallback, minggu_fallback = sheets.get_pending_orders_by_customer_any_week(nama)
-        if orders_fallback:
-            orders = orders_fallback
-            minggu_po = minggu_fallback
-            catatan_minggu_lama = minggu_fallback
+    orders, minggu_po, catatan_minggu_lama, nama = await _cari_orders_pending_dgn_prefix(
+        update, sheets, nama, minggu_po
+    )
+    if orders is None:
+        return
 
     if not orders:
         await update.message.reply_text(f"Nggak ada order atas nama {nama} sama sekali.")
