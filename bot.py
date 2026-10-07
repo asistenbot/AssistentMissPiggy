@@ -1085,6 +1085,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /suratjalan Nama Customer — bikin ulang surat jalan\n"
         "- /edit Nama Customer — edit order yang sudah ada (tambah/kurangi/hapus item)\n"
         "- /kirim Nama Customer — tandain order udah Terkirim SAAT ITU JUGA (biar nggak numplek di rekap)\n"
+        "- /lunas Nama Customer — tandain order udah dibayar\n"
+        "- /belumlunas Nama Customer — batalin tanda lunas (kalau salah pencet)\n"
+        "- /belumbayar — daftar order yang belum lunas + total uang yang belum masuk\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1512,6 +1515,134 @@ async def _tandai_terkirim(update: Update, nama: str):
     await update.message.reply_text(
         f"✅ {jumlah} baris order {nama} ditandain Terkirim -- nggak bakal numplek lagi di rekap produksi."
     )
+
+
+# ---------- STATUS BAYAR ----------
+
+_POLA_TANGGAL = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _cari_grup_bayar(sheets, nama: str, minggu_po, filter_status: str):
+    """Cari grup (customer, minggu) yang cocok sama nama yang diketik admin.
+    Exact match dulu, baru prefix match (sama kayak /invoice).
+    Return list grup yang cocok."""
+    groups = sheets.get_payment_groups(minggu_po=minggu_po, filter_status=filter_status)
+    target = _norm_nama_bot(nama)
+    exact = [g for g in groups if _norm_nama_bot(g["nama"]) == target]
+    if exact:
+        return exact
+    return [g for g in groups if _norm_nama_bot(g["nama"]).startswith(target)]
+
+
+def _norm_nama_bot(s):
+    return " ".join(str(s).lower().split())
+
+
+async def _ubah_status_bayar(update: Update, args: list, status: str):
+    perintah = "/lunas" if status == "Lunas" else "/belumlunas"
+    args = list(args)
+    minggu_po = None
+    if args and _POLA_TANGGAL.fullmatch(args[-1]):
+        minggu_po = args.pop()
+    nama = " ".join(args).strip()
+    if not nama:
+        await update.message.reply_text(
+            f"Format: {perintah} Nama Customer\n"
+            f"Kalau order-nya ada di beberapa minggu: {perintah} Nama Customer 2026-10-08"
+        )
+        return
+
+    sheets = get_sheets_client()
+    filter_status = "belum" if status == "Lunas" else "lunas"
+    try:
+        cocok = await asyncio.wait_for(
+            asyncio.to_thread(_cari_grup_bayar, sheets, nama, minggu_po, filter_status), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas baca Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal baca Sheets: {e}")
+        return
+
+    if not cocok:
+        if status == "Lunas":
+            pesan = f"Nggak ada order {nama} yang belum lunas (4 minggu terakhir sampai PO depan)."
+        else:
+            pesan = f"Nggak ada order {nama} yang statusnya Lunas (4 minggu terakhir sampai PO depan)."
+        await update.message.reply_text(pesan)
+        return
+
+    nama_unik = sorted({g["nama"] for g in cocok})
+    if len(nama_unik) > 1:
+        daftar = "\n".join(f"- {n}" for n in nama_unik)
+        await update.message.reply_text(
+            f"Ada beberapa customer yang namanya diawali \"{nama}\":\n{daftar}\n\nKetik nama LENGKAP yang mana ya."
+        )
+        return
+    if len(cocok) > 1:
+        daftar = "\n".join(
+            f"- {perintah} {g['nama']} {g['minggu']} ({documents.rupiah(documents.hitung_total_order(g['orders']))})"
+            for g in cocok
+        )
+        await update.message.reply_text(
+            f"{nama_unik[0]} punya order di beberapa minggu PO. Pilih yang mana:\n{daftar}"
+        )
+        return
+
+    g = cocok[0]
+    try:
+        jumlah = await asyncio.wait_for(
+            asyncio.to_thread(sheets.set_status_bayar, g["nama"], g["minggu"], status), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas update Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal update status bayar: {e}")
+        return
+
+    if jumlah == 0:
+        await update.message.reply_text(f"Order {g['nama']} PO {g['minggu']} nggak ketemu di Sheets.")
+        return
+    total = documents.rupiah(documents.hitung_total_order(g["orders"]))
+    if status == "Lunas":
+        await update.message.reply_text(f"✅ {g['nama']} (PO {g['minggu']}) ditandai LUNAS — {total}.")
+    else:
+        await update.message.reply_text(f"↩️ {g['nama']} (PO {g['minggu']}) dikembalikan jadi BELUM lunas — {total}.")
+
+
+@owner_only
+async def lunas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _ubah_status_bayar(update, context.args, "Lunas")
+
+
+@owner_only
+async def belumlunas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _ubah_status_bayar(update, context.args, "Belum")
+
+
+@owner_only
+async def belumbayar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    minggu_po = None
+    if context.args:
+        if not _POLA_TANGGAL.fullmatch(context.args[0]):
+            await update.message.reply_text("Format: /belumbayar  atau  /belumbayar 2026-10-08")
+            return
+        minggu_po = context.args[0]
+    sheets = get_sheets_client()
+    try:
+        groups = await asyncio.wait_for(
+            asyncio.to_thread(sheets.get_payment_groups, minggu_po, 4, "belum"), timeout=20
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas baca Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal baca Sheets: {e}")
+        return
+    judul = f"PO {minggu_po}" if minggu_po else "4 minggu terakhir sampai PO depan"
+    await update.message.reply_text(documents.build_daftar_belum_bayar(groups, judul))
 
 
 @owner_only
@@ -3666,6 +3797,9 @@ def main():
     app.add_handler(CommandHandler("laporanbulanan", laporanbulanan_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("kirim", kirim_cmd))
+    app.add_handler(CommandHandler("lunas", lunas_cmd))
+    app.add_handler(CommandHandler("belumlunas", belumlunas_cmd))
+    app.add_handler(CommandHandler("belumbayar", belumbayar_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --

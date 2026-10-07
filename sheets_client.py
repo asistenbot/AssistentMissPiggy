@@ -516,6 +516,102 @@ class SheetsClient:
                 continue
         return None
 
+    # ---------- STATUS BAYAR ----------
+    #
+    # Kolom 'Status_Bayar' di tab Orders: isinya 'Lunas' atau kosong/'Belum'.
+    # Kolomnya dibikin OTOMATIS di ujung kanan header kalau belum ada (pas
+    # pertama kali admin /lunas), jadi nggak perlu setting manual di Sheets.
+    # Order lama yang kolomnya kosong dianggap BELUM bayar.
+
+    KOLOM_STATUS_BAYAR = "Status_Bayar"
+
+    @staticmethod
+    def _parse_minggu(teks):
+        teks = str(teks).strip()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+            try:
+                return datetime.datetime.strptime(teks, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _ensure_kolom(ws, header_raw, nama_kolom):
+        """Balikin index (0-based) kolom nama_kolom; kalau belum ada, header
+        baru ditulis di kolom kosong pertama setelah header terakhir."""
+        header = [h.strip().replace(" ", "_") for h in header_raw]
+        if nama_kolom in header:
+            return header.index(nama_kolom)
+        terakhir = max((i for i, h in enumerate(header) if h), default=-1)
+        col = terakhir + 2  # 1-based, kolom setelah header terakhir yang terisi
+        if ws.col_count < col:
+            ws.add_cols(col - ws.col_count)
+        ws.update_cell(1, col, nama_kolom)
+        return col - 1
+
+    def get_payment_groups(self, minggu_po: str = None, weeks_back: int = 4, filter_status: str = "belum"):
+        """Kelompokkan order per (Minggu_PO, customer).
+
+        filter_status: 'belum' = cuma yang belum Lunas, 'lunas' = cuma yang
+        sudah Lunas. Tanpa minggu_po: ambil Minggu_PO dari `weeks_back`
+        minggu lalu sampai PO yang akan datang (biar yang telat bayar abis
+        hari kirim tetep kejaring). Satu customer dianggap lunas per minggu
+        kalau SEMUA barisnya Lunas.
+
+        Return: list dict {nama, minggu, orders}, urut minggu lalu nama."""
+        today = datetime.datetime.now(date_helpers.get_timezone()).date()
+        batas = today - datetime.timedelta(days=7 * weeks_back)
+        grup = {}
+        for o in self.get_all_orders():
+            nama = str(o.get("Nama_Customer", "")).strip()
+            d = self._parse_minggu(o.get("Minggu_PO"))
+            if not nama or d is None:
+                continue
+            minggu = d.strftime("%Y-%m-%d")
+            if minggu_po:
+                if minggu != minggu_po:
+                    continue
+            elif d < batas:
+                continue
+            key = (minggu, _norm_nama(nama))
+            grup.setdefault(key, {"nama": nama, "minggu": minggu, "orders": []})["orders"].append(o)
+
+        hasil = []
+        for g in grup.values():
+            semua_lunas = all(
+                str(o.get(self.KOLOM_STATUS_BAYAR, "")).strip().lower() == "lunas" for o in g["orders"]
+            )
+            if (filter_status == "lunas") == semua_lunas:
+                hasil.append(g)
+        return sorted(hasil, key=lambda g: (g["minggu"], g["nama"].lower()))
+
+    def set_status_bayar(self, nama_customer: str, minggu_po: str, status: str = "Lunas") -> int:
+        """Set Status_Bayar SEMUA baris order nama_customer di minggu_po.
+        Return: jumlah baris yang diubah."""
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_minggu = header.index("Minggu_PO")
+            idx_nama = header.index("Nama_Customer")
+        except ValueError:
+            return 0
+
+        target = _norm_nama(nama_customer)
+        rows = [
+            i for i, row in enumerate(all_values[1:], start=2)
+            if len(row) > max(idx_minggu, idx_nama)
+            and _norm_nama(row[idx_nama]) == target
+            and self._minggu_po_cocok(row[idx_minggu], minggu_po)
+        ]
+        if not rows:
+            return 0
+        idx_bayar = self._ensure_kolom(ws, all_values[0], self.KOLOM_STATUS_BAYAR)
+        ws.update_cells([gspread.Cell(r, idx_bayar + 1, status) for r in rows])
+        return len(rows)
+
     def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
         """
         Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 10:00 WIB PADA

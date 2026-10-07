@@ -504,3 +504,49 @@ def build_monthly_supplier_report(periode_label: str, orders: list, dough_price_
     lines.append(f"*TOTAL BAYAR SEMUA BULAN: {rupiah(grand_total_bayar)}*")
 
     return "\n".join(lines)
+
+
+# ---------- STATUS BAYAR ----------
+
+def _angka(v):
+    """Ubah isi sel jadi int; kosong/aneh dianggap 0."""
+    try:
+        return int(float(str(v).replace(".", "").replace(",", "").strip() or 0))
+    except ValueError:
+        return 0
+
+
+def hitung_total_order(orders: list) -> int:
+    """Total tagihan 1 customer di 1 minggu -- rumusnya sama dengan
+    build_invoice: jumlah (Qty x Harga_Satuan) + Ongkir + Addon_Total
+    (ongkir & add-on diambil dari baris pertama)."""
+    if not orders:
+        return 0
+    subtotal = sum(_angka(o.get("Qty")) * _angka(o.get("Harga_Satuan")) for o in orders)
+    return subtotal + _angka(orders[0].get("Ongkir")) + _angka(orders[0].get("Addon_Total"))
+
+
+def build_daftar_belum_bayar(groups: list, judul_periode: str) -> str:
+    """Teks polos (tanpa Markdown, biar nama customer yang ada simbolnya
+    nggak bikin pesan gagal kirim)."""
+    if not groups:
+        return f"✅ Semua order {judul_periode} sudah lunas."
+
+    lines = [f"💸 BELUM LUNAS — {judul_periode}", ""]
+    total_semua = 0
+    minggu_sekarang = None
+    for g in groups:
+        if g["minggu"] != minggu_sekarang:
+            if minggu_sekarang is not None:
+                lines.append("")
+            minggu_sekarang = g["minggu"]
+            lines.append(f"📅 PO {minggu_sekarang}")
+        total = hitung_total_order(g["orders"])
+        total_semua += total
+        metode = g["orders"][0].get("Metode") or "-"
+        lines.append(f"- {g['nama']} — {rupiah(total)} ({metode})")
+
+    lines.append("")
+    lines.append(f"Total belum masuk: {rupiah(total_semua)} dari {len(groups)} order")
+    lines.append("Tandai yang sudah bayar: /lunas Nama Customer")
+    return "\n".join(lines)
