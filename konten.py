@@ -187,7 +187,10 @@ def _lihat_foto(img, menu_text, panduan):
             {"type": "text", "text": prompt},
         ]}],
     )
-    return _safe_json_loads(resp.content[0].text) or {}
+    data = _safe_json_loads(resp.content[0].text)
+    if isinstance(data, list):  # kadang AI membalas [ {...} ]
+        data = next((x for x in data if isinstance(x, dict)), None)
+    return data if isinstance(data, dict) else {}
 
 
 def perbarui_katalog(sheets, ulang=False):
@@ -219,7 +222,8 @@ def perbarui_katalog(sheets, ulang=False):
 
     def periksa(f):
         try:
-            return f, _lihat_foto(fm.unduh(sheets, f["id"]), menu, panduan)
+            info = _lihat_foto(fm.unduh(sheets, f["id"]), menu, panduan)
+            return f, (info if info else None)
         except Exception as e:
             logger.warning(f"Katalog: lewati {f.get('name')}: {e}")
             return f, None
@@ -232,7 +236,10 @@ def perbarui_katalog(sheets, ulang=False):
                 _progres(f"Cek foto {n}/{total}")
             if info is None:
                 continue
-            kual = int(info.get("kualitas") or 3)
+            try:
+                kual = int(info.get("kualitas") or 3)
+            except (TypeError, ValueError):
+                kual = 3
             data = {"id": f["id"], "nama": f.get("name", ""), "label": str(info.get("label") or "lainnya"),
                     "deskripsi": str(info.get("deskripsi") or ""), "kualitas": max(1, min(5, kual)),
                     "cover": bool(info.get("cover")), "yakin": info.get("yakin") is not False}
