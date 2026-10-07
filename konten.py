@@ -35,7 +35,8 @@ TAB_PANDUAN = "Panduan Foto"
 PANDUAN_DEFAULT = [
     "Roti bulat dengan pola sobekan/lipatan di atas (seperti bunga) adalah ROTI, BUKAN donat.",
     "DONAT hanya kalau bentuknya cincin dengan lubang di tengah dan digoreng.",
-    "Roti PANJANG/lonjong dengan topping meses cokelat di atas = Mocha Meises; roti panjang dengan parutan keju di atas = Cream Cheese.",
+    "Roti PANJANG/lonjong yang isiannya DI DALAM (bagian atas polos/hanya sedikit isian terlihat) = Mocha Meises (isian meses) atau Cream Cheese (isian keju krim).",
+    "Roti PANJANG dengan topping meses atau parutan keju PENUH menutupi bagian atas = produk BARU yang belum dijual: label wajib HOLD.",
     "Roti BULAT dengan taburan meses di atas = Roti Coklat (bukan Mocha Meises).",
     "Gorengan lonjong berlapis tepung roti (panir) = Risoles.",
     "Kalau ragu produk apa, isi label 'roti' (umum) dan yakin=false. Jangan menebak nama rasa.",
@@ -128,7 +129,17 @@ def baca_panduan(sheets):
         ws.update(values=[["Aturan (1 baris = 1 ciri produk, boleh ditambah/diubah)"]] +
                   [[a] for a in PANDUAN_DEFAULT], range_name=f"A1:A{len(PANDUAN_DEFAULT) + 1}")
         return list(PANDUAN_DEFAULT)
-    return [r[0].strip() for r in ws.get_all_values()[1:] if r and r[0].strip()]
+    isi = [r[0].strip() for r in ws.get_all_values()[1:] if r and r[0].strip()]
+    # Migrasi sekali: aturan lama roti panjang (topping di atas = Mocha Meises)
+    # ternyata salah -- ganti otomatis dengan 2 aturan yang benar.
+    lama = ("Roti PANJANG/lonjong dengan topping meses cokelat di atas = Mocha Meises; "
+            "roti panjang dengan parutan keju di atas = Cream Cheese.")
+    if lama in isi:
+        baru = [a for a in PANDUAN_DEFAULT if a.startswith("Roti PANJANG")]
+        isi = [x for a in isi for x in (baru if a == lama else [a])]
+        ws.batch_clear([f"A2:A{len(isi) + 20}"])
+        ws.update(values=[[a] for a in isi], range_name=f"A2:A{len(isi) + 1}")
+    return isi
 
 
 def _ws_panduan(sheets):
