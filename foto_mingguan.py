@@ -163,11 +163,41 @@ def pilih_foto(semua, riwayat, jumlah):
 
 # ---------- olah gambar ----------
 
+def _terang_otomatis(img):
+    """Koreksi otomatis sesuai kondisi foto:
+    - foto gelap dicerahkan (gamma), foto terlalu terang diturunkan sedikit
+    - warna kebiruan/kehijauan dari lampu dinetralkan sedikit (white balance);
+      foto yang sudah hangat (warna roti) dibiarkan"""
+    from PIL import ImageStat
+    import math
+    # white balance ringan: dekatkan rata-rata R,G,B satu sama lain
+    r, g, b = ImageStat.Stat(img).mean
+    abu = (r + g + b) / 3
+    if abu > 1 and (b > r * 0.95 or g > r * 1.02):  # cuma koreksi kalau kebiruan/kehijauan; warna hangat roti dibiarkan
+        def faktor(c):
+            return max(0.85, min(1.15, (abu / c) if c else 1)) ** 0.5
+        fr, fg, fb = faktor(r), faktor(g), faktor(b)
+        img = Image.merge("RGB", [ch.point(lambda v, f=f: min(255, int(v * f)))
+                                  for ch, f in zip(img.split(), (fr, fg, fb))])
+    # kecerahan: target rata-rata luminance ~0.52
+    lum = ImageStat.Stat(img.convert("L")).mean[0] / 255
+    target = 0.52
+    if lum < 0.47 or lum > 0.62:
+        gamma = math.log(target) / math.log(max(0.05, min(0.95, lum)))
+        gamma = max(0.55, min(1.4, gamma))
+        tabel = [min(255, int(255 * ((i / 255) ** gamma))) for i in range(256)] * 3
+        img = img.point(tabel)
+        if gamma < 1:  # habis dicerahkan, warna & kontras suka pudar
+            img = ImageEnhance.Contrast(img).enhance(1.08)
+            img = ImageEnhance.Color(img).enhance(1.12)
+    return img
+
+
 def _rapikan(img):
     img = ImageOps.exif_transpose(img).convert("RGB")
     img = ImageOps.fit(img, UKURAN, Image.LANCZOS, centering=(0.5, 0.5))
-    img = ImageEnhance.Brightness(img).enhance(1.05)
-    img = ImageEnhance.Contrast(img).enhance(1.06)
+    img = _terang_otomatis(img)
+    img = ImageEnhance.Contrast(img).enhance(1.04)
     img = ImageEnhance.Color(img).enhance(1.10)
     hangat = Image.new("RGB", UKURAN, (255, 196, 140))
     img = Image.blend(img, hangat, 0.05)
