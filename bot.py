@@ -27,6 +27,7 @@ import production_recap_pdf
 import kantor
 import foto_mingguan
 import strategi
+import konten
 from sheets_client import get_sheets_client, is_komposisi_bundle_valid
 from ai_parser import (
     parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
@@ -1187,6 +1188,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /promo — draf pengumuman PO untuk TikTok, WA, dan IG (bisa tambah catatan)\n"
         "- /fotopo — poster Open PO + 7 foto sosmed dari folder Drive (otomatis tiap Jumat 17.00)\n"
         "- /strategi — ide promo, konten & menu tren dari data + internet (otomatis tiap Senin 09.00)\n"
+        "- /konten [ide] — carousel IG/TikTok siap posting dari foto Drive\n"
+        "- /katalogfoto — cek foto baru di Drive & kasih label (sekali per foto)\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1901,6 +1904,41 @@ async def strategi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if error:
         await update.message.reply_text(error)
+
+
+@owner_only
+async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Marketing: bikin carousel dari ide admin (atau ide bebas).
+    /konten [ide], misal: /konten kenalan sama 3 rasa donat favorit"""
+    ide = " ".join(context.args).strip() or (
+        "Bebas: pilih 2 ide konten yang paling menarik untuk minggu ini berdasarkan foto yang ada "
+        "(misal produk andalan, behind the scene, rasa favorit pelanggan).")
+    chat_id, thread_id = _tujuan_marketing(update)
+    await update.message.reply_text("🎠 Marketing lagi milih foto & bikin carousel... (beberapa menit)")
+    error = await konten.kirim_konten(context.bot, get_sheets_client(), ide,
+                                      chat_id=chat_id, thread_id=thread_id,
+                                      jumlah=1 if context.args else 2)
+    if error:
+        await update.message.reply_text(error)
+    else:
+        await _info_pindah_grup(update, chat_id)
+
+
+@owner_only
+async def katalogfoto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cek foto baru di folder Drive dan masukkan ke katalog (dilihat AI sekali)."""
+    await update.message.reply_text("🔎 Lagi cek foto baru di Drive...")
+    try:
+        katalog, baru = await asyncio.wait_for(
+            asyncio.to_thread(konten.perbarui_katalog, get_sheets_client()), timeout=600)
+    except Exception as e:
+        await update.message.reply_text(f"Gagal cek foto: {e}")
+        return
+    bagus = sum(1 for f in katalog.values() if f["kualitas"] >= 4)
+    await update.message.reply_text(
+        f"✅ {baru} foto baru dicek. Total katalog {len(katalog)} foto ({bagus} kualitas bagus). "
+        "Detailnya ada di tab \"Katalog Foto\" di Sheets."
+    )
 
 
 @owner_only
@@ -4115,6 +4153,8 @@ def main():
     app.add_handler(CommandHandler("promo", promo_cmd))
     app.add_handler(CommandHandler("fotopo", fotopo_cmd))
     app.add_handler(CommandHandler("strategi", strategi_cmd))
+    app.add_handler(CommandHandler("konten", konten_cmd))
+    app.add_handler(CommandHandler("katalogfoto", katalogfoto_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --

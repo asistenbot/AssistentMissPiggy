@@ -1,0 +1,356 @@
+"""
+Konten carousel otomatis (Ahli Strategi -> Marketing).
+
+1. KATALOG FOTO: tiap foto di folder Drive dilihat AI SEKALI (Claude Haiku,
+   murah) lalu diberi label: produk apa, deskripsi singkat, kualitas 1-5,
+   cocok jadi cover atau nggak. Hasilnya disimpan di tab Sheets
+   "Katalog Foto", jadi minggu berikutnya cukup baca tab itu; cuma foto baru
+   yang dilihat lagi.
+2. RENCANA: dari ide konten (laporan Ahli Strategi, atau ide dari admin),
+   AI memilih foto dari katalog dan menulis isi tiap slide + caption.
+3. RENDER: Marketing bikin slide carousel 4:5 (cover, isi, penutup ajakan
+   order) pakai Pillow, lalu dikirim ke grup Konten.
+"""
+
+import asyncio
+import base64
+import datetime
+import io
+import json
+import logging
+import os
+
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
+
+import config
+import foto_mingguan as fm
+
+logger = logging.getLogger(__name__)
+
+TAB_KATALOG = "Katalog Foto"
+HEADER = ["File_ID", "Nama_File", "Label", "Deskripsi", "Kualitas", "Cover", "Diperiksa"]
+MAKS_PERIKSA_SEKALI = int(os.getenv("KATALOG_MAKS_PERIKSA", "40"))
+W, H = fm.UKURAN
+
+
+# ---------- katalog foto ----------
+
+def _ws_katalog(sheets):
+    import gspread
+    try:
+        return sheets.sheet.worksheet(TAB_KATALOG)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sheets.sheet.add_worksheet(title=TAB_KATALOG, rows=500, cols=len(HEADER))
+        ws.update(values=[HEADER], range_name="A1:G1")
+        return ws
+
+
+def baca_katalog(sheets):
+    ws = _ws_katalog(sheets)
+    rows = ws.get_all_values()
+    hasil = {}
+    for r in rows[1:]:
+        r = r + [""] * (len(HEADER) - len(r))
+        if r[0]:
+            hasil[r[0]] = {"id": r[0], "nama": r[1], "label": r[2], "deskripsi": r[3],
+                           "kualitas": int(r[4]) if r[4].isdigit() else 3,
+                           "cover": r[5].strip().lower() in ("ya", "true", "1")}
+    return hasil
+
+
+def _jpeg_kecil(img, sisi=768):
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    img.thumbnail((sisi, sisi), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=82)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _lihat_foto(img, menu_text):
+    from ai_parser import client, _safe_json_loads
+    prompt = (
+        "Ini foto produk bakery rumahan Miss Piggy. Daftar menu:\n" + menu_text +
+        "\n\nBalas HANYA JSON: {\"label\": nama produk paling mungkin dari menu (atau "
+        "'lainnya' kalau bukan produk/ tidak jelas), \"deskripsi\": 1 kalimat singkat "
+        "bahasa Indonesia tentang isi foto (sudut, isian terlihat, suasana), "
+        "\"kualitas\": angka 1-5 (terang, tajam, menggoda untuk sosmed), "
+        "\"cover\": true kalau cocok jadi slide pertama carousel}"
+    )
+    resp = client.messages.create(
+        model=config.CLAUDE_MODEL_FAST,
+        max_tokens=300,
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": _jpeg_kecil(img)}},
+            {"type": "text", "text": prompt},
+        ]}],
+    )
+    return _safe_json_loads(resp.content[0].text) or {}
+
+
+def perbarui_katalog(sheets):
+    """Periksa foto yang belum ada di katalog (maks MAKS_PERIKSA_SEKALI per
+    jalan). Return (katalog_lengkap, jumlah_baru)."""
+    folder = fm.cari_folder(sheets)
+    if not folder:
+        return {}, 0
+    semua = fm.daftar_foto(sheets, folder)
+    katalog = baca_katalog(sheets)
+    baru = [f for f in semua if f["id"] not in katalog][:MAKS_PERIKSA_SEKALI]
+    if not baru:
+        return katalog, 0
+    try:
+        menu = sheets.get_pricelist_text().replace("*", "")
+    except Exception:
+        menu = "(roti, roti gandum, donat, roti tawar)"
+    ws = _ws_katalog(sheets)
+    hari_ini = datetime.date.today().isoformat()
+    baris = []
+    for f in baru:
+        try:
+            info = _lihat_foto(fm.unduh(sheets, f["id"]), menu)
+        except Exception as e:
+            logger.warning(f"Katalog: lewati {f.get('name')}: {e}")
+            continue
+        kual = int(info.get("kualitas") or 3)
+        data = {"id": f["id"], "nama": f.get("name", ""), "label": str(info.get("label") or "lainnya"),
+                "deskripsi": str(info.get("deskripsi") or ""), "kualitas": max(1, min(5, kual)),
+                "cover": bool(info.get("cover"))}
+        katalog[f["id"]] = data
+        baris.append([data["id"], data["nama"], data["label"], data["deskripsi"],
+                      str(data["kualitas"]), "ya" if data["cover"] else "tidak", hari_ini])
+    if baris:
+        ws.append_rows(baris, value_input_option="RAW")
+    return katalog, len(baris)
+
+
+# ---------- rencana konten ----------
+
+RENCANA_PROMPT = """Kamu staf Marketing & Konten Miss Piggy (home bakery Bandung, sistem PO mingguan, terbuka NON-HALAL; item (Pork) mengandung babi, jangan pernah klaim halal).
+
+Dari IDE KONTEN yang diberikan, buat {jumlah} rencana carousel IG/TikTok yang bisa langsung dibuat dari FOTO yang tersedia.
+Aturan:
+- Pakai HANYA file_id dari daftar FOTO. Pilih foto yang labelnya cocok dengan isi slide; utamakan kualitas tinggi. Slide pertama pakai foto yang cocok jadi cover.
+- Tiap carousel 4-5 slide foto (slide penutup ajakan order dibuat otomatis, jangan dimasukkan). Jangan pakai foto yang sama dua kali dalam satu carousel.
+- "judul" slide maksimal 6 kata, "teks" maksimal 18 kata, bahasa santai. Jangan mengarang harga/promo yang tidak ada di data.
+- Kalau ide butuh foto yang tidak ada (misal menu baru yang belum pernah dibuat), pilih ide lain yang fotonya ada.
+- caption: maksimal 600 karakter + 6-10 hashtag.
+
+Balas HANYA JSON:
+{{"konten": [{{"judul_konten": "...", "alasan": "1 kalimat kenapa dipilih", "slides": [{{"foto": "file_id", "judul": "...", "teks": "..."}}], "caption": "..."}}]}}"""
+
+
+def rencanakan(ide_text, katalog, menu_text, jumlah=2):
+    from ai_parser import client, _safe_json_loads
+    foto_bagus = sorted(katalog.values(), key=lambda f: -f["kualitas"])
+    foto_bagus = [f for f in foto_bagus if f["label"].lower() != "lainnya" and f["kualitas"] >= 2][:80]
+    if len(foto_bagus) < 4:
+        return {"error": "Foto di katalog masih kurang (minimal 4 foto roti yang jelas)."}
+    daftar = "\n".join(
+        f"- {f['id']} | {f['label']} | kualitas {f['kualitas']}{' | cover' if f['cover'] else ''} | {f['deskripsi']}"
+        for f in foto_bagus
+    )
+    isi = f"IDE KONTEN:\n{ide_text}\n\nMENU:\n{menu_text}\n\nFOTO TERSEDIA:\n{daftar}"
+    resp = client.messages.create(
+        model=config.CLAUDE_MODEL,
+        max_tokens=2500,
+        system=RENCANA_PROMPT.format(jumlah=jumlah),
+        messages=[{"role": "user", "content": isi}],
+    )
+    data = _safe_json_loads(resp.content[0].text)
+    if not isinstance(data, dict) or not data.get("konten"):
+        return {"error": "Rencana konten dari AI nggak kebaca. Coba lagi."}
+    sah = set(katalog)
+    hasil = []
+    for k in data["konten"][:jumlah]:
+        slides = [s for s in k.get("slides", []) if s.get("foto") in sah][:5]
+        if len(slides) >= 2:
+            k["slides"] = slides
+            hasil.append(k)
+    if not hasil:
+        return {"error": "AI nggak berhasil memilih foto yang cocok. Coba lagi atau tambah foto."}
+    return {"konten": hasil}
+
+
+# ---------- render slide ----------
+
+def _bungkus(draw, teks, font, lebar):
+    kata, baris, skr = teks.split(), [], ""
+    for k in kata:
+        coba = (skr + " " + k).strip()
+        if draw.textlength(coba, font=font) <= lebar:
+            skr = coba
+        else:
+            if skr:
+                baris.append(skr)
+            skr = k
+    if skr:
+        baris.append(skr)
+    return baris
+
+
+def _kartu(base, judul, teks, nomor=None, besar=False):
+    d = ImageDraw.Draw(base)
+    m, lebar = 56, W - 2 * 56 - 96
+    f_j = fm._font(fm._FONT_JUDUL, 74 if besar else 56, b"SemiBold")
+    f_t = fm._font(fm._FONT_TEKS, 34 if besar else 32, b"SemiBold")
+    bj = _bungkus(d, judul, f_j, lebar)[:3]
+    bt = _bungkus(d, teks, f_t, lebar)[:4] if teks else []
+    tj, tt = (84 if besar else 66), 44
+    tinggi = 70 + len(bj) * tj + (18 + len(bt) * tt if bt else 0) + 46
+    y0 = H - m - tinggi
+    bayang = Image.new("RGBA", fm.UKURAN, (0, 0, 0, 0))
+    ImageDraw.Draw(bayang).rounded_rectangle([m + 4, y0 + 10, W - m + 4, H - m + 10], radius=34, fill=(0, 0, 0, 70))
+    base.alpha_composite(bayang.filter(ImageFilter.GaussianBlur(12)))
+    d = ImageDraw.Draw(base)
+    d.rounded_rectangle([m, y0, W - m, H - m], radius=34, fill=(251, 244, 233, 242))
+    y = y0 + 44
+    for b in bj:
+        d.text((m + 48, y), b, font=f_j, fill=fm.COKLAT)
+        y += tj
+    if bt:
+        y += 18
+        for b in bt:
+            d.text((m + 48, y), b, font=f_t, fill=(120, 86, 60))
+            y += tt
+    if nomor:
+        f_n = fm._font(fm._FONT_TEKS, 26, b"ExtraBold")
+        lw = d.textlength(nomor, font=f_n)
+        d.rounded_rectangle([W - m - lw - 64, y0 - 26, W - m - 24, y0 + 22], radius=24, fill=fm.PINK)
+        d.text((W - m - lw - 44, y0 - 20), nomor, font=f_n, fill=(255, 255, 255))
+
+
+def slide_foto(img, judul, teks, nomor, cover=False):
+    base = fm._rapikan(img).convert("RGBA")
+    lap = Image.new("RGBA", fm.UKURAN, (0, 0, 0, 0))
+    dl = ImageDraw.Draw(lap)
+    for i in range(420):
+        dl.line([(0, H - 420 + i), (W, H - 420 + i)], fill=(30, 20, 15, int(110 * (i / 420) ** 1.6)))
+    base.alpha_composite(lap)
+    _kartu(base, judul, teks, nomor=None if cover else nomor, besar=cover)
+    if cover:
+        fm._tempel_logo(base, 170, (56, 56))
+        d = ImageDraw.Draw(base)
+        f = fm._font(fm._FONT_TEKS, 28, b"ExtraBold")
+        t = "geser  »"
+        lw = d.textlength(t, font=f)
+        d.rounded_rectangle([W - 56 - lw - 48, 70, W - 56, 122], radius=26, fill=(251, 244, 233, 235))
+        d.text((W - 56 - lw - 24, 78), t, font=f, fill=fm.COKLAT)
+    else:
+        fm._tempel_logo(base, 96, (W - 96 - 44, 44))
+    return base.convert("RGB")
+
+
+def slide_penutup(img_latar, tutup, kirim, web, wa):
+    base = fm._rapikan(img_latar).filter(ImageFilter.GaussianBlur(18))
+    base = Image.blend(base, Image.new("RGB", fm.UKURAN, (31, 32, 33)), 0.72).convert("RGBA")
+    d = ImageDraw.Draw(base)
+    fm._tempel_logo(base, 300, ((W - 300) // 2, 190))
+    d = ImageDraw.Draw(base)
+
+    def tengah(teks, y, font, warna):
+        lw = d.textlength(teks, font=font)
+        d.text(((W - lw) / 2, y), teks, font=font, fill=warna)
+
+    tengah("Yuk ikutan PO!", 560, fm._font(fm._FONT_JUDUL, 84, b"SemiBold"), fm.KREM)
+    f = fm._font(fm._FONT_TEKS, 36, b"Bold")
+    tengah(f"Tutup {fm._tgl(tutup)}", 700, f, (236, 210, 175))
+    tengah(f"Kirim & ambil {fm._tgl(kirim)}", 752, f, (236, 210, 175))
+    f2 = fm._font(fm._FONT_TEKS, 34, b"ExtraBold")
+    for i, t in enumerate([x for x in (web, f"WA {wa}" if wa else "") if x]):
+        lw = d.textlength(t, font=f2)
+        y = 880 + i * 92
+        d.rounded_rectangle([(W - lw) / 2 - 36, y, (W + lw) / 2 + 36, y + 70], radius=35, fill=fm.KARAMEL)
+        tengah(t, y + 14, f2, (255, 250, 242))
+    return base.convert("RGB")
+
+
+def render_carousel(sheets, rencana):
+    tutup, kirim = fm.tanggal_po_berikut()
+    web = os.getenv("PROMO_WEB", "order.misspiggybdg19.workers.dev")
+    wa = os.getenv("PROMO_WA", "0815-6178-880")
+    slides = rencana["slides"]
+    total = len(slides) + 1
+    hasil, latar = [], None
+    for i, s in enumerate(slides):
+        img = fm.unduh(sheets, s["foto"])
+        latar = latar or img
+        hasil.append(fm.ke_jpeg(slide_foto(img, s.get("judul", ""), s.get("teks", ""),
+                                           f"{i + 1}/{total}", cover=(i == 0))))
+    hasil.append(fm.ke_jpeg(slide_penutup(latar, tutup, kirim, web, wa)))
+    return hasil
+
+
+# ---------- alur lengkap + kirim ----------
+
+def tujuan_marketing():
+    if config.GROUP_CHAT_ID_MARKETING:
+        return config.GROUP_CHAT_ID_MARKETING, None
+    if getattr(config, "TOPIC_ID_MARKETING", None) and config.GROUP_CHAT_ID:
+        return config.GROUP_CHAT_ID, config.TOPIC_ID_MARKETING
+    if config.GROUP_CHAT_ID:
+        return config.GROUP_CHAT_ID, None
+    return (config.OWNER_TELEGRAM_IDS[0] if config.OWNER_TELEGRAM_IDS else None), None
+
+
+def siapkan_konten(sheets, ide_text, jumlah=2):
+    katalog, baru = perbarui_katalog(sheets)
+    if not katalog:
+        return {"error": "Folder foto belum kebaca atau masih kosong."}
+    try:
+        menu = sheets.get_pricelist_text().replace("*", "")
+    except Exception:
+        menu = ""
+    rencana = rencanakan(ide_text, katalog, menu, jumlah)
+    if "error" in rencana:
+        return rencana
+    paket = []
+    for k in rencana["konten"]:
+        try:
+            paket.append({"rencana": k, "gambar": render_carousel(sheets, k)})
+        except Exception as e:
+            logger.exception("Gagal render carousel")
+            paket.append({"rencana": k, "error": str(e)})
+    return {"paket": paket, "foto_baru": baru, "total_katalog": len(katalog)}
+
+
+async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, jumlah=2):
+    """Bikin & kirim carousel ke grup Konten. Return pesan error atau None."""
+    from telegram import InputMediaDocument
+    try:
+        import kantor
+        kantor.catat("marketing", "Bikin carousel dari ide Ahli Strategi")
+    except Exception:
+        pass
+    if chat_id is None:
+        chat_id, thread_id = tujuan_marketing()
+    if not chat_id:
+        return "Grup tujuan konten belum di-setting."
+    try:
+        hasil = await asyncio.wait_for(asyncio.to_thread(siapkan_konten, sheets, ide_text, jumlah), timeout=600)
+    except asyncio.TimeoutError:
+        return "Bikin konten kelamaan (timeout). Coba /konten lagi."
+    except Exception as e:
+        logger.exception("Gagal siapkan konten")
+        return f"Gagal bikin konten: {e}"
+    if "error" in hasil:
+        return hasil["error"]
+    if hasil["foto_baru"]:
+        await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+                               text=f"🔎 {hasil['foto_baru']} foto baru sudah dicek & masuk katalog "
+                                    f"(total {hasil['total_katalog']} foto).")
+    for n, p in enumerate(hasil["paket"], 1):
+        r = p["rencana"]
+        if "error" in p:
+            await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+                                   text=f"⚠️ Carousel \"{r.get('judul_konten', '')}\" gagal dibuat: {p['error']}")
+            continue
+        media = [InputMediaDocument(media=b, filename=f"Carousel{n}_slide{i + 1}.jpg")
+                 for i, b in enumerate(p["gambar"])]
+        await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media)
+        teks = (f"🎠 CAROUSEL {n}: {r.get('judul_konten', '')}\n"
+                f"Kenapa: {r.get('alasan', '-')}\n\n"
+                f"Caption siap pakai:\n\n{r.get('caption', '')}\n\n"
+                "Posting slide sesuai urutan nomor file. Lagu pilih sendiri di aplikasi.")
+        await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, text=teks[:4000])
+    return None

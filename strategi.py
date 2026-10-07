@@ -215,7 +215,16 @@ def buat_laporan(sheets, catatan: str = "") -> dict:
     return {"teks": teks}
 
 
-async def kirim_laporan(bot, chat_id, sheets, thread_id=None, catatan=""):
+def _ambil_ide_konten(teks):
+    """Potong bagian IDE KONTEN (+ MENU YANG LAYAK DICOBA buat konteks)."""
+    awal = teks.find("IDE KONTEN")
+    if awal < 0:
+        return teks[:2500]
+    akhir = teks.find("PRIORITAS MINGGU INI", awal)
+    return teks[awal:akhir if akhir > 0 else None][:2500]
+
+
+async def kirim_laporan(bot, chat_id, sheets, thread_id=None, catatan="", buat_konten=True):
     """Bikin + kirim laporan. Return pesan error atau None. Nggak pernah raise."""
     import asyncio
     try:
@@ -236,4 +245,20 @@ async def kirim_laporan(bot, chat_id, sheets, thread_id=None, catatan=""):
     for i in range(0, len(teks), 4000):
         await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
                                text=teks[i:i + 4000], disable_web_page_preview=True)
+
+    if buat_konten:
+        # Oper ide konten ke Marketing -> carousel siap posting di grup Konten.
+        try:
+            import konten
+            await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+                                   text="🎠 Ide kontennya sudah dioper ke Marketing. Carousel siap posting "
+                                        "akan dikirim ke grup Konten (beberapa menit).")
+            error = await konten.kirim_konten(bot, sheets, _ambil_ide_konten(teks))
+            if error:
+                await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+                                       text=f"⚠️ Marketing gagal bikin carousel: {error}")
+        except Exception as e:
+            logger.exception("Gagal oper ide ke Marketing")
+            await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+                                   text=f"⚠️ Marketing gagal bikin carousel: {e}")
     return None

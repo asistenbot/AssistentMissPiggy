@@ -122,14 +122,20 @@ async def handle_events(request: web.Request):
     )
 
 
+_LOGO_VARIAN = {"logo.png": "logo_web.png", "logo-gelap.png": "logo_gelap.png",
+                "logo-krem.png": "logo_krem.png", "logo-transparan.png": "logo_transparan.png"}
+
+
 async def handle_logo(request: web.Request):
     # Logo publik (bukan data rahasia), boleh dibuka tanpa token.
-    if not os.path.exists(_LOGO_PATH):
+    nama = _LOGO_VARIAN.get(request.match_info.get("nama", "logo.png"))
+    path = os.path.join(os.path.dirname(_LOGO_PATH), nama) if nama else None
+    if not path or not os.path.exists(path):
         raise web.HTTPNotFound()
-    return web.FileResponse(_LOGO_PATH, headers={"Cache-Control": "public, max-age=86400"})
+    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=3600"})
 
 
 def daftar_route(web_app: web.Application):
-    web_app.router.add_get("/kantor/logo.png", handle_logo)
+    web_app.router.add_get("/kantor/{nama:logo[a-z-]*\\.png}", handle_logo)
     web_app.router.add_get("/kantor", handle_page)
     web_app.router.add_get("/kantor/events", handle_events)
