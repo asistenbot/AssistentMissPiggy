@@ -147,6 +147,30 @@ def _tujuan_rekapproduksi(update):
     return update.effective_chat.id, None
 
 
+def tujuan_marketing_default():
+    """(chat_id, thread_id) grup/topic Marketing & Konten, atau (None, None)
+    kalau belum di-setting. Dipakai juga oleh jadwal foto mingguan."""
+    if config.GROUP_CHAT_ID_MARKETING:
+        return config.GROUP_CHAT_ID_MARKETING, None
+    if config.TOPIC_ID_MARKETING and config.GROUP_CHAT_ID:
+        return config.GROUP_CHAT_ID, config.TOPIC_ID_MARKETING
+    return None, None
+
+
+def _tujuan_marketing(update):
+    """Hasil /promo & /fotopo dikirim ke grup/topic Marketing kalau ada,
+    selain itu balas di chat sekarang."""
+    chat_id, thread_id = tujuan_marketing_default()
+    if chat_id:
+        return chat_id, thread_id
+    return update.effective_chat.id, update.message.message_thread_id
+
+
+async def _info_pindah_grup(update, chat_id):
+    if str(chat_id) != str(update.effective_chat.id):
+        await update.message.reply_text("✅ Hasilnya dikirim ke grup Konten.")
+
+
 def _tujuan_pengiriman(update):
     """(chat_id, message_thread_id) TUJUAN khusus buat daftar "DIKIRIM",
     "DIKIRIM (KURIR)", dan "DIAMBIL SENDIRI" (dari /rekap) -- DIPISAH dari _tujuan_suratjalan
@@ -1761,13 +1785,16 @@ async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(hasil["error"])
         return
 
+    chat_id, thread_id = _tujuan_marketing(update)
     for judul, kunci in (("🎵 TIKTOK", "tiktok"), ("💬 WHATSAPP", "whatsapp"), ("📸 INSTAGRAM", "instagram")):
         teks = f"{judul}\n\n{hasil[kunci]}"
-        await update.message.reply_text(teks[:4000])
-    await update.message.reply_text(
-        "Itu drafnya, cek dulu sebelum diposting ya. Mau versi lain? Ketik /promo lagi, "
-        "bisa tambah catatan, misal: /promo fokus ke donat, nada lebih lucu"
+        await context.bot.send_message(chat_id=chat_id, message_thread_id=thread_id, text=teks[:4000])
+    await context.bot.send_message(
+        chat_id=chat_id, message_thread_id=thread_id,
+        text=("Itu drafnya, cek dulu sebelum diposting ya. Mau versi lain? Ketik /promo lagi, "
+              "bisa tambah catatan, misal: /promo fokus ke donat, nada lebih lucu"),
     )
+    await _info_pindah_grup(update, chat_id)
 
 
 @owner_only
@@ -1775,10 +1802,10 @@ async def fotopo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bikin poster Open PO + 7 foto sosmed sekarang juga (versi manual dari
     kiriman otomatis tiap Kamis)."""
     await update.message.reply_text("🖼️ Lagi ambil foto dari Drive dan ngedit, tunggu sebentar...")
+    chat_id, thread_id = _tujuan_marketing(update)
     try:
         error = await foto_mingguan.kirim_paket(
-            context.bot, update.effective_chat.id, get_sheets_client(),
-            thread_id=update.message.message_thread_id,
+            context.bot, chat_id, get_sheets_client(), thread_id=thread_id,
         )
     except asyncio.TimeoutError:
         await update.message.reply_text("Timeout pas ngolah foto. Coba /fotopo lagi.")
@@ -1789,6 +1816,8 @@ async def fotopo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if error:
         await update.message.reply_text(error)
+    else:
+        await _info_pindah_grup(update, chat_id)
 
 
 @owner_only

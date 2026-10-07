@@ -81,11 +81,19 @@ async def send_auto_monthly_report(bot):
 async def send_foto_mingguan(bot):
     import foto_mingguan
     sheets = get_sheets_client()
-    for chat_id in _target_chat_ids():
+    tujuan = []
+    if config.GROUP_CHAT_ID_MARKETING:
+        tujuan = [(config.GROUP_CHAT_ID_MARKETING, None)]
+    elif config.TOPIC_ID_MARKETING and config.GROUP_CHAT_ID:
+        tujuan = [(config.GROUP_CHAT_ID, config.TOPIC_ID_MARKETING)]
+    else:
+        tujuan = [(c, None) for c in _target_chat_ids()]
+    for chat_id, thread_id in tujuan:
         try:
-            error = await foto_mingguan.kirim_paket(bot, chat_id, sheets)
+            error = await foto_mingguan.kirim_paket(bot, chat_id, sheets, thread_id=thread_id)
             if error:
-                await bot.send_message(chat_id=chat_id, text=f"⚠️ Foto mingguan gagal: {error}")
+                await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+                                       text=f"⚠️ Foto mingguan gagal: {error}")
         except Exception:
             logger.exception("Gagal kirim foto mingguan")
         break  # cukup 1x (grup); kalau fallback ke DM admin, kirim ke admin pertama saja
