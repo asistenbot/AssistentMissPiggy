@@ -105,13 +105,14 @@ const agents=[
   {id:'keuangan',name:'Keuangan',cmd:'/untung',c:'#4f9d69',kata:'LABA',kulit:'#f0c3a0',rambut:'#5a3320',gaya:'cepol'},
   {id:'pelanggan',name:'Pelanggan Setia',cmd:'/pelanggan',c:'#8a6fd1',kata:'TEMAN',kulit:'#e0b08c',rambut:'#2b1b14',gaya:'kuncir'},
   {id:'marketing',name:'Marketing',cmd:'/promo /fotopo',c:'#e0564a',kata:'PROMO',kulit:'#f5d0b0',rambut:'#6b3b1e',gaya:'keriting'},
+  {id:'strategi',name:'Ahli Strategi',cmd:'/strategi',c:'#2f6f8f',kata:'IDE',kulit:'#e6b58e',rambut:'#3a2a20',gaya:'kacamata'},
 ];
 const byId={};
 const crew=document.getElementById('crew');
 agents.forEach((a,i)=>{
   byId[a.id]=a;
-  a.desk={x:23+i*39,y:68};
-  a.x=30+i*36;a.y=110+(i%2)*12;a.tx=a.x;a.ty=a.y;a.state='idle';a.timer=1+Math.random()*3;a.queue=[];a.step=0;a.belakang=false;
+  a.desk={x:20+i*33,y:68};
+  a.x=24+i*32;a.y=110+(i%2)*12;a.tx=a.x;a.ty=a.y;a.state='idle';a.timer=1+Math.random()*3;a.queue=[];a.step=0;a.belakang=false;
   a.bub=document.createElement('div');a.bub.className='bubble';a.bub.style.setProperty('--c',a.c);a.bub.hidden=true;ov.appendChild(a.bub);
   a.tag=document.createElement('div');a.tag.className='name';a.tag.style.background=a.c;a.tag.textContent=a.name;ov.appendChild(a.tag);
   const d=document.createElement('div');d.style.setProperty('--c',a.c);
@@ -286,6 +287,7 @@ function rambut(a,x,y,bl){
   if(g==='kuncir'){R(x-3,y-19,7,3,h);R(x-4,y-17,1,2,h);R(x+4,y-17,1,2,h);R(x+5,y-18,2,2,h);R(x+6,y-16,1,5,h);R(x+5,y-18,1,1,a.c);if(bl)R(x-3,y-16,7,4,h);return}
   if(g==='keriting'){for(let i=0;i<4;i++)R(x-4+i*2,y-20+(i%2),2,3,h);R(x-4,y-17,1,2,h);R(x+4,y-17,1,2,h);if(bl)R(x-3,y-17,7,4,h);return}
   R(x-3,y-19,7,2,h);R(x-3,y-17,1,2,h);R(x+3,y-17,1,1,h);if(bl)R(x-3,y-17,7,4,h);
+  if(g==='kacamata'&&!bl){R(x-2,y-16,2,2,'#2a1c12');R(x+1,y-16,2,2,'#2a1c12');R(x,y-16,1,1,'#2a1c12')}
 }
 function tempel(){
   for(const a of agents){

@@ -17,6 +17,7 @@ Agent yang ada:
 - "keuangan" = Keuangan (/untung)
 - "pelanggan" = Pelanggan Setia (/pelanggan)
 - "marketing" = Marketing (/promo, pakai AI)
+- "strategi" = Ahli Strategi (/strategi, pakai AI + web search)
 
 Keamanan: halaman & data cuma bisa dibuka pakai token rahasia
 (env KANTOR_TOKEN). Kalau env-nya kosong, fitur ini MATI total (404).
@@ -37,7 +38,7 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 KANTOR_TOKEN = os.getenv("KANTOR_TOKEN", "")
-AGENTS = ("order", "kasir", "produksi", "keuangan", "pelanggan", "marketing")
+AGENTS = ("order", "kasir", "produksi", "keuangan", "pelanggan", "marketing", "strategi")
 
 _events = collections.deque(maxlen=100)
 _counter = itertools.count(1)

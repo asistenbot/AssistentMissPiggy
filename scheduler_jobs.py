@@ -1,6 +1,7 @@
 """
-Jadwal otomatis: cuma FOTO MINGGUAN (poster Open PO + 7 foto sosmed) tiap
-Jumat 17:00 WIB (untuk PO Kamis berikutnya), atas permintaan admin. Selain itu semua auto-kirim terjadwal
+Jadwal otomatis (diminta admin): FOTO MINGGUAN (poster Open PO + 7 foto
+sosmed) + daftar pelanggan tiap Jumat 17:00 WIB, dan laporan AHLI STRATEGI
+tiap Senin 09:00 WIB, atas permintaan admin. Selain itu semua auto-kirim terjadwal
 SUDAH DIMATIKAN atas
 permintaan admin (baik rekap produksi mingguan tiap Rabu MAUPUN laporan
 bulanan tanggal 1). Sekarang admin minta manual aja lewat /rekap dan
@@ -52,6 +53,15 @@ def setup_scheduler(bot):
                     timezone=config.TIMEZONE),
         args=[bot],
         id="pelanggan_jumat",
+        misfire_grace_time=3600,
+    )
+    # Ahli Strategi: laporan mingguan tiap Senin 09:00 WIB ke grup admin utama
+    scheduler.add_job(
+        send_strategi_senin,
+        CronTrigger(day_of_week="mon", hour=int(os.getenv("STRATEGI_JAM", "9")), minute=0,
+                    timezone=config.TIMEZONE),
+        args=[bot],
+        id="strategi_senin",
         misfire_grace_time=3600,
     )
     scheduler.start()
@@ -129,3 +139,15 @@ async def send_pelanggan_jumat(bot):
             break
     except Exception:
         logger.exception("Gagal kirim daftar pelanggan Jumat")
+
+
+async def send_strategi_senin(bot):
+    import strategi
+    for chat_id in _target_chat_ids():
+        try:
+            error = await strategi.kirim_laporan(bot, chat_id, get_sheets_client())
+            if error:
+                await bot.send_message(chat_id=chat_id, text=f"⚠️ Laporan strategi gagal: {error}")
+        except Exception:
+            logger.exception("Gagal kirim laporan strategi")
+        break
