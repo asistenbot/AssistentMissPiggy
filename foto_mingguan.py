@@ -25,6 +25,12 @@ import date_helpers
 
 logger = logging.getLogger(__name__)
 
+try:  # foto iPhone (HEIC/HEIF)
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:  # pragma: no cover
+    pass
+
 FOLDER_NAME = os.getenv("FOTO_FOLDER_NAME", "Foto Roti Miss Piggy")
 UKURAN = (1080, 1350)  # 4:5, pas buat feed IG; TikTok photo mode juga terima
 JUMLAH_FOTO = 7
@@ -85,11 +91,12 @@ def cari_folder(sheets):
     return files[0]["id"] if files else None
 
 
-def daftar_foto(sheets, folder_id):
+def _list_anak(sheets, folder_id):
     hasil, token = [], None
     while True:
-        params = {"q": f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false",
-                  "fields": "nextPageToken, files(id,name)", "pageSize": 200,
+        params = {"q": f"'{folder_id}' in parents and trashed = false and "
+                       "(mimeType contains 'image/' or mimeType = 'application/vnd.google-apps.folder')",
+                  "fields": "nextPageToken, files(id,name,mimeType)", "pageSize": 500,
                   "supportsAllDrives": True, "includeItemsFromAllDrives": True}
         if token:
             params["pageToken"] = token
@@ -100,6 +107,24 @@ def daftar_foto(sheets, folder_id):
         token = data.get("nextPageToken")
         if not token:
             return hasil
+
+
+def daftar_foto(sheets, folder_id, kedalaman_maks=4):
+    """Semua foto di folder ini TERMASUK di dalam subfolder-subfoldernya
+    (misal hasil 'drive-download-...' yang otomatis bikin banyak folder)."""
+    foto, antrean, dilihat = [], [(folder_id, 0)], set()
+    while antrean:
+        fid, dalam = antrean.pop(0)
+        if fid in dilihat:
+            continue
+        dilihat.add(fid)
+        for f in _list_anak(sheets, fid):
+            if f.get("mimeType") == "application/vnd.google-apps.folder":
+                if dalam < kedalaman_maks:
+                    antrean.append((f["id"], dalam + 1))
+            else:
+                foto.append(f)
+    return foto
 
 
 def unduh(sheets, file_id):
