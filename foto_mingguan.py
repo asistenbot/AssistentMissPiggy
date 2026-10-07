@@ -209,19 +209,32 @@ COKLAT_TUA = (43, 37, 35)
 COKLAT = (74, 47, 33)
 
 
+_LOGO_ASLI = os.path.join(_DIR, "logo_web.png")
+
+
 def logo_bulat(diameter):
-    """Logo bulat: lingkaran arang + simbol bintang Miss Piggy + ring krem."""
-    skala = 4  # gambar besar lalu diperkecil biar pinggirannya halus
+    """Lencana bulat berisi logo ASLI Miss Piggy (simbol + tulisan karamel di
+    latar arang), dengan ring krem tipis."""
+    skala = 4
     d = diameter * skala
     lap = Image.new("RGBA", (d, d), (0, 0, 0, 0))
     dr = ImageDraw.Draw(lap)
     dr.ellipse([0, 0, d - 1, d - 1], fill=(*KREM, 255))
-    tebal = int(d * 0.035)
-    dr.ellipse([tebal, tebal, d - 1 - tebal, d - 1 - tebal], fill=(*COKLAT_TUA, 255))
-    if os.path.exists(_ICON):
+    tebal = int(d * 0.03)
+    dr.ellipse([tebal, tebal, d - 1 - tebal, d - 1 - tebal], fill=(31, 32, 33, 255))
+    if os.path.exists(_LOGO_ASLI):
+        logo = Image.open(_LOGO_ASLI).convert("RGB")
+        lebar = int(d * 0.80)
+        logo = logo.resize((lebar, int(logo.height * lebar / logo.width)), Image.LANCZOS)
+        # latar logo sudah arang, jadi cukup ditempel di tengah lingkaran
+        topeng = Image.new("L", (d, d), 0)
+        ImageDraw.Draw(topeng).ellipse([tebal, tebal, d - 1 - tebal, d - 1 - tebal], fill=255)
+        isi = Image.new("RGBA", (d, d), (31, 32, 33, 255))
+        isi.paste(logo, ((d - logo.width) // 2, (d - logo.height) // 2))
+        lap.paste(isi, (0, 0), topeng)
+    elif os.path.exists(_ICON):
         ikon = Image.open(_ICON).convert("RGBA")
-        ukuran = int(d * 0.58)
-        ikon.thumbnail((ukuran, ukuran), Image.LANCZOS)
+        ikon.thumbnail((int(d * 0.58), int(d * 0.58)), Image.LANCZOS)
         lap.alpha_composite(ikon, ((d - ikon.width) // 2, (d - ikon.height) // 2))
     return lap.resize((diameter, diameter), Image.LANCZOS)
 
@@ -238,7 +251,7 @@ def _tempel_logo(base_rgba, diameter, pos):
 def foto_siap_posting(img):
     """Foto tanpa tanggal: rapikan + logo bulat kecil di pojok kanan bawah."""
     base = _rapikan(img).convert("RGBA")
-    dia = 104
+    dia = 132
     _tempel_logo(base, dia, (UKURAN[0] - dia - 40, UKURAN[1] - dia - 40))
     return base.convert("RGB")
 
@@ -305,7 +318,7 @@ def poster_open_po(img, tutup, kirim, web="", wa=""):
         tw = d.textlength(kontak, font=f3)
         d.text(((W - tw) / 2, H - m - tinggi_pita + 12), kontak, font=f3, fill=(255, 250, 242))
 
-    _tempel_logo(base, 150, (m, m))
+    _tempel_logo(base, 190, (m, m))
     return base.convert("RGB")
 
 

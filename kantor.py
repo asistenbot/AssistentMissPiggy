@@ -46,6 +46,7 @@ _stats_cache = {"ts": 0.0, "data": None}
 _stats_lock = asyncio.Lock()
 
 _HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kantor.html")
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_web.png")
 
 
 def catat(agent: str, teks: str):
@@ -121,6 +122,14 @@ async def handle_events(request: web.Request):
     )
 
 
+async def handle_logo(request: web.Request):
+    # Logo publik (bukan data rahasia), boleh dibuka tanpa token.
+    if not os.path.exists(_LOGO_PATH):
+        raise web.HTTPNotFound()
+    return web.FileResponse(_LOGO_PATH, headers={"Cache-Control": "public, max-age=86400"})
+
+
 def daftar_route(web_app: web.Application):
+    web_app.router.add_get("/kantor/logo.png", handle_logo)
     web_app.router.add_get("/kantor", handle_page)
     web_app.router.add_get("/kantor/events", handle_events)
