@@ -354,25 +354,40 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
         _selesai("Gagal")
         return hasil["error"]
     if hasil["foto_baru"]:
-        await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+        await _kirim(bot.send_message, chat_id=chat_id, message_thread_id=thread_id,
                                text=f"🔎 {hasil['foto_baru']} foto baru sudah dicek & masuk katalog "
                                     f"(total {hasil['total_katalog']} foto).")
     for n, p in enumerate(hasil["paket"], 1):
         r = p["rencana"]
         if "error" in p:
-            await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
+            await _kirim(bot.send_message, chat_id=chat_id, message_thread_id=thread_id,
                                    text=f"⚠️ Carousel \"{r.get('judul_konten', '')}\" gagal dibuat: {p['error']}")
             continue
         media = [InputMediaDocument(media=b, filename=f"Carousel{n}_slide{i + 1}.jpg")
                  for i, b in enumerate(p["gambar"])]
-        await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media)
+        await _kirim(bot.send_media_group, chat_id=chat_id, message_thread_id=thread_id, media=media)
         teks = (f"🎠 CAROUSEL {n}: {r.get('judul_konten', '')}\n"
                 f"Kenapa: {r.get('alasan', '-')}\n\n"
                 f"Caption siap pakai:\n\n{r.get('caption', '')}\n\n"
                 "Posting slide sesuai urutan nomor file. Lagu pilih sendiri di aplikasi.")
-        await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, text=teks[:4000])
+        await _kirim(bot.send_message, chat_id=chat_id, message_thread_id=thread_id, text=teks[:4000])
     _selesai(f"{len(hasil['paket'])} carousel terkirim ke grup Konten")
     return None
+
+
+async def _kirim(fungsi, **kw):
+    """Kirim ke Telegram dengan batas waktu longgar + coba ulang 3x kalau
+    koneksi Telegram lagi lambat (TimedOut/NetworkError)."""
+    from telegram.error import NetworkError, TimedOut
+    kw.setdefault("read_timeout", 60)
+    kw.setdefault("write_timeout", 60)
+    for i in range(3):
+        try:
+            return await fungsi(**kw)
+        except (TimedOut, NetworkError):
+            if i == 2:
+                raise
+            await asyncio.sleep(3 * (i + 1))
 
 
 def _selesai(teks):

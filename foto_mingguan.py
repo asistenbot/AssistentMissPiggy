@@ -392,6 +392,7 @@ async def kirim_paket(bot, chat_id, sheets, thread_id=None):
         return paket["error"]
     kirim = paket["kirim"]
     await bot.send_document(
+        read_timeout=60, write_timeout=60,
         chat_id=chat_id, message_thread_id=thread_id, document=paket["poster"],
         filename=f"OpenPO_{kirim:%Y-%m-%d}.jpg",
         caption=(f"📣 Poster OPEN PO (tutup {_tgl(paket['tutup'])}, kirim {_tgl(kirim)}).\n"
@@ -408,7 +409,8 @@ async def kirim_paket(bot, chat_id, sheets, thread_id=None):
                 media=b, filename=f"MissPiggy_{kirim:%Y%m%d}_{i + 1}.jpg",
                 caption=caption if i == jumlah - 1 else None,
             ))
-        await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media)
+        await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media,
+                                   read_timeout=60, write_timeout=60)
     if len(paket["foto"]) < JUMLAH_FOTO:
         await bot.send_message(
             chat_id=chat_id, message_thread_id=thread_id,
