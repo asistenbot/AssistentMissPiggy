@@ -25,6 +25,7 @@ import invoice_image
 import monthly_report_pdf
 import production_recap_pdf
 import kantor
+import foto_mingguan
 from sheets_client import get_sheets_client, is_komposisi_bundle_valid
 from ai_parser import (
     parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
@@ -1094,6 +1095,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /untung — untung kotor PO terakhir (omzet dikurangi biaya dough) + tren\n"
         "- /pelanggan — pelanggan paling setia + yang lama nggak order (buat dikabari)\n"
         "- /promo — draf pengumuman PO untuk TikTok, WA, dan IG (bisa tambah catatan)\n"
+        "- /fotopo — poster Open PO + 7 foto sosmed dari folder Drive (otomatis tiap Kamis 17.00)\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1766,6 +1768,27 @@ async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Itu drafnya, cek dulu sebelum diposting ya. Mau versi lain? Ketik /promo lagi, "
         "bisa tambah catatan, misal: /promo fokus ke donat, nada lebih lucu"
     )
+
+
+@owner_only
+async def fotopo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bikin poster Open PO + 7 foto sosmed sekarang juga (versi manual dari
+    kiriman otomatis tiap Kamis)."""
+    await update.message.reply_text("🖼️ Lagi ambil foto dari Drive dan ngedit, tunggu sebentar...")
+    try:
+        error = await foto_mingguan.kirim_paket(
+            context.bot, update.effective_chat.id, get_sheets_client(),
+            thread_id=update.message.message_thread_id,
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas ngolah foto. Coba /fotopo lagi.")
+        return
+    except Exception as e:
+        logger.exception("Gagal /fotopo")
+        await update.message.reply_text(f"Gagal bikin foto: {e}")
+        return
+    if error:
+        await update.message.reply_text(error)
 
 
 @owner_only
@@ -3976,6 +3999,7 @@ def main():
     app.add_handler(CommandHandler("untung", untung_cmd))
     app.add_handler(CommandHandler("pelanggan", pelanggan_cmd))
     app.add_handler(CommandHandler("promo", promo_cmd))
+    app.add_handler(CommandHandler("fotopo", fotopo_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --

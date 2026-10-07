@@ -1,5 +1,7 @@
 """
-Jadwal otomatis: TIDAK ADA -- semua auto-kirim terjadwal SUDAH DIMATIKAN atas
+Jadwal otomatis: cuma FOTO MINGGUAN (poster Open PO + 7 foto sosmed) tiap
+Kamis 17:00 WIB, atas permintaan admin. Selain itu semua auto-kirim terjadwal
+SUDAH DIMATIKAN atas
 permintaan admin (baik rekap produksi mingguan tiap Rabu MAUPUN laporan
 bulanan tanggal 1). Sekarang admin minta manual aja lewat /rekap dan
 /laporanbulanan kapan pun perlu. Fungsi send_auto_recap & send_auto_monthly_report
@@ -10,6 +12,7 @@ nggak perlu tulis ulang dari nol.
 """
 import datetime
 import logging
+import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import config
@@ -31,6 +34,16 @@ def setup_scheduler(bot):
     #     args=[bot],
     #     id="auto_monthly_report",
     # )
+    # Foto mingguan (poster Open PO + 7 foto sosmed) tiap Kamis jam 17:00 WIB
+    # -- diminta admin. Jam bisa diubah lewat env FOTO_JAM (0-23).
+    scheduler.add_job(
+        send_foto_mingguan,
+        CronTrigger(day_of_week="thu", hour=int(os.getenv("FOTO_JAM", "17")), minute=0,
+                    timezone=config.TIMEZONE),
+        args=[bot],
+        id="foto_mingguan",
+        misfire_grace_time=3600,
+    )
     scheduler.start()
     return scheduler
 def _target_chat_ids():
@@ -63,3 +76,16 @@ async def send_auto_monthly_report(bot):
             await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
     except Exception:
         logger.exception("Gagal kirim auto laporan bulanan")
+
+
+async def send_foto_mingguan(bot):
+    import foto_mingguan
+    sheets = get_sheets_client()
+    for chat_id in _target_chat_ids():
+        try:
+            error = await foto_mingguan.kirim_paket(bot, chat_id, sheets)
+            if error:
+                await bot.send_message(chat_id=chat_id, text=f"⚠️ Foto mingguan gagal: {error}")
+        except Exception:
+            logger.exception("Gagal kirim foto mingguan")
+        break  # cukup 1x (grup); kalau fallback ke DM admin, kirim ke admin pertama saja
