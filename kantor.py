@@ -49,9 +49,13 @@ _HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kantor.ht
 _LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_web.png")
 
 
-def catat(agent: str, teks: str):
+def catat(agent: str, teks: str, jenis: str = "kerja"):
     """Catat 1 kejadian. AMAN dipanggil dari mana aja -- nggak pernah raise,
-    biar kantor virtual nggak mungkin bikin alur order ikut error."""
+    biar kantor virtual nggak mungkin bikin alur order ikut error.
+
+    jenis: 'kerja' (tugas singkat), 'mulai' (tugas panjang dimulai -> staf
+    tetap di meja), 'progres' (update tulisan selama tugas panjang),
+    'selesai' (tugas panjang beres -> staf boleh jalan lagi)."""
     try:
         if agent not in AGENTS:
             agent = "order"
@@ -60,9 +64,22 @@ def catat(agent: str, teks: str):
             "ts": int(time.time()),
             "agent": agent,
             "teks": str(teks)[:140],
+            "jenis": jenis,
         })
     except Exception:
         pass
+
+
+def mulai(agent: str, teks: str):
+    catat(agent, teks, "mulai")
+
+
+def progres(agent: str, teks: str):
+    catat(agent, teks, "progres")
+
+
+def selesai(agent: str, teks: str = "Selesai"):
+    catat(agent, teks, "selesai")
 
 
 def _authorized(request: web.Request) -> bool:

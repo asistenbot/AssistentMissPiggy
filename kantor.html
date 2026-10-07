@@ -174,12 +174,18 @@ async function poll(){
     if(!r.ok)throw new Error(r.status);
     const d=await r.json();
     gagal=0;statusEl.textContent='Buka';statusEl.classList.remove('off');
+    // tugas panjang yang masih berjalan saat halaman dibuka
+    if(pertama){const aktif={};for(const e of d.events){if(e.jenis==='mulai')aktif[e.agent]=e;else if(e.jenis==='selesai')delete aktif[e.agent]}
+      for(const k in aktif){const a=byId[k];if(a)a.queue.push({say:pendek(aktif[k].teks),sibuk:true})}}
     for(const e of d.events){
       lastId=Math.max(lastId,e.id);
-      tambahLog(e);
-      if(!pertama){const a=byId[e.agent];if(a)a.queue.push(pendek(e.teks))}
+      if(e.jenis!=='progres')tambahLog(e);
+      const a=byId[e.agent];if(!a)continue;
+      if(e.jenis==='progres'){if(a.sibuk&&a.state==='work')a.bub.textContent=pendek(e.teks);a.sayProgres=pendek(e.teks);continue}
+      if(e.jenis==='selesai'){a.sibuk=false;continue}
+      if(!pertama)a.queue.push({say:pendek(e.teks),sibuk:e.jenis==='mulai'});
     }
-    if(pertama&&d.events.length){const e=d.events[d.events.length-1];const a=byId[e.agent];if(a)a.queue.push(pendek(e.teks))}
+    if(pertama&&d.events.length){const e=[...d.events].reverse().find(x=>!x.jenis||x.jenis==='kerja');if(e){const a=byId[e.agent];if(a&&!a.queue.length)a.queue.push({say:pendek(e.teks),sibuk:false})}}
     pertama=false;
     if(d.stats){
       document.getElementById('lOrder').textContent='Order PO '+d.stats.minggu_po.slice(5).split('-').reverse().join('/');
@@ -203,12 +209,15 @@ function update(dt){
     a.moving=d>0.5;
     if(a.moving){const k=Math.min(1,sp/d);a.x+=dx*k;a.y+=dy*k;a.step+=dt*8;a.belakang=dy<-Math.abs(dx)*0.4}
     if(a.state==='idle'){
-      if(a.queue.length){a.say=a.queue.shift();a.state='go';a.tx=a.desk.x;a.ty=a.desk.y+16}
+      if(a.queue.length){const q=a.queue.shift();a.say=q.say;if(q.sibuk){a.sibuk=true;a.sibukMulai=performance.now()}a.state='go';a.tx=a.desk.x;a.ty=a.desk.y+16}
       else if(!a.moving){a.belakang=false;a.timer-=dt;if(a.timer<=0){jalanAcak(a);a.timer=3+Math.random()*5}}
     }else if(a.state==='go'&&!a.moving){
       a.state='work';a.belakang=true;a.timer=3.4;a.bub.textContent=a.say;a.bub.hidden=false;
     }else if(a.state==='work'){
-      a.belakang=true;a.timer-=dt;
+      a.belakang=true;
+      // tugas panjang: tetap di meja sampai ada 'selesai' (maks 15 menit jaga-jaga)
+      if(a.sibuk&&performance.now()-a.sibukMulai>900000)a.sibuk=false;
+      if(!a.sibuk)a.timer-=dt;
       if(a.timer<=0){a.bub.hidden=true;a.state='idle';a.timer=a.queue.length?0:.5;if(!a.queue.length)jalanAcak(a)}
     }
   }

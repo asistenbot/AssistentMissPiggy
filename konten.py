@@ -76,7 +76,7 @@ def _lihat_foto(img, menu_text):
         "\"kualitas\": angka 1-5 (terang, tajam, menggoda untuk sosmed), "
         "\"cover\": true kalau cocok jadi slide pertama carousel}"
     )
-    resp = client.messages.create(
+    resp = client.with_options(timeout=60.0, max_retries=2).messages.create(
         model=config.CLAUDE_MODEL_FAST,
         max_tokens=300,
         messages=[{"role": "user", "content": [
@@ -106,19 +106,31 @@ def perbarui_katalog(sheets):
     ws = _ws_katalog(sheets)
     hari_ini = datetime.date.today().isoformat()
     baris = []
-    for f in baru:
+    total = len(baru)
+    _progres(f"Cek {total} foto baru...")
+
+    def periksa(f):
         try:
-            info = _lihat_foto(fm.unduh(sheets, f["id"]), menu)
+            return f, _lihat_foto(fm.unduh(sheets, f["id"]), menu)
         except Exception as e:
             logger.warning(f"Katalog: lewati {f.get('name')}: {e}")
-            continue
-        kual = int(info.get("kualitas") or 3)
-        data = {"id": f["id"], "nama": f.get("name", ""), "label": str(info.get("label") or "lainnya"),
-                "deskripsi": str(info.get("deskripsi") or ""), "kualitas": max(1, min(5, kual)),
-                "cover": bool(info.get("cover"))}
-        katalog[f["id"]] = data
-        baris.append([data["id"], data["nama"], data["label"], data["deskripsi"],
-                      str(data["kualitas"]), "ya" if data["cover"] else "tidak", hari_ini])
+            return f, None
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        for n, fut in enumerate(as_completed([pool.submit(periksa, f) for f in baru]), 1):
+            f, info = fut.result()
+            if n % 3 == 0 or n == total:
+                _progres(f"Cek foto {n}/{total}")
+            if info is None:
+                continue
+            kual = int(info.get("kualitas") or 3)
+            data = {"id": f["id"], "nama": f.get("name", ""), "label": str(info.get("label") or "lainnya"),
+                    "deskripsi": str(info.get("deskripsi") or ""), "kualitas": max(1, min(5, kual)),
+                    "cover": bool(info.get("cover"))}
+            katalog[f["id"]] = data
+            baris.append([data["id"], data["nama"], data["label"], data["deskripsi"],
+                          str(data["kualitas"]), "ya" if data["cover"] else "tidak", hari_ini])
     if baris:
         ws.append_rows(baris, value_input_option="RAW")
     return katalog, len(baris)
@@ -143,7 +155,7 @@ Balas HANYA JSON:
 def rencanakan(ide_text, katalog, menu_text, jumlah=2):
     from ai_parser import client, _safe_json_loads
     foto_bagus = sorted(katalog.values(), key=lambda f: -f["kualitas"])
-    foto_bagus = [f for f in foto_bagus if f["label"].lower() != "lainnya" and f["kualitas"] >= 2][:80]
+    foto_bagus = [f for f in foto_bagus if f["label"].lower() != "lainnya" and f["kualitas"] >= 2][:50]
     if len(foto_bagus) < 4:
         return {"error": "Foto di katalog masih kurang (minimal 4 foto roti yang jelas)."}
     daftar = "\n".join(
@@ -151,9 +163,10 @@ def rencanakan(ide_text, katalog, menu_text, jumlah=2):
         for f in foto_bagus
     )
     isi = f"IDE KONTEN:\n{ide_text}\n\nMENU:\n{menu_text}\n\nFOTO TERSEDIA:\n{daftar}"
-    resp = client.messages.create(
+    # Rencana butuh mikir lebih lama dari parsing order -> batas tunggu 2 menit
+    resp = client.with_options(timeout=120.0, max_retries=1).messages.create(
         model=config.CLAUDE_MODEL,
-        max_tokens=2500,
+        max_tokens=2200,
         system=RENCANA_PROMPT.format(jumlah=jumlah),
         messages=[{"role": "user", "content": isi}],
     )
@@ -301,11 +314,13 @@ def siapkan_konten(sheets, ide_text, jumlah=2):
         menu = sheets.get_pricelist_text().replace("*", "")
     except Exception:
         menu = ""
+    _progres("Pilih foto yang cocok...")
     rencana = rencanakan(ide_text, katalog, menu, jumlah)
     if "error" in rencana:
         return rencana
     paket = []
     for k in rencana["konten"]:
+        _progres(f"Desain carousel: {k.get('judul_konten', '')}"[:40])
         try:
             paket.append({"rencana": k, "gambar": render_carousel(sheets, k)})
         except Exception as e:
@@ -319,7 +334,7 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
     from telegram import InputMediaDocument
     try:
         import kantor
-        kantor.catat("marketing", "Bikin carousel dari ide Ahli Strategi")
+        kantor.mulai("marketing", "Pilih foto & bikin carousel")
     except Exception:
         pass
     if chat_id is None:
@@ -329,11 +344,14 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
     try:
         hasil = await asyncio.wait_for(asyncio.to_thread(siapkan_konten, sheets, ide_text, jumlah), timeout=600)
     except asyncio.TimeoutError:
+        _selesai("Timeout")
         return "Bikin konten kelamaan (timeout). Coba /konten lagi."
     except Exception as e:
         logger.exception("Gagal siapkan konten")
+        _selesai("Gagal")
         return f"Gagal bikin konten: {e}"
     if "error" in hasil:
+        _selesai("Gagal")
         return hasil["error"]
     if hasil["foto_baru"]:
         await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
@@ -353,4 +371,21 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
                 f"Caption siap pakai:\n\n{r.get('caption', '')}\n\n"
                 "Posting slide sesuai urutan nomor file. Lagu pilih sendiri di aplikasi.")
         await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, text=teks[:4000])
+    _selesai(f"{len(hasil['paket'])} carousel terkirim ke grup Konten")
     return None
+
+
+def _selesai(teks):
+    try:
+        import kantor
+        kantor.selesai("marketing", teks)
+    except Exception:
+        pass
+
+
+def _progres(teks):
+    try:
+        import kantor
+        kantor.progres("marketing", teks)
+    except Exception:
+        pass

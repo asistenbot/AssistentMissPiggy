@@ -377,10 +377,17 @@ async def kirim_paket(bot, chat_id, sheets, thread_id=None):
     from telegram import InputMediaDocument
     try:
         import kantor
-        kantor.catat("marketing", "Siapin poster Open PO + 7 foto sosmed")
+        kantor.mulai("marketing", "Siapin poster Open PO + 7 foto")
     except Exception:
         pass
-    paket = await asyncio.wait_for(asyncio.to_thread(siapkan_paket, sheets), timeout=180)
+    try:
+        paket = await asyncio.wait_for(asyncio.to_thread(siapkan_paket, sheets), timeout=180)
+    finally:
+        try:
+            import kantor
+            kantor.selesai("marketing", "Foto Open PO selesai")
+        except Exception:
+            pass
     if "error" in paket:
         return paket["error"]
     kirim = paket["kirim"]

@@ -229,7 +229,7 @@ async def kirim_laporan(bot, chat_id, sheets, thread_id=None, catatan="", buat_k
     import asyncio
     try:
         import kantor
-        kantor.catat("strategi", "Riset tren & susun strategi minggu ini")
+        kantor.mulai("strategi", "Riset tren & susun strategi")
     except Exception:
         pass
     try:
@@ -239,6 +239,11 @@ async def kirim_laporan(bot, chat_id, sheets, thread_id=None, catatan="", buat_k
     except Exception as e:
         logger.exception("Gagal bikin laporan strategi")
         return f"Ahli Strategi gagal: {e}"
+    try:
+        import kantor
+        kantor.selesai("strategi", "Laporan strategi terkirim" if "error" not in hasil else "Gagal")
+    except Exception:
+        pass
     if "error" in hasil:
         return hasil["error"]
     teks = hasil["teks"]
