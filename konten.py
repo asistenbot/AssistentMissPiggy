@@ -28,8 +28,19 @@ import foto_mingguan as fm
 logger = logging.getLogger(__name__)
 
 TAB_KATALOG = "Katalog Foto"
-HEADER = ["File_ID", "Nama_File", "Label", "Deskripsi", "Kualitas", "Cover", "Diperiksa"]
-MAKS_PERIKSA_SEKALI = int(os.getenv("KATALOG_MAKS_PERIKSA", "40"))
+HEADER = ["File_ID", "Nama_File", "Label", "Deskripsi", "Kualitas", "Cover", "Diperiksa", "Yakin"]
+TAB_PANDUAN = "Panduan Foto"
+# Ciri-ciri produk dari pemilik, biar AI nggak salah sebut. Bisa ditambah/
+# diubah langsung di tab "Panduan Foto" di Sheets (1 baris = 1 aturan).
+PANDUAN_DEFAULT = [
+    "Roti bulat dengan pola sobekan/lipatan di atas (seperti bunga) adalah ROTI, BUKAN donat.",
+    "DONAT hanya kalau bentuknya cincin dengan lubang di tengah dan digoreng.",
+    "Roti PANJANG/lonjong dengan topping meses cokelat di atas = Mocha Meises; roti panjang dengan parutan keju di atas = Cream Cheese.",
+    "Roti BULAT dengan taburan meses di atas = Roti Coklat (bukan Mocha Meises).",
+    "Gorengan lonjong berlapis tepung roti (panir) = Risoles.",
+    "Kalau ragu produk apa, isi label 'roti' (umum) dan yakin=false. Jangan menebak nama rasa.",
+]
+MAKS_PERIKSA_SEKALI = int(os.getenv("KATALOG_MAKS_PERIKSA", "60"))
 W, H = fm.UKURAN
 
 
@@ -41,7 +52,7 @@ def _ws_katalog(sheets):
         return sheets.sheet.worksheet(TAB_KATALOG)
     except gspread.exceptions.WorksheetNotFound:
         ws = sheets.sheet.add_worksheet(title=TAB_KATALOG, rows=500, cols=len(HEADER))
-        ws.update(values=[HEADER], range_name="A1:G1")
+        ws.update(values=[HEADER], range_name="A1:H1")
         return ws
 
 
@@ -54,7 +65,8 @@ def baca_katalog(sheets):
         if r[0]:
             hasil[r[0]] = {"id": r[0], "nama": r[1], "label": r[2], "deskripsi": r[3],
                            "kualitas": int(r[4]) if r[4].isdigit() else 3,
-                           "cover": r[5].strip().lower() in ("ya", "true", "1")}
+                           "cover": r[5].strip().lower() in ("ya", "true", "1"),
+                           "yakin": r[7].strip().lower() not in ("tidak", "false", "0")}
     return hasil
 
 
@@ -66,18 +78,36 @@ def _jpeg_kecil(img, sisi=768):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _lihat_foto(img, menu_text):
+def baca_panduan(sheets):
+    """Aturan ciri produk dari tab 'Panduan Foto' (dibuat + diisi default
+    kalau belum ada)."""
+    import gspread
+    try:
+        ws = sheets.sheet.worksheet(TAB_PANDUAN)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sheets.sheet.add_worksheet(title=TAB_PANDUAN, rows=50, cols=1)
+        ws.update(values=[["Aturan (1 baris = 1 ciri produk, boleh ditambah/diubah)"]] +
+                  [[a] for a in PANDUAN_DEFAULT], range_name=f"A1:A{len(PANDUAN_DEFAULT) + 1}")
+        return list(PANDUAN_DEFAULT)
+    return [r[0].strip() for r in ws.get_all_values()[1:] if r and r[0].strip()]
+
+
+def _lihat_foto(img, menu_text, panduan):
     from ai_parser import client, _safe_json_loads
     prompt = (
         "Ini foto produk bakery rumahan Miss Piggy. Daftar menu:\n" + menu_text +
-        "\n\nBalas HANYA JSON: {\"label\": nama produk paling mungkin dari menu (atau "
-        "'lainnya' kalau bukan produk/ tidak jelas), \"deskripsi\": 1 kalimat singkat "
-        "bahasa Indonesia tentang isi foto (sudut, isian terlihat, suasana), "
+        "\n\nCIRI-CIRI PRODUK DARI PEMILIK (WAJIB diikuti, lebih penting dari tebakanmu):\n- " +
+        "\n- ".join(panduan) +
+        "\n\nLihat bentuk produknya baik-baik (bulat/panjang/cincin, digoreng/dipanggang, topping). "
+        "Balas HANYA JSON: {\"label\": nama produk sesuai ciri di atas (pakai nama dari menu "
+        "kalau cocok; 'lainnya' kalau bukan foto produk), \"yakin\": true/false, "
+        "\"deskripsi\": 1 kalimat singkat tentang isi foto (bentuk, topping, sudut, suasana), "
         "\"kualitas\": angka 1-5 (terang, tajam, menggoda untuk sosmed), "
         "\"cover\": true kalau cocok jadi slide pertama carousel}"
     )
+    # Pakai model yang lebih teliti (Sonnet) -- cuma sekali per foto
     resp = client.with_options(timeout=60.0, max_retries=2).messages.create(
-        model=config.CLAUDE_MODEL_FAST,
+        model=config.CLAUDE_MODEL,
         max_tokens=300,
         messages=[{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
@@ -88,14 +118,19 @@ def _lihat_foto(img, menu_text):
     return _safe_json_loads(resp.content[0].text) or {}
 
 
-def perbarui_katalog(sheets):
+def perbarui_katalog(sheets, ulang=False):
     """Periksa foto yang belum ada di katalog (maks MAKS_PERIKSA_SEKALI per
-    jalan). Return (katalog_lengkap, jumlah_baru)."""
+    jalan). ulang=True: hapus katalog lama & cek semua dari awal (dipakai
+    setelah panduan produk diubah). Return (katalog_lengkap, jumlah_baru)."""
     folder = fm.cari_folder(sheets)
     if not folder:
         return {}, 0
     semua = fm.daftar_foto(sheets, folder)
-    katalog = baca_katalog(sheets)
+    if ulang:
+        _ws_katalog(sheets).batch_clear(["A2:H2000"])
+        katalog = {}
+    else:
+        katalog = baca_katalog(sheets)
     baru = [f for f in semua if f["id"] not in katalog][:MAKS_PERIKSA_SEKALI]
     if not baru:
         return katalog, 0
@@ -103,6 +138,7 @@ def perbarui_katalog(sheets):
         menu = sheets.get_pricelist_text().replace("*", "")
     except Exception:
         menu = "(roti, roti gandum, donat, roti tawar)"
+    panduan = baca_panduan(sheets)
     ws = _ws_katalog(sheets)
     hari_ini = datetime.date.today().isoformat()
     baris = []
@@ -111,7 +147,7 @@ def perbarui_katalog(sheets):
 
     def periksa(f):
         try:
-            return f, _lihat_foto(fm.unduh(sheets, f["id"]), menu)
+            return f, _lihat_foto(fm.unduh(sheets, f["id"]), menu, panduan)
         except Exception as e:
             logger.warning(f"Katalog: lewati {f.get('name')}: {e}")
             return f, None
@@ -127,10 +163,11 @@ def perbarui_katalog(sheets):
             kual = int(info.get("kualitas") or 3)
             data = {"id": f["id"], "nama": f.get("name", ""), "label": str(info.get("label") or "lainnya"),
                     "deskripsi": str(info.get("deskripsi") or ""), "kualitas": max(1, min(5, kual)),
-                    "cover": bool(info.get("cover"))}
+                    "cover": bool(info.get("cover")), "yakin": info.get("yakin") is not False}
             katalog[f["id"]] = data
             baris.append([data["id"], data["nama"], data["label"], data["deskripsi"],
-                          str(data["kualitas"]), "ya" if data["cover"] else "tidak", hari_ini])
+                          str(data["kualitas"]), "ya" if data["cover"] else "tidak", hari_ini,
+                          "ya" if data["yakin"] else "tidak"])
     if baris:
         ws.append_rows(baris, value_input_option="RAW")
     return katalog, len(baris)
@@ -146,6 +183,8 @@ Aturan:
 - Tiap carousel 4-5 slide foto (slide penutup ajakan order dibuat otomatis, jangan dimasukkan). Jangan pakai foto yang sama dua kali dalam satu carousel.
 - "judul" slide maksimal 6 kata, "teks" maksimal 18 kata, bahasa santai. Jangan mengarang harga/promo yang tidak ada di data.
 - Kalau ide butuh foto yang tidak ada (misal menu baru yang belum pernah dibuat), pilih ide lain yang fotonya ada.
+- NAMA PRODUK di judul/teks/caption HARUS sama dengan label fotonya. Jangan menyebut foto roti sebagai donat atau sebaliknya. Kalau label foto 'roti' atau ditandai 'belum yakin', tulis secara umum ("roti Miss Piggy") tanpa menyebut rasa.
+- Satu carousel sebaiknya satu tema produk yang konsisten (misal semua roti, atau semua donat), jangan dicampur dengan judul yang menyebut satu jenis saja.
 - caption: maksimal 600 karakter + 6-10 hashtag.
 
 Balas HANYA JSON:
@@ -159,7 +198,7 @@ def rencanakan(ide_text, katalog, menu_text, jumlah=2):
     if len(foto_bagus) < 4:
         return {"error": "Foto di katalog masih kurang (minimal 4 foto roti yang jelas)."}
     daftar = "\n".join(
-        f"- {f['id']} | {f['label']} | kualitas {f['kualitas']}{' | cover' if f['cover'] else ''} | {f['deskripsi']}"
+        f"- {f['id']} | {f['label']}{'' if f.get('yakin', True) else ' (belum yakin)'} | kualitas {f['kualitas']}{' | cover' if f['cover'] else ''} | {f['deskripsi']}"
         for f in foto_bagus
     )
     isi = f"IDE KONTEN:\n{ide_text}\n\nMENU:\n{menu_text}\n\nFOTO TERSEDIA:\n{daftar}"
@@ -242,7 +281,7 @@ def slide_foto(img, judul, teks, nomor, cover=False):
     base.alpha_composite(lap)
     _kartu(base, judul, teks, nomor=None if cover else nomor, besar=cover)
     if cover:
-        fm._tempel_logo(base, 170, (56, 56))
+        fm._tempel_logo(base, 230, (56, 56))
         d = ImageDraw.Draw(base)
         f = fm._font(fm._FONT_TEKS, 28, b"ExtraBold")
         t = "geser  »"
@@ -250,7 +289,7 @@ def slide_foto(img, judul, teks, nomor, cover=False):
         d.rounded_rectangle([W - 56 - lw - 48, 70, W - 56, 122], radius=26, fill=(251, 244, 233, 235))
         d.text((W - 56 - lw - 24, 78), t, font=f, fill=fm.COKLAT)
     else:
-        fm._tempel_logo(base, 96, (W - 96 - 44, 44))
+        fm._tempel_logo(base, 150, (W - 44, 44), jangkar="kanan-atas")
     return base.convert("RGB")
 
 
@@ -258,7 +297,7 @@ def slide_penutup(img_latar, tutup, kirim, web, wa):
     base = fm._rapikan(img_latar).filter(ImageFilter.GaussianBlur(18))
     base = Image.blend(base, Image.new("RGB", fm.UKURAN, (31, 32, 33)), 0.72).convert("RGBA")
     d = ImageDraw.Draw(base)
-    fm._tempel_logo(base, 300, ((W - 300) // 2, 190))
+    fm._tempel_logo(base, 420, (W // 2, 210), jangkar="tengah-atas")
     d = ImageDraw.Draw(base)
 
     def tengah(teks, y, font, warna):

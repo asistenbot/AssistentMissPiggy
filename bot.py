@@ -1190,6 +1190,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /strategi — ide promo, konten & menu tren dari data + internet (otomatis tiap Senin 09.00)\n"
         "- /konten [ide] — carousel IG/TikTok siap posting dari foto Drive\n"
         "- /katalogfoto — cek foto baru di Drive & kasih label (sekali per foto)\n"
+        "- /katalogfoto ulang — cek ulang semua foto (habis ubah tab Panduan Foto)\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1927,10 +1928,13 @@ async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def katalogfoto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cek foto baru di folder Drive dan masukkan ke katalog (dilihat AI sekali)."""
-    await update.message.reply_text("🔎 Lagi cek foto baru di Drive...")
+    ulang = bool(context.args) and context.args[0].lower() == "ulang"
+    await update.message.reply_text(
+        "🔎 Cek ULANG semua foto dari awal pakai panduan produk terbaru (beberapa menit)..." if ulang
+        else "🔎 Lagi cek foto baru di Drive...")
     try:
         katalog, baru = await asyncio.wait_for(
-            asyncio.to_thread(konten.perbarui_katalog, get_sheets_client()), timeout=600)
+            asyncio.to_thread(konten.perbarui_katalog, get_sheets_client(), ulang), timeout=900)
     except Exception as e:
         await update.message.reply_text(f"Gagal cek foto: {e}")
         return

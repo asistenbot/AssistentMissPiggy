@@ -239,20 +239,45 @@ def logo_bulat(diameter):
     return lap.resize((diameter, diameter), Image.LANCZOS)
 
 
-def _tempel_logo(base_rgba, diameter, pos):
-    logo = logo_bulat(diameter)
-    bayang = Image.new("RGBA", (diameter + 40, diameter + 40), (0, 0, 0, 0))
-    ImageDraw.Draw(bayang).ellipse([20, 26, 20 + diameter, 26 + diameter], fill=(0, 0, 0, 90))
-    bayang = bayang.filter(ImageFilter.GaussianBlur(10))
-    base_rgba.alpha_composite(bayang, (pos[0] - 20, pos[1] - 20))
-    base_rgba.alpha_composite(logo, pos)
+_LOGO_KREM = os.path.join(_DIR, "logo_krem.png")
+_LOGO_GELAP = os.path.join(_DIR, "logo_gelap.png")
+
+
+def _tempel_logo(base_rgba, lebar, pos, jangkar="kiri-atas"):
+    """Tempel logo Miss Piggy TRANSPARAN (tanpa latar hitam). Warnanya
+    otomatis: krem di atas area foto yang gelap, cokelat tua di atas area
+    yang terang, plus bayangan/cahaya halus biar tetap kebaca."""
+    from PIL import ImageStat
+    path_k, path_g = _LOGO_KREM, _LOGO_GELAP
+    if not (os.path.exists(path_k) and os.path.exists(path_g)):
+        return
+    contoh = Image.open(path_k)
+    tinggi = int(contoh.height * lebar / contoh.width)
+    x, y = pos
+    if jangkar == "kanan-atas":
+        x -= lebar
+    elif jangkar == "kanan-bawah":
+        x, y = x - lebar, y - tinggi
+    elif jangkar == "tengah-atas":
+        x -= lebar // 2
+    x, y = max(0, x), max(0, y)
+    area = base_rgba.crop((x, y, x + lebar, y + tinggi)).convert("L")
+    terang = ImageStat.Stat(area).mean[0] > 140
+    logo = Image.open(path_g if terang else path_k).convert("RGBA").resize((lebar, tinggi), Image.LANCZOS)
+    # bayangan (untuk logo krem) atau cahaya lembut (untuk logo gelap)
+    warna_halo = (255, 250, 242) if terang else (0, 0, 0)
+    halo = Image.new("RGBA", (lebar + 40, tinggi + 40), (*warna_halo, 0))
+    alpha = logo.getchannel("A").point(lambda v: int(v * (0.55 if terang else 0.6)))
+    halo.paste(Image.new("RGBA", logo.size, (*warna_halo, 255)), (20, 20), alpha)
+    halo = halo.filter(ImageFilter.GaussianBlur(7))
+    base_rgba.alpha_composite(halo, (x - 20, y - 18))
+    base_rgba.alpha_composite(logo, (x, y))
 
 
 def foto_siap_posting(img):
     """Foto tanpa tanggal: rapikan + logo bulat kecil di pojok kanan bawah."""
     base = _rapikan(img).convert("RGBA")
-    dia = 132
-    _tempel_logo(base, dia, (UKURAN[0] - dia - 40, UKURAN[1] - dia - 40))
+    _tempel_logo(base, 190, (UKURAN[0] - 44, UKURAN[1] - 40), jangkar="kanan-bawah")
     return base.convert("RGB")
 
 
@@ -318,7 +343,7 @@ def poster_open_po(img, tutup, kirim, web="", wa=""):
         tw = d.textlength(kontak, font=f3)
         d.text(((W - tw) / 2, H - m - tinggi_pita + 12), kontak, font=f3, fill=(255, 250, 242))
 
-    _tempel_logo(base, 190, (m, m))
+    _tempel_logo(base, 250, (m, m))
     return base.convert("RGB")
 
 
