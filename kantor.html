@@ -313,11 +313,30 @@ function meja(a){
   R(x-15,y,30,4,'#a86f43');R(x-15,y,30,1,'#c48a54');R(x-13,y+4,2,9,'#7a4a30');R(x+11,y+4,2,9,'#7a4a30');
   R(x+9,y-3,3,3,'#ffffff');R(x+10,y-4,1,1,'#e0d4c4');
   R(x-14,y-3,3,3,'#c8742c');R(x-14,y-6,3,3,'#5fa36b');
-  R(x-5,y+15,10,3,'#7a4a30');R(x-4,y+18,1,3,'#5a3420');R(x+3,y+18,1,3,'#5a3420');
 }
+function kursi(a){
+  if(a.tipe==='dapur')return;
+  const cx=a.desk.x,cy=a.desk.y+16,tinggi=a.tipe==='kasir';
+  ctx.globalAlpha=.2;R(cx-6,cy+2,13,2,'#3b2a20');ctx.globalAlpha=1;
+  // kaki beroda
+  R(cx-5,cy+2,11,1,'#3b3f46');R(cx-5,cy+3,1,1,'#1f1f22');R(cx,cy+3,1,1,'#1f1f22');R(cx+5,cy+3,1,1,'#1f1f22');
+  R(cx,cy-1,1,3,'#7d858f');if(tinggi)R(cx,cy-3,1,2,'#7d858f');
+  // dudukan + sandaran tangan
+  const dy=tinggi?-2:0;
+  R(cx-5,cy-3+dy,11,2,'#3a3333');R(cx-5,cy-3+dy,11,1,'#4a4242');
+  R(cx-6,cy-7+dy,1,5,'#3a3333');R(cx+6,cy-7+dy,1,5,'#3a3333');R(cx-6,cy-7+dy,2,1,'#4a4242');R(cx+5,cy-7+dy,2,1,'#4a4242');
+  // sandaran punggung + logo Miss Piggy
+  R(cx-4,cy-11+dy,9,9,'#2f2a2a');R(cx-4,cy-11+dy,9,1,'#c48a54');R(cx-4,cy-3+dy,9,1,'#241f1f');
+  R(cx-4,cy-11+dy,1,9,'#3a3333');R(cx+4,cy-11+dy,1,9,'#3a3333');
+  LOGO.forEach((r,i)=>{for(let j=0;j<5;j++)if(r[j]!=='0')R(cx-2+j,cy-9+dy+i,1,1,r[j]==='2'?'#f3e3c8':'#c48a54')});
+}
+function lagiDuduk(a){return a.state==='work'&&a.tipe!=='dapur'&&Math.abs(a.x-a.desk.x)<1&&Math.abs(a.y-(a.desk.y+16))<1}
 const LOGO=['10201','02120','21012','02120','10201'];
 function orang(a){
-  const x=Math.round(a.x),y=Math.round(a.y),on=a.state==='work',bl=a.belakang;
+  const duduk=lagiDuduk(a);
+  const x=Math.round(a.x),on=a.state==='work',bl=a.belakang;
+  const y=Math.round(a.y)+(duduk?(a.tipe==='kasir'?0:2):0);
+  if(duduk){orangAtas(a,x,y,on,bl);return}
   ctx.globalAlpha=.2;R(x-4,y,9,2,'#3b2a20');ctx.globalAlpha=1;
   const s=a.moving?Math.floor(a.step)%2:0;
   // kaki + sepatu
@@ -340,6 +359,15 @@ function orang(a){
     R(x-2,y-13,1,1,'#f2a0a8');R(x+3,y-13,1,1,'#f2a0a8');
   }
 }
+function orangAtas(a,x,y,on,bl){
+  // posisi duduk (dilihat dari belakang): kaki ketutup meja & kursi
+  R(x-4,y-12,9,8,'#2f2a2a');
+  const ay=on?Math.floor(tick*9)%2:0;
+  R(x-5,y-11+ay,1,4,'#2f2a2a');R(x+5,y-11+(1-ay),1,4,'#2f2a2a');
+  R(x-5,y-7+ay,1,1,a.kulit);R(x+5,y-7+(1-ay),1,1,a.kulit);
+  R(x-3,y-18,7,6,a.kulit);
+  rambut(a,x,y,true);
+}
 function rambut(a,x,y,bl){
   const h=a.rambut,g=a.gaya;
   if(g==='koki'){R(x-3,y-19,7,1,h);R(x-3,y-23,7,4,'#ffffff');R(x-4,y-24,9,2,'#ffffff');if(bl)R(x-3,y-18,7,5,h);return}
@@ -359,7 +387,7 @@ function tempel(){
 function frame(now){
   const dt=Math.min(.05,(now-t0)/1000);t0=now;tick+=dt;
   update(dt);ruangan();
-  const d=[...agents.map(a=>({y:a.desk.y+12,f:()=>meja(a)})),...agents.map(a=>({y:a.y,f:()=>orang(a)}))];
+  const d=[...agents.map(a=>({y:a.desk.y+12,f:()=>meja(a)})),...agents.map(a=>({y:a.desk.y+16.5,f:()=>kursi(a)})),...agents.map(a=>({y:a.y,f:()=>orang(a)}))];
   d.sort((p,q)=>p.y-q.y).forEach(o=>o.f());
   ctx.globalAlpha=1;
   tempel();
