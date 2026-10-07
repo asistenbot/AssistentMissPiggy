@@ -612,6 +612,20 @@ class SheetsClient:
         ws.update_cells([gspread.Cell(r, idx_bayar + 1, status) for r in rows])
         return len(rows)
 
+    def get_orders_per_minggu(self, sampai_minggu: str, jumlah_minggu: int = 4) -> list:
+        """Order dikelompokkan per Minggu_PO, untuk `jumlah_minggu` PO
+        terakhir yang punya order (sampai dan termasuk sampai_minggu).
+        Return list (minggu, orders) urut lama ke baru."""
+        batas = datetime.datetime.strptime(sampai_minggu, "%Y-%m-%d").date()
+        grup = {}
+        for o in self.get_all_orders():
+            d = self._parse_minggu(o.get("Minggu_PO"))
+            if d is None or d > batas or not str(o.get("Nama_Customer", "")).strip():
+                continue
+            grup.setdefault(d.strftime("%Y-%m-%d"), []).append(o)
+        minggu = sorted(grup)[-jumlah_minggu:]
+        return [(m, grup[m]) for m in minggu]
+
     def set_lunas_sebelum(self, minggu_po: str) -> dict:
         """Tandai Lunas SEMUA baris yang Minggu_PO-nya SEBELUM minggu_po dan
         belum Lunas. Dipakai /lunaslama buat beresin order lama sekaligus

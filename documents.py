@@ -550,3 +550,92 @@ def build_daftar_belum_bayar(groups: list, judul_periode: str) -> str:
     lines.append(f"Total belum masuk: {rupiah(total_semua)} dari {len(groups)} order")
     lines.append("Tandai yang sudah bayar: /lunas Nama Customer")
     return "\n".join(lines)
+
+
+# ---------- UNTUNG KOTOR (staf Keuangan) ----------
+
+def _harga_dough_item(o, dough_price_map):
+    """Harga dough 1 item. Kalau nama rasa-nya sendiri ada di tab
+    SupplierDough (misal 'Bun Polos' yang di Orders kategorinya 'Roti'),
+    pakai itu; selain itu pakai harga dough kategorinya.
+    Return None kalau harganya belum diisi di SupplierDough."""
+    peta = {str(k).strip().lower(): v for k, v in dough_price_map.items()}
+    rasa = str(o.get("Rasa", "")).strip().lower()
+    kategori = str(o.get("Kategori", "")).strip().lower()
+    if rasa in peta:
+        return peta[rasa]
+    return peta.get(kategori)
+
+
+def hitung_untung(orders: list, dough_price_map: dict) -> dict:
+    """Omzet produk (Qty x Harga_Satuan, TANPA ongkir & add-on) dikurangi
+    biaya dough. Return dict ringkasan + rincian per kategori."""
+    per_kat = {}
+    tanpa_harga = set()
+    for o in orders:
+        qty = _angka(o.get("Qty"))
+        omzet = qty * _angka(o.get("Harga_Satuan"))
+        dough = _harga_dough_item(o, dough_price_map)
+        kategori = str(o.get("Kategori", "")).strip() or "Lainnya"
+        if dough is None:
+            tanpa_harga.add(kategori)
+            dough = 0
+        k = per_kat.setdefault(kategori, {"qty": 0, "omzet": 0, "biaya": 0})
+        k["qty"] += qty
+        k["omzet"] += omzet
+        k["biaya"] += qty * dough
+    omzet = sum(k["omzet"] for k in per_kat.values())
+    biaya = sum(k["biaya"] for k in per_kat.values())
+    return {
+        "omzet": omzet,
+        "biaya": biaya,
+        "untung": omzet - biaya,
+        "per_kategori": per_kat,
+        "tanpa_harga": sorted(tanpa_harga),
+        "jumlah_customer": len({str(o.get("Nama_Customer", "")).strip().lower() for o in orders}),
+    }
+
+
+def _persen(bagian, total):
+    return f"{round(bagian * 100 / total)}%" if total else "-"
+
+
+def build_laporan_untung(minggu_po: str, hasil: dict, tren: list) -> str:
+    """tren = list (minggu, hasil) beberapa PO terakhir, urut lama ke baru.
+    Teks polos (tanpa Markdown)."""
+    if not hasil["omzet"]:
+        teks = [f"Belum ada order untuk PO {minggu_po}."]
+    else:
+        teks = [
+            f"💰 UNTUNG KOTOR — PO {minggu_po}",
+            f"{hasil['jumlah_customer']} pelanggan",
+            "",
+            f"Omzet produk: {rupiah(hasil['omzet'])}",
+            f"Biaya dough: {rupiah(hasil['biaya'])}",
+            f"Untung kotor: {rupiah(hasil['untung'])} (margin {_persen(hasil['untung'], hasil['omzet'])})",
+            "",
+            "Per kategori (urut untung terbesar):",
+        ]
+        urut = sorted(hasil["per_kategori"].items(), key=lambda kv: kv[1]["omzet"] - kv[1]["biaya"], reverse=True)
+        for kat, k in urut:
+            untung = k["omzet"] - k["biaya"]
+            teks.append(
+                f"- {kat}: {k['qty']} pcs, untung {rupiah(untung)} (margin {_persen(untung, k['omzet'])})"
+            )
+        if hasil["tanpa_harga"]:
+            teks.append("")
+            teks.append(
+                "⚠️ Harga dough belum diisi di tab SupplierDough untuk: "
+                + ", ".join(hasil["tanpa_harga"])
+                + " (dihitung biaya Rp0, jadi untungnya kelihatan lebih besar)."
+            )
+
+    if len(tren) > 1:
+        teks.append("")
+        teks.append("Tren PO terakhir:")
+        for minggu, h in tren:
+            teks.append(f"- {minggu}: untung {rupiah(h['untung'])} dari omzet {rupiah(h['omzet'])}")
+
+    teks.append("")
+    teks.append("Belum termasuk ongkir, add-on, dan biaya lain (isian, kemasan, gas).")
+    return "\n".join(teks)

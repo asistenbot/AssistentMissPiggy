@@ -1089,6 +1089,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /lunas Nama Customer — tandain order udah dibayar\n"
         "- /belumlunas Nama Customer — batalin tanda lunas (kalau salah pencet)\n"
         "- /belumbayar — daftar order yang belum lunas + total uang yang belum masuk\n"
+        "- /untung — untung kotor PO terakhir (omzet dikurangi biaya dough) + tren\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1626,6 +1627,50 @@ async def lunas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def belumlunas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _ubah_status_bayar(update, context.args, "Belum")
+
+
+@owner_only
+async def untung_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Untung kotor per PO (omzet produk dikurangi biaya dough) + tren 4 PO.
+    Tanpa argumen: PO terakhir yang sudah lewat (atau PO berjalan kalau
+    belum ada). /untung 2026-10-08 buat PO tertentu."""
+    minggu_diminta = None
+    if context.args:
+        if not _POLA_TANGGAL.fullmatch(context.args[0]):
+            await update.message.reply_text("Format: /untung  atau  /untung 2026-10-08")
+            return
+        minggu_diminta = context.args[0]
+    sheets = get_sheets_client()
+    acuan = minggu_diminta or date_helpers.current_po_week_thursday()
+
+    def _ambil():
+        return sheets.get_orders_per_minggu(acuan, 5), sheets.get_dough_price_map()
+
+    try:
+        per_minggu, dough_map = await asyncio.wait_for(asyncio.to_thread(_ambil), timeout=30)
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas baca Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal baca Sheets: {e}")
+        return
+    if not per_minggu:
+        await update.message.reply_text("Belum ada data order untuk dihitung.")
+        return
+
+    if minggu_diminta:
+        cocok = [x for x in per_minggu if x[0] == minggu_diminta]
+        target = cocok[0] if cocok else (minggu_diminta, [])
+    else:
+        # Default: PO terakhir yang SUDAH lewat (datanya sudah lengkap);
+        # kalau belum ada PO lewat, pakai PO berjalan.
+        sudah_lewat = [x for x in per_minggu if x[0] < acuan]
+        target = sudah_lewat[-1] if sudah_lewat else per_minggu[-1]
+
+    tren = [(m, documents.hitung_untung(o, dough_map)) for m, o in per_minggu[-4:]]
+    hasil = documents.hitung_untung(target[1], dough_map)
+    kantor.catat("keuangan", f"Hitung untung PO {target[0]}: {documents.rupiah(hasil['untung'])}")
+    await update.message.reply_text(documents.build_laporan_untung(target[0], hasil, tren))
 
 
 @owner_only
@@ -3833,6 +3878,7 @@ def main():
     app.add_handler(CommandHandler("belumlunas", belumlunas_cmd))
     app.add_handler(CommandHandler("belumbayar", belumbayar_cmd))
     app.add_handler(CommandHandler("lunaslama", lunaslama_cmd))
+    app.add_handler(CommandHandler("untung", untung_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --

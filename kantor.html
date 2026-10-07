@@ -86,14 +86,15 @@ const ov=document.getElementById('ov');
 const KEY=new URLSearchParams(location.search).get('k')||'';
 
 const agents=[
-  {id:'order',name:'Pembaca Order',shirt:'#ff8fab',hair:'#3b2416',desk:{x:40,y:70}},
-  {id:'kasir',name:'Kasir',shirt:'#7cc6f2',hair:'#1c1c24',desk:{x:100,y:70}},
-  {id:'produksi',name:'Produksi',shirt:'#e6a95a',hair:'#6b3a1e',desk:{x:160,y:70}},
+  {id:'order',name:'Pembaca Order',shirt:'#ff8fab',hair:'#3b2416',desk:{x:34,y:70}},
+  {id:'kasir',name:'Kasir',shirt:'#7cc6f2',hair:'#1c1c24',desk:{x:76,y:70}},
+  {id:'produksi',name:'Produksi',shirt:'#e6a95a',hair:'#6b3a1e',desk:{x:118,y:70}},
+  {id:'keuangan',name:'Keuangan',shirt:'#9be08a',hair:'#2a1c12',desk:{x:160,y:70}},
 ];
 const byId={};
 agents.forEach((a,i)=>{
   byId[a.id]=a;
-  a.x=60+i*40;a.y=104;a.tx=a.x;a.ty=a.y;a.state='idle';a.timer=1+Math.random()*2;a.queue=[];a.step=0;
+  a.x=40+i*40;a.y=104;a.tx=a.x;a.ty=a.y;a.state='idle';a.timer=1+Math.random()*2;a.queue=[];a.step=0;
   a.bub=document.createElement('div');a.bub.className='bubble';a.bub.hidden=true;ov.appendChild(a.bub);
   a.tag=document.createElement('div');a.tag.className='name';a.tag.style.background=a.shirt;a.tag.textContent=a.name;ov.appendChild(a.tag);
 });
