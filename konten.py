@@ -131,6 +131,28 @@ def baca_panduan(sheets):
     return [r[0].strip() for r in ws.get_all_values()[1:] if r and r[0].strip()]
 
 
+def _ws_panduan(sheets):
+    baca_panduan(sheets)  # pastikan tab ada
+    return sheets.sheet.worksheet(TAB_PANDUAN)
+
+
+def tambah_panduan(sheets, aturan):
+    _ws_panduan(sheets).append_row([aturan], value_input_option="RAW")
+    return baca_panduan(sheets)
+
+
+def hapus_panduan(sheets, nomor):
+    """nomor mulai dari 1 (sesuai daftar /panduan)."""
+    ws = _ws_panduan(sheets)
+    rows = ws.get_all_values()
+    isi = [(i, r[0].strip()) for i, r in enumerate(rows[1:], start=2) if r and r[0].strip()]
+    if not 1 <= nomor <= len(isi):
+        return None
+    baris, teks = isi[nomor - 1]
+    ws.delete_rows(baris)
+    return teks
+
+
 def _lihat_foto(img, menu_text, panduan):
     from ai_parser import client, _safe_json_loads
     prompt = (

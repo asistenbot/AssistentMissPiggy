@@ -1193,6 +1193,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /katalogfoto ulang — cek ulang semua foto (habis ubah tab Panduan Foto)\n"
         "- /hold — tahan foto produk yang belum siap dijual (reply ke file fotonya / kata kunci)\n"
         "- /lepas — lepas foto dari HOLD\n"
+        "- /panduan — lihat/tambah/hapus ciri produk buat AI pengecek foto\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1978,6 +1979,35 @@ async def hold_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def lepas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _ubah_hold(update, context, False)
+
+
+@owner_only
+async def panduan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lihat/ubah ciri-ciri produk untuk AI pengecek foto.
+    /panduan                     -> lihat daftar
+    /panduan tambah <aturan>     -> tambah aturan
+    /panduan hapus <nomor>       -> hapus aturan"""
+    sheets = get_sheets_client()
+    args = list(context.args)
+    try:
+        if args and args[0].lower() == "tambah" and len(args) > 1:
+            daftar = await asyncio.to_thread(konten.tambah_panduan, sheets, " ".join(args[1:]))
+            pesan = "✅ Aturan ditambahkan."
+        elif args and args[0].lower() == "hapus" and len(args) == 2 and args[1].isdigit():
+            terhapus = await asyncio.to_thread(konten.hapus_panduan, sheets, int(args[1]))
+            daftar = await asyncio.to_thread(konten.baca_panduan, sheets)
+            pesan = f"🗑️ Dihapus: {terhapus}" if terhapus else "Nomor aturan nggak ada."
+        else:
+            daftar = await asyncio.to_thread(konten.baca_panduan, sheets)
+            pesan = "📋 Panduan ciri produk untuk AI pengecek foto:"
+    except Exception as e:
+        await update.message.reply_text(f"Gagal baca/ubah panduan: {e}")
+        return
+    isi = "\n".join(f"{i}. {a}" for i, a in enumerate(daftar, 1))
+    await update.message.reply_text(
+        f"{pesan}\n\n{isi}\n\n"
+        "Tambah: /panduan tambah <aturan>\nHapus: /panduan hapus <nomor>\n"
+        "Habis mengubah, jalankan /katalogfoto ulang biar semua foto dicek pakai panduan baru.")
 
 
 @owner_only
@@ -4215,6 +4245,7 @@ def main():
     app.add_handler(CommandHandler("konten", konten_cmd))
     app.add_handler(CommandHandler("katalogfoto", katalogfoto_cmd))
     app.add_handler(CommandHandler("hold", hold_cmd))
+    app.add_handler(CommandHandler("panduan", panduan_cmd))
     app.add_handler(CommandHandler("lepas", lepas_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
