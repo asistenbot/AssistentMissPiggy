@@ -204,77 +204,109 @@ def _rapikan(img):
     return img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
 
 
-def _logo(img, lebar_rel=0.30, margin=44, pojok="kanan-bawah"):
-    if not os.path.exists(_WORDMARK):
-        return img
-    logo = Image.open(_WORDMARK).convert("RGBA")
-    lebar = int(UKURAN[0] * lebar_rel)
-    logo = logo.resize((lebar, int(logo.height * lebar / logo.width)), Image.LANCZOS)
-    bayangan = Image.new("RGBA", logo.size, (0, 0, 0, 0))
-    bayangan.putalpha(logo.getchannel("A").point(lambda a: int(a * 0.55)))
-    bayangan = bayangan.filter(ImageFilter.GaussianBlur(6))
-    if pojok == "kanan-bawah":
-        pos = (UKURAN[0] - lebar - margin, UKURAN[1] - logo.height - margin)
-    else:
-        pos = (margin, margin)
-    base = img.convert("RGBA")
-    base.alpha_composite(bayangan, (pos[0] + 3, pos[1] + 4))
-    base.alpha_composite(logo, pos)
-    return base.convert("RGB")
+_ICON = os.path.join(_DIR, "logo_icon.png")
+COKLAT_TUA = (43, 37, 35)
+COKLAT = (74, 47, 33)
+
+
+def logo_bulat(diameter):
+    """Logo bulat: lingkaran arang + simbol bintang Miss Piggy + ring krem."""
+    skala = 4  # gambar besar lalu diperkecil biar pinggirannya halus
+    d = diameter * skala
+    lap = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(lap)
+    dr.ellipse([0, 0, d - 1, d - 1], fill=(*KREM, 255))
+    tebal = int(d * 0.035)
+    dr.ellipse([tebal, tebal, d - 1 - tebal, d - 1 - tebal], fill=(*COKLAT_TUA, 255))
+    if os.path.exists(_ICON):
+        ikon = Image.open(_ICON).convert("RGBA")
+        ukuran = int(d * 0.58)
+        ikon.thumbnail((ukuran, ukuran), Image.LANCZOS)
+        lap.alpha_composite(ikon, ((d - ikon.width) // 2, (d - ikon.height) // 2))
+    return lap.resize((diameter, diameter), Image.LANCZOS)
+
+
+def _tempel_logo(base_rgba, diameter, pos):
+    logo = logo_bulat(diameter)
+    bayang = Image.new("RGBA", (diameter + 40, diameter + 40), (0, 0, 0, 0))
+    ImageDraw.Draw(bayang).ellipse([20, 26, 20 + diameter, 26 + diameter], fill=(0, 0, 0, 90))
+    bayang = bayang.filter(ImageFilter.GaussianBlur(10))
+    base_rgba.alpha_composite(bayang, (pos[0] - 20, pos[1] - 20))
+    base_rgba.alpha_composite(logo, pos)
 
 
 def foto_siap_posting(img):
-    """Foto tanpa tanggal: rapikan + logo kecil di pojok."""
-    return _logo(_rapikan(img))
+    """Foto tanpa tanggal: rapikan + logo bulat kecil di pojok kanan bawah."""
+    base = _rapikan(img).convert("RGBA")
+    dia = 104
+    _tempel_logo(base, dia, (UKURAN[0] - dia - 40, UKURAN[1] - dia - 40))
+    return base.convert("RGB")
 
 
-def _gradasi(img, dari_y, tinggi, alpha_maks):
-    lapis = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
-    d = ImageDraw.Draw(lapis)
-    for i in range(tinggi):
-        a = int(alpha_maks * (i / tinggi) ** 1.3)
-        d.line([(0, dari_y + i), (UKURAN[0], dari_y + i)], fill=(28, 18, 14, a))
-    base = img.convert("RGBA")
-    base.alpha_composite(lapis)
-    return base
+def _teks_pas(draw, teks, path, weight, ukuran, lebar_maks):
+    """Kecilkan font sampai teksnya muat di lebar_maks."""
+    while ukuran > 18:
+        f = _font(path, ukuran, weight)
+        if draw.textlength(teks, font=f) <= lebar_maks:
+            return f
+        ukuran -= 2
+    return _font(path, ukuran, weight)
 
 
 def poster_open_po(img, tutup, kirim, web="", wa=""):
-    base = _gradasi(_rapikan(img), 520, UKURAN[1] - 520, 235)
-    atas = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
-    da = ImageDraw.Draw(atas)
-    for i in range(260):
-        da.line([(0, i), (UKURAN[0], i)], fill=(28, 18, 14, int(150 * (1 - i / 260))))
-    base.alpha_composite(atas)
+    """Poster Open PO: foto tetap jadi bintang utama, info di kartu krem
+    kecil di bawah, logo bulat di pojok kiri atas."""
+    base = _rapikan(img).convert("RGBA")
+    W, H = UKURAN
+
+    # gradasi tipis di bawah biar kartu nyatu sama foto
+    lapis = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
+    dl = ImageDraw.Draw(lapis)
+    for i in range(380):
+        dl.line([(0, H - 380 + i), (W, H - 380 + i)], fill=(30, 20, 15, int(120 * (i / 380) ** 1.6)))
+    base.alpha_composite(lapis)
+
+    # kartu info
+    m = 56
+    kartu_h = 352
+    y0 = H - m - kartu_h
+    kartu = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
+    dk = ImageDraw.Draw(kartu)
+    dk.rounded_rectangle([m + 4, y0 + 10, W - m + 4, H - m + 10], radius=34, fill=(0, 0, 0, 70))
+    kartu = kartu.filter(ImageFilter.GaussianBlur(12))
+    base.alpha_composite(kartu)
     d = ImageDraw.Draw(base)
-    x = 72
+    d.rounded_rectangle([m, y0, W - m, H - m], radius=34, fill=(251, 244, 233, 240))
 
-    # label kecil + judul besar
-    f_label = _font(_FONT_TEKS, 34, b"ExtraBold")
-    label = "PRE-ORDER MINGGU INI"
+    x = m + 48
+    lebar = W - 2 * m - 96
+    f_label = _font(_FONT_TEKS, 26, b"ExtraBold")
+    label = "PRE-ORDER"
     lw = d.textlength(label, font=f_label)
-    d.rounded_rectangle([x, 760, x + lw + 44, 816], radius=28, fill=PINK)
-    d.text((x + 22, 766), label, font=f_label, fill=(60, 20, 34))
+    d.rounded_rectangle([x, y0 + 38, x + lw + 32, y0 + 78], radius=20, fill=PINK)
+    d.text((x + 16, y0 + 43), label, font=f_label, fill=(255, 255, 255))
 
-    f_judul = _font(_FONT_JUDUL, 190, b"Bold")
-    d.text((x + 6, 834 + 6), "OPEN PO", font=f_judul, fill=(0, 0, 0, 110))
-    d.text((x, 834), "OPEN PO", font=f_judul, fill=KREM)
+    f_judul = _font(_FONT_JUDUL, 92, b"SemiBold")
+    d.text((x, y0 + 84), "Open PO", font=f_judul, fill=COKLAT)
 
-    f_info = _font(_FONT_TEKS, 46, b"Bold")
-    f_info2 = _font(_FONT_TEKS, 40, b"SemiBold")
-    y = 1062
-    d.text((x, y), f"Tutup: {_tgl(tutup)}", font=f_info, fill=KREM)
-    d.text((x, y + 62), f"Kirim/ambil: {_tgl(kirim)} · {config.DELIVERY_WINDOW.replace(':', '.')}",
-           font=f_info2, fill=(236, 210, 175))
+    baris1 = f"Tutup {_tgl(tutup)}"
+    baris2 = f"Kirim & ambil {_tgl(kirim)}, {config.DELIVERY_WINDOW.replace(':', '.')}"
+    f1 = _teks_pas(d, baris1, _FONT_TEKS, b"Bold", 34, lebar)
+    f2 = _teks_pas(d, baris2, _FONT_TEKS, b"SemiBold", 30, lebar)
+    d.text((x, y0 + 190), baris1, font=f1, fill=COKLAT)
+    d.text((x, y0 + 232), baris2, font=f2, fill=(120, 86, 60))
 
-    f_kecil = _font(_FONT_TEKS, 34, b"Bold")
-    kontak = "   ·   ".join(t for t in (web, f"WA {wa}" if wa else "") if t)
+    kontak = "  ·  ".join(t for t in (web, f"WA {wa}" if wa else "") if t)
     if kontak:
-        d.line([(x, y + 136), (UKURAN[0] - x, y + 136)], fill=(*KARAMEL, 255), width=3)
-        d.text((x, y + 152), kontak, font=f_kecil, fill=KREM)
+        f3 = _teks_pas(d, kontak, _FONT_TEKS, b"Bold", 26, lebar)
+        tinggi_pita = 54
+        d.rounded_rectangle([m, H - m - tinggi_pita, W - m, H - m], radius=34, fill=(*KARAMEL, 255))
+        d.rectangle([m, H - m - tinggi_pita, W - m, H - m - tinggi_pita + 34], fill=(*KARAMEL, 255))
+        tw = d.textlength(kontak, font=f3)
+        d.text(((W - tw) / 2, H - m - tinggi_pita + 12), kontak, font=f3, fill=(255, 250, 242))
 
-    hasil = base.convert("RGB")
-    return _logo(hasil, lebar_rel=0.34, margin=56, pojok="kiri-atas")
+    _tempel_logo(base, 150, (m, m))
+    return base.convert("RGB")
 
 
 def ke_jpeg(img):
@@ -346,14 +378,16 @@ async def kirim_paket(bot, chat_id, sheets, thread_id=None):
                  "Caption-nya bisa minta lewat /promo."),
     )
     if paket["foto"]:
-        media = [InputMediaDocument(media=b, filename=f"MissPiggy_{kirim:%Y%m%d}_{i + 1}.jpg")
-                 for i, b in enumerate(paket["foto"])]
-        media[-1] = InputMediaDocument(
-            media=paket["foto"][-1], filename=f"MissPiggy_{kirim:%Y%m%d}_{len(paket['foto'])}.jpg",
-            caption=(f"📸 {len(paket['foto'])} foto siap posting minggu ini (tanpa tanggal), "
-                     "ukuran 4:5 buat IG & TikTok. Total foto di folder: "
-                     f"{paket['jumlah_folder']}."),
-        )
+        jumlah = len(paket["foto"])
+        caption = (f"📸 {jumlah} foto siap posting minggu ini (tanpa tanggal), "
+                   "ukuran 4:5 buat IG & TikTok. Total foto di folder: "
+                   f"{paket['jumlah_folder']}.")
+        media = []
+        for i, b in enumerate(paket["foto"]):
+            media.append(InputMediaDocument(
+                media=b, filename=f"MissPiggy_{kirim:%Y%m%d}_{i + 1}.jpg",
+                caption=caption if i == jumlah - 1 else None,
+            ))
         await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media)
     if len(paket["foto"]) < JUMLAH_FOTO:
         await bot.send_message(
