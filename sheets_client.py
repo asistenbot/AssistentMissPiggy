@@ -612,6 +612,38 @@ class SheetsClient:
         ws.update_cells([gspread.Cell(r, idx_bayar + 1, status) for r in rows])
         return len(rows)
 
+    def set_lunas_sebelum(self, minggu_po: str) -> dict:
+        """Tandai Lunas SEMUA baris yang Minggu_PO-nya SEBELUM minggu_po dan
+        belum Lunas. Dipakai /lunaslama buat beresin order lama sekaligus
+        (waktu kolom Status_Bayar baru dibuat). Return {baris, customer}."""
+        ws = self.sheet.worksheet(config.SHEET_ORDERS)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return {"baris": 0, "customer": 0}
+        header = [h.strip().replace(" ", "_") for h in all_values[0]]
+        try:
+            idx_minggu = header.index("Minggu_PO")
+            idx_nama = header.index("Nama_Customer")
+        except ValueError:
+            return {"baris": 0, "customer": 0}
+        idx_bayar = self._ensure_kolom(ws, all_values[0], self.KOLOM_STATUS_BAYAR)
+        batas = datetime.datetime.strptime(minggu_po, "%Y-%m-%d").date()
+        cells, customer = [], set()
+        for i, row in enumerate(all_values[1:], start=2):
+            if len(row) <= max(idx_minggu, idx_nama) or not row[idx_nama].strip():
+                continue
+            d = self._parse_minggu(row[idx_minggu])
+            if d is None or d >= batas:
+                continue
+            sekarang = row[idx_bayar].strip().lower() if len(row) > idx_bayar else ""
+            if sekarang == "lunas":
+                continue
+            cells.append(gspread.Cell(i, idx_bayar + 1, "Lunas"))
+            customer.add((d, _norm_nama(row[idx_nama])))
+        if cells:
+            ws.update_cells(cells)
+        return {"baris": len(cells), "customer": len(customer)}
+
     def rollover_delivered_orders(self, now: datetime.datetime = None) -> int:
         """
         Order yang Tanggal_Kirim-nya udah nyampe cutoff jam 10:00 WIB PADA

@@ -1629,6 +1629,27 @@ async def belumlunas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @owner_only
+async def lunaslama_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sekali pakai: tandai Lunas semua order dari PO yang sudah lewat
+    (sebelum PO minggu berjalan). PO minggu ini nggak disentuh."""
+    minggu_po = date_helpers.current_po_week_thursday()
+    sheets = get_sheets_client()
+    try:
+        hasil = await asyncio.wait_for(asyncio.to_thread(sheets.set_lunas_sebelum, minggu_po), timeout=60)
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas update Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal update status bayar: {e}")
+        return
+    kantor.catat("kasir", f"Beresin order lama: {hasil['customer']} order jadi lunas")
+    await update.message.reply_text(
+        f"✅ {hasil['customer']} order dari PO sebelum {minggu_po} ditandai LUNAS "
+        f"({hasil['baris']} baris). Order PO {minggu_po} nggak diubah."
+    )
+
+
+@owner_only
 async def belumbayar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minggu_po = None
     if context.args:
@@ -3811,6 +3832,7 @@ def main():
     app.add_handler(CommandHandler("lunas", lunas_cmd))
     app.add_handler(CommandHandler("belumlunas", belumlunas_cmd))
     app.add_handler(CommandHandler("belumbayar", belumbayar_cmd))
+    app.add_handler(CommandHandler("lunaslama", lunaslama_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --
