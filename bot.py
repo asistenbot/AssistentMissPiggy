@@ -1062,6 +1062,68 @@ def _format_catatan_block(parsed):
     return text
 
 
+def _hp_kosong(v):
+    v = str(v or "").strip()
+    return sum(ch.isdigit() for ch in v) < 8
+
+
+def _alamat_kosong(v):
+    return str(v or "").strip() in ("", "-")
+
+
+async def _lengkapi_dari_order_lama(parsed, sheets):
+    """Pembaca Order: kalau pelanggan LAMA (nama sama persis dengan order
+    sebelumnya) tapi No HP-nya nggak disebut, isi otomatis dari order
+    sebelumnya. Alamat juga diisi kalau metodenya diantar dan alamatnya
+    kosong. Kalau pelanggan itu punya beberapa No HP/alamat berbeda, pilih
+    yang alamatnya paling mirip (atau order paling baru). Admin tetap lihat
+    di preview dan bisa koreksi sebelum Simpan."""
+    nama = str(parsed.get("nama") or "").strip()
+    if not nama:
+        return
+    butuh_hp = _hp_kosong(parsed.get("no_hp"))
+    butuh_alamat = _alamat_kosong(parsed.get("alamat")) and _is_delivery_metode(parsed.get("metode"))
+    if not (butuh_hp or butuh_alamat):
+        return
+    try:
+        records = await asyncio.wait_for(asyncio.to_thread(sheets.get_all_orders), timeout=15)
+    except Exception:
+        return
+    target = _norm_nama_bot(nama)
+    cocok = [o for o in records if _norm_nama_bot(o.get("Nama_Customer", "")) == target]
+    if not cocok:
+        return
+
+    # kandidat unik per (No HP, Alamat), urutan terakhir = paling baru
+    kandidat = {}
+    for o in cocok:
+        hp = str(o.get("No_HP", "")).strip()
+        alamat = str(o.get("Alamat", "")).strip()
+        kandidat[(hp, alamat)] = (hp, alamat)
+    daftar = list(kandidat.values())
+    pilihan = daftar[-1]
+    alamat_baru = str(parsed.get("alamat") or "").strip()
+    if not _alamat_kosong(alamat_baru) and len(daftar) > 1:
+        import difflib
+        pilihan = max(daftar, key=lambda k: difflib.SequenceMatcher(
+            None, k[1].lower(), alamat_baru.lower()).ratio())
+
+    info = []
+    if butuh_hp and not _hp_kosong(pilihan[0]):
+        parsed["no_hp"] = pilihan[0]
+        info.append("No HP")
+    if butuh_alamat and not _alamat_kosong(pilihan[1]):
+        parsed["alamat"] = pilihan[1]
+        info.append("Alamat")
+    if info:
+        hp_beda = {k[0] for k in daftar if not _hp_kosong(k[0])}
+        teks = " & ".join(info) + " diisi otomatis dari order sebelumnya"
+        if len(hp_beda) > 1:
+            teks += f" (pelanggan ini punya {len(hp_beda)} nomor berbeda, cek ya)"
+        parsed["_info_otomatis"] = teks
+        kantor.catat("order", f"Isi otomatis data {nama}: {', '.join(info)}")
+
+
 def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
     """Susun teks preview order BARU (belum disimpan) dari hasil parse AI --
     dipake bareng sama alur teks (handle_text) DAN alur gambar (handle_photo),
@@ -1086,6 +1148,9 @@ def _build_new_order_preview_text(parsed, title="Hasil Parse:"):
         f"{_format_addon_line(parsed)}"
         f"{_format_catatan_block(parsed)}\n"
     )
+
+    if parsed.get("_info_otomatis"):
+        preview += f"ℹ️ {parsed['_info_otomatis']}.\n\n"
 
     if parsed.get("kelengkapan") == "kurang_lengkap":
         preview += "⚠️ ADA YANG PERLU DICEK (lihat Peringatan AI di atas) sebelum disimpan!\n\n"
@@ -1119,7 +1184,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /untung — untung kotor PO terakhir (omzet dikurangi biaya dough) + tren\n"
         "- /pelanggan — pelanggan paling setia + yang lama nggak order (buat dikabari)\n"
         "- /promo — draf pengumuman PO untuk TikTok, WA, dan IG (bisa tambah catatan)\n"
-        "- /fotopo — poster Open PO + 7 foto sosmed dari folder Drive (otomatis tiap Kamis 17.00)\n"
+        "- /fotopo — poster Open PO + 7 foto sosmed dari folder Drive (otomatis tiap Jumat 17.00)\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1800,7 +1865,7 @@ async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def fotopo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bikin poster Open PO + 7 foto sosmed sekarang juga (versi manual dari
-    kiriman otomatis tiap Kamis)."""
+    kiriman otomatis tiap Jumat)."""
     await update.message.reply_text("🖼️ Lagi ambil foto dari Drive dan ngedit, tunggu sebentar...")
     chat_id, thread_id = _tujuan_marketing(update)
     try:
@@ -2760,6 +2825,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             jenis_otomatis, qty_otomatis = hasil_addon_otomatis
             _set_addon(parsed, jenis_otomatis, qty_otomatis)
 
+    await _lengkapi_dari_order_lama(parsed, get_sheets_client())
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Parse:")
     keyboard = build_confirm_keyboard(parsed, order_id)
@@ -2868,6 +2934,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             jenis_otomatis, qty_otomatis = hasil_addon_otomatis
             _set_addon(parsed, jenis_otomatis, qty_otomatis)
 
+    await _lengkapi_dari_order_lama(parsed, get_sheets_client())
     order_id = _store_pending_order(context, parsed)
     preview = _build_new_order_preview_text(parsed, "Hasil Baca Gambar:")
     keyboard = build_confirm_keyboard(parsed, order_id)

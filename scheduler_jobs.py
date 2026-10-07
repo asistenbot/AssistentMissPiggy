@@ -1,6 +1,6 @@
 """
 Jadwal otomatis: cuma FOTO MINGGUAN (poster Open PO + 7 foto sosmed) tiap
-Kamis 17:00 WIB, atas permintaan admin. Selain itu semua auto-kirim terjadwal
+Jumat 17:00 WIB (untuk PO Kamis berikutnya), atas permintaan admin. Selain itu semua auto-kirim terjadwal
 SUDAH DIMATIKAN atas
 permintaan admin (baik rekap produksi mingguan tiap Rabu MAUPUN laporan
 bulanan tanggal 1). Sekarang admin minta manual aja lewat /rekap dan
@@ -34,11 +34,12 @@ def setup_scheduler(bot):
     #     args=[bot],
     #     id="auto_monthly_report",
     # )
-    # Foto mingguan (poster Open PO + 7 foto sosmed) tiap Kamis jam 17:00 WIB
-    # -- diminta admin. Jam bisa diubah lewat env FOTO_JAM (0-23).
+    # Foto mingguan (poster Open PO + 7 foto sosmed) tiap JUMAT jam 17:00 WIB
+    # -- diminta admin: PO dibuka abis pengiriman Kamis, jadi Jumat poster
+    # buat PO Kamis berikutnya. Jam bisa diubah lewat env FOTO_JAM (0-23).
     scheduler.add_job(
         send_foto_mingguan,
-        CronTrigger(day_of_week="thu", hour=int(os.getenv("FOTO_JAM", "17")), minute=0,
+        CronTrigger(day_of_week="fri", hour=int(os.getenv("FOTO_JAM", "17")), minute=0,
                     timezone=config.TIMEZONE),
         args=[bot],
         id="foto_mingguan",
