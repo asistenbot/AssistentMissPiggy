@@ -721,3 +721,33 @@ def build_laporan_pelanggan(pelanggan: list, minggu_po: str, minggu_ke_belakang:
     teks.append("")
     teks.append("Omzet di atas tanpa ongkir. Kabari lewat WA pas PO dibuka.")
     return "\n".join(teks)
+
+
+# ---------- PERKIRAAN TAGIHAN SUPPLIER (internal admin) ----------
+
+def build_perkiraan_supplier(minggu_po: str, orders: list, dough_price_map: dict) -> str | None:
+    """Perkiraan uang yang perlu disiapkan buat bayar supplier dough untuk
+    1 PO. Khusus admin, sengaja TIDAK masuk PDF yang dikirim ke supplier."""
+    if not orders:
+        return None
+    per_kat = {}
+    tanpa_harga = set()
+    for o in orders:
+        qty = _angka(o.get("Qty"))
+        kategori = str(o.get("Kategori", "")).strip() or "Lainnya"
+        harga = _harga_dough_item(o, dough_price_map)
+        if harga is None:
+            tanpa_harga.add(kategori)
+            harga = 0
+        k = per_kat.setdefault(kategori, [0, 0])
+        k[0] += qty
+        k[1] += qty * harga
+    total = sum(v[1] for v in per_kat.values())
+    teks = [f"🧾 PERKIRAAN TAGIHAN SUPPLIER — PO {minggu_po}", "(khusus admin, nggak ikut PDF)", ""]
+    for kat, (qty, bayar) in sorted(per_kat.items(), key=lambda kv: kv[1][1], reverse=True):
+        teks.append(f"- {kat}: {qty} pcs = {rupiah(bayar)}")
+    teks.append("")
+    teks.append(f"Siapkan sekitar: {rupiah(total)}")
+    if tanpa_harga:
+        teks.append("⚠️ Harga dough belum diisi untuk: " + ", ".join(sorted(tanpa_harga)) + " (dihitung Rp0).")
+    return "\n".join(teks)

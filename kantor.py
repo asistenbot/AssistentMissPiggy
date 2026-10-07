@@ -16,10 +16,11 @@ Agent yang ada:
 - "produksi" = Produksi (rekap, surat jalan, /kirim, laporan bulanan)
 - "keuangan" = Keuangan (/untung)
 - "pelanggan" = Pelanggan Setia (/pelanggan)
+- "marketing" = Marketing (/promo, pakai AI)
 
 Keamanan: halaman & data cuma bisa dibuka pakai token rahasia
 (env KANTOR_TOKEN). Kalau env-nya kosong, fitur ini MATI total (404).
-Nggak ada biaya AI sama sekali -- cuma baca catatan di memori + Sheets
+Halaman ini sendiri nggak pakai AI -- cuma baca catatan di memori + Sheets
 (di-cache 60 detik).
 """
 
@@ -36,7 +37,7 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 KANTOR_TOKEN = os.getenv("KANTOR_TOKEN", "")
-AGENTS = ("order", "kasir", "produksi", "keuangan", "pelanggan")
+AGENTS = ("order", "kasir", "produksi", "keuangan", "pelanggan", "marketing")
 
 _events = collections.deque(maxlen=100)
 _counter = itertools.count(1)

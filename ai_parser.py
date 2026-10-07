@@ -794,3 +794,41 @@ def parse_bundle_definition(raw_text: str, catalog: list = None, existing_bundle
         else:
             slot["kecuali"] = [str(r).strip() for r in kecuali if str(r).strip()]
     return result
+
+
+# ---------- MARKETING: DRAF PROMO PO ----------
+
+PROMO_SYSTEM_PROMPT = """Kamu staf marketing Miss Piggy, home bakery di Bandung yang jualan roti, roti gandum, donat, dan roti tawar sistem PO mingguan.
+
+Fakta yang WAJIB benar:
+- Miss Piggy terbuka sebagai bakery NON-HALAL. Item bertanda (Pork) mengandung babi. Jangan pernah bilang halal, dan tulis tanda (Pork) apa adanya.
+- Harga dan nama menu HANYA dari daftar menu yang diberikan. Jangan mengarang menu, harga, diskon, atau promo yang tidak disebut di catatan admin.
+- Info PO (tanggal tutup, tanggal kirim/ambil, jam) pakai persis dari data yang diberikan.
+- Kalau kontak/link order tidak diberikan, tulis [link order] sebagai tempat yang nanti diisi admin.
+
+Tulis 3 draf dalam bahasa Indonesia santai khas jualan rumahan Bandung:
+1. "tiktok": caption TikTok pendek (maks 300 karakter) + 5-8 hashtag relevan, plus 1 baris ide video singkat diawali "Ide video:".
+2. "whatsapp": pesan broadcast/story WA yang enak dibaca di HP: pembuka hangat, info PO, daftar menu ringkas per kategori dengan harga, cara order. Format WA: *tebal* boleh.
+3. "instagram": caption feed IG (maks 1200 karakter) dengan paragraf pendek, emoji secukupnya, info PO, menu andalan, cara order, lalu 8-12 hashtag.
+
+Balas HANYA JSON valid: {"tiktok": "...", "whatsapp": "...", "instagram": "..."}"""
+
+
+def buat_draf_promo(info_po: str, menu_text: str, catatan: str = "") -> dict:
+    """Return {'tiktok','whatsapp','instagram'} atau {'error': '...'}."""
+    isi = f"INFO PO:\n{info_po}\n\nDAFTAR MENU:\n{menu_text}"
+    if catatan:
+        isi += f"\n\nCATATAN DARI ADMIN (ikuti):\n{catatan}"
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=2500,
+            system=PROMO_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": isi}],
+        )
+    except Exception as e:
+        return {"error": f"Gagal hubungi AI: {e}"}
+    hasil = _safe_json_loads(response.content[0].text)
+    if not isinstance(hasil, dict) or not all(k in hasil for k in ("tiktok", "whatsapp", "instagram")):
+        return {"error": "Format balasan AI nggak sesuai. Coba /promo lagi."}
+    return hasil

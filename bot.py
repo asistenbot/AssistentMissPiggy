@@ -8,6 +8,7 @@ import json
 import logging
 import datetime
 import re
+import os
 import uuid
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,6 +28,7 @@ import kantor
 from sheets_client import get_sheets_client, is_komposisi_bundle_valid
 from ai_parser import (
     parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
+    buat_draf_promo,
     parse_produk_baru, parse_bundle_definition,
 )
 from scheduler_jobs import setup_scheduler
@@ -1091,6 +1093,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /belumbayar — daftar order yang belum lunas + total uang yang belum masuk\n"
         "- /untung — untung kotor PO terakhir (omzet dikurangi biaya dough) + tren\n"
         "- /pelanggan — pelanggan paling setia + yang lama nggak order (buat dikabari)\n"
+        "- /promo — draf pengumuman PO untuk TikTok, WA, dan IG (bisa tambah catatan)\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1273,6 +1276,16 @@ async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Gagal generate/kirim PDF rekap produksi: {e}")
+
+    # Perkiraan tagihan supplier: dikirim ke chat tempat admin ngetik /rekap
+    # (BUKAN ke grup rekap produksi, yang mungkin di-forward ke supplier).
+    try:
+        dough_map = await asyncio.wait_for(asyncio.to_thread(sheets.get_dough_price_map), timeout=15)
+        text_supplier = documents.build_perkiraan_supplier(minggu_po, orders, dough_map)
+        if text_supplier:
+            await update.message.reply_text(text_supplier)
+    except Exception as e:
+        logger.error(f"Gagal hitung perkiraan tagihan supplier: {e}")
 
     text_kirim = documents.build_delivery_kirim(minggu_po, orders)
     if text_kirim:
@@ -1700,6 +1713,59 @@ async def pelanggan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Telegram batasi 4096 karakter per pesan
     for i in range(0, len(teks), 4000):
         await update.message.reply_text(teks[i:i + 4000])
+
+
+_HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+_BULAN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
+          "Agustus", "September", "Oktober", "November", "Desember"]
+
+
+def _tanggal_indo(d: datetime.date) -> str:
+    return f"{_HARI[d.weekday()]} {d.day} {_BULAN[d.month - 1]}"
+
+
+@owner_only
+async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Staf Marketing: draf pengumuman PO untuk TikTok, WA, dan IG.
+    /promo [catatan bebas], misal: /promo ada rasa baru cranberry cheese"""
+    catatan = " ".join(context.args).strip()
+    minggu_po = date_helpers.current_po_week_thursday()
+    kamis = datetime.datetime.strptime(minggu_po, "%Y-%m-%d").date()
+    rabu = kamis - datetime.timedelta(days=1)
+    info_po = (
+        f"PO ditutup: {_tanggal_indo(rabu)}\n"
+        f"Kirim/ambil: {_tanggal_indo(kamis)} jam {config.DELIVERY_WINDOW}\n"
+        f"Bisa diantar atau ambil sendiri di {config.PICKUP_ADDRESS}"
+    )
+    kontak = os.getenv("PROMO_KONTAK", "").strip()
+    if kontak:
+        info_po += f"\nCara order: {kontak}"
+
+    await update.message.reply_text("✍️ Lagi nulis draf promo untuk TikTok, WA, dan IG...")
+    kantor.catat("marketing", "Nulis draf promo PO")
+    sheets = get_sheets_client()
+    try:
+        menu = await asyncio.wait_for(asyncio.to_thread(sheets.get_pricelist_text), timeout=15)
+        hasil = await asyncio.wait_for(
+            asyncio.to_thread(buat_draf_promo, info_po, menu.replace("*", ""), catatan), timeout=60
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas bikin draf. Coba /promo lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal bikin draf: {e}")
+        return
+    if "error" in hasil:
+        await update.message.reply_text(hasil["error"])
+        return
+
+    for judul, kunci in (("🎵 TIKTOK", "tiktok"), ("💬 WHATSAPP", "whatsapp"), ("📸 INSTAGRAM", "instagram")):
+        teks = f"{judul}\n\n{hasil[kunci]}"
+        await update.message.reply_text(teks[:4000])
+    await update.message.reply_text(
+        "Itu drafnya, cek dulu sebelum diposting ya. Mau versi lain? Ketik /promo lagi, "
+        "bisa tambah catatan, misal: /promo fokus ke donat, nada lebih lucu"
+    )
 
 
 @owner_only
@@ -3909,6 +3975,7 @@ def main():
     app.add_handler(CommandHandler("lunaslama", lunaslama_cmd))
     app.add_handler(CommandHandler("untung", untung_cmd))
     app.add_handler(CommandHandler("pelanggan", pelanggan_cmd))
+    app.add_handler(CommandHandler("promo", promo_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --
