@@ -23,6 +23,7 @@ import receipt
 import invoice_image
 import monthly_report_pdf
 import production_recap_pdf
+import kantor
 from sheets_client import get_sheets_client, is_komposisi_bundle_valid
 from ai_parser import (
     parse_customer_chat, parse_customer_chat_image, parse_order_edit, classify_intent,
@@ -1132,6 +1133,7 @@ async def pricelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kantor.catat("produksi", "Bikin rekap produksi")
     # Kalau argumennya PERSIS format tanggal 'YYYY-MM-DD' atau rentang
     # 'YYYY-MM-DD:YYYY-MM-DD' (misal '/rekap 2026-08-29' atau
     # '/rekap 2026-08-28:2026-08-29'), tampilin rekap produksi berdasarkan
@@ -1409,6 +1411,7 @@ async def _cari_orders_pending_dgn_prefix(update: Update, sheets, nama: str, min
 
 @owner_only
 async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kantor.catat("kasir", "Cetak ulang invoice")
     nama = " ".join(context.args)
     if not nama:
         await update.message.reply_text("Format: /invoice Nama Customer")
@@ -1444,6 +1447,7 @@ async def invoice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def suratjalan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kantor.catat("produksi", "Cetak ulang surat jalan")
     nama = " ".join(context.args)
     if not nama:
         await update.message.reply_text("Format: /suratjalan Nama Customer")
@@ -1512,6 +1516,7 @@ async def _tandai_terkirim(update: Update, nama: str):
         )
         return
 
+    kantor.catat("produksi", f"Order {nama} ditandai terkirim")
     await update.message.reply_text(
         f"✅ {jumlah} baris order {nama} ditandain Terkirim -- nggak bakal numplek lagi di rekap produksi."
     )
@@ -1606,6 +1611,7 @@ async def _ubah_status_bayar(update: Update, args: list, status: str):
         await update.message.reply_text(f"Order {g['nama']} PO {g['minggu']} nggak ketemu di Sheets.")
         return
     total = documents.rupiah(documents.hitung_total_order(g["orders"]))
+    kantor.catat("kasir", f"{g['nama']} {'lunas' if status == 'Lunas' else 'batal lunas'} {total}")
     if status == "Lunas":
         await update.message.reply_text(f"✅ {g['nama']} (PO {g['minggu']}) ditandai LUNAS — {total}.")
     else:
@@ -1642,6 +1648,7 @@ async def belumbayar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Gagal baca Sheets: {e}")
         return
     judul = f"PO {minggu_po}" if minggu_po else "4 minggu terakhir sampai PO depan"
+    kantor.catat("kasir", f"Cek yang belum bayar: {len(groups)} order")
     await update.message.reply_text(documents.build_daftar_belum_bayar(groups, judul))
 
 
@@ -2132,6 +2139,7 @@ async def gabung_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def laporanbulanan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kantor.catat("produksi", "Bikin laporan bulanan")
     sheets = get_sheets_client()
 
     # Format argumen yang didukung:
@@ -2482,6 +2490,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Default: anggap order baru (perilaku sama seperti sebelumnya)
     await update.message.reply_text("Sedang diproses...")
+    kantor.catat("order", "Baca chat order baru")
 
     # Ambil daftar produk asli dari PriceList dulu, biar AI cocokin ke situ
     # (bukan asal nebak kategori) -- ini yang bikin "Meses" nggak salah masuk
@@ -2588,6 +2597,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("Lagi baca gambar...")
+    kantor.catat("order", "Baca screenshot order")
 
     try:
         photo = update.message.photo[-1]  # resolusi paling tinggi
@@ -2748,6 +2758,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.message.reply_text("Tersimpan!")
+        kantor.catat("order", f"Order {order['nama']} tersimpan ({len(orders)} item)")
 
         if bundling_diklaim and not bundle_def:
             await query.message.reply_text(

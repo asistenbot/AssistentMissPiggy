@@ -26,6 +26,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
 from sheets_client import get_sheets_client, is_komposisi_bundle_valid
+import kantor
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,7 @@ def create_web_order_app(application):
         if not sent_to_anyone:
             return web.json_response({"ok": False, "error": "failed_to_notify_owner"}, status=502)
 
+        kantor.catat("order", f"Order web masuk: {nama}")
         return web.json_response({"ok": True})
 
     async def handle_health(request: web.Request):
@@ -399,6 +401,7 @@ def create_web_order_app(application):
     web_app.router.add_route("OPTIONS", "/web-order", handle_web_order)
     web_app.router.add_get("/health", handle_health)
     web_app.router.add_get("/bundles", handle_bundles)
+    kantor.daftar_route(web_app)
     return web_app
 
 
