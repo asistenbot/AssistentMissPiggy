@@ -367,6 +367,12 @@ def siapkan_paket(sheets, now=None):
     if not semua:
         return {"error": f"Folder \"{FOLDER_NAME}\" kebaca, tapi belum ada foto di dalamnya."}
 
+    try:  # foto yang di-HOLD admin nggak dipakai
+        import konten
+        ditahan = konten.id_hold(sheets)
+        semua = [f for f in semua if f["id"] not in ditahan] or semua
+    except Exception:
+        pass
     riwayat = _baca_riwayat(sheets)
     terpilih = pilih_foto(semua, riwayat, JUMLAH_FOTO + 1)
     tutup, kirim = tanggal_po_berikut(now)
@@ -393,6 +399,7 @@ def siapkan_paket(sheets, now=None):
     riwayat = [r for r in riwayat if r not in dipakai] + dipakai
     _simpan_riwayat(sheets, riwayat)
     return {"poster": poster, "foto": hasil_foto, "tutup": tutup, "kirim": kirim,
+            "ids": dipakai,
             "jumlah_folder": len(semua)}
 
 
@@ -431,7 +438,7 @@ async def kirim_paket(bot, chat_id, sheets, thread_id=None):
         media = []
         for i, b in enumerate(paket["foto"]):
             media.append(InputMediaDocument(
-                media=b, filename=f"MissPiggy_{kirim:%Y%m%d}_{i + 1}.jpg",
+                media=b, filename=f"MissPiggy_{kirim:%Y%m%d}_{i + 1}_{paket['ids'][i + 1][:8]}.jpg",
                 caption=caption if i == jumlah - 1 else None,
             ))
         await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media,

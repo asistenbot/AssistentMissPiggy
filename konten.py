@@ -70,6 +70,45 @@ def baca_katalog(sheets):
     return hasil
 
 
+LABEL_HOLD = "HOLD"
+
+
+def kode_foto(file_id):
+    """Kode pendek foto (8 karakter awal ID Drive) -- ditaruh di nama file yang
+    dikirim ke Telegram, biar admin bisa /hold dengan reply ke file itu."""
+    return str(file_id)[:8]
+
+
+def id_hold(sheets):
+    try:
+        return {fid for fid, f in baca_katalog(sheets).items() if f["label"].strip().upper() == LABEL_HOLD}
+    except Exception:
+        return set()
+
+
+def cari_foto(sheets, kata=None, kode=None):
+    """Cari foto di katalog: by kode pendek (dari nama file) atau kata kunci
+    (semua kata harus ada di label/deskripsi/nama file)."""
+    katalog = baca_katalog(sheets)
+    if kode:
+        return [f for fid, f in katalog.items() if fid.startswith(kode)]
+    kata = [k.lower() for k in (kata or "").split() if k.strip()]
+    if not kata:
+        return []
+    return [f for f in katalog.values()
+            if all(k in f"{f['label']} {f['deskripsi']} {f['nama']}".lower() for k in kata)]
+
+
+def set_label(sheets, file_ids, label):
+    ws = _ws_katalog(sheets)
+    rows = ws.get_all_values()
+    import gspread
+    sel = [gspread.Cell(i, 3, label) for i, r in enumerate(rows[1:], start=2) if r and r[0] in set(file_ids)]
+    if sel:
+        ws.update_cells(sel)
+    return len(sel)
+
+
 def _jpeg_kecil(img, sisi=768):
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((sisi, sisi), Image.LANCZOS)
@@ -194,7 +233,8 @@ Balas HANYA JSON:
 def rencanakan(ide_text, katalog, menu_text, jumlah=2):
     from ai_parser import client, _safe_json_loads
     foto_bagus = sorted(katalog.values(), key=lambda f: -f["kualitas"])
-    foto_bagus = [f for f in foto_bagus if f["label"].lower() != "lainnya" and f["kualitas"] >= 2][:50]
+    foto_bagus = [f for f in foto_bagus if f["label"].lower() != "lainnya"
+                  and f["label"].strip().upper() != LABEL_HOLD and f["kualitas"] >= 2][:50]
     if len(foto_bagus) < 4:
         return {"error": "Foto di katalog masih kurang (minimal 4 foto roti yang jelas)."}
     daftar = "\n".join(
@@ -402,7 +442,8 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
             await _kirim(bot.send_message, chat_id=chat_id, message_thread_id=thread_id,
                                    text=f"⚠️ Carousel \"{r.get('judul_konten', '')}\" gagal dibuat: {p['error']}")
             continue
-        media = [InputMediaDocument(media=b, filename=f"Carousel{n}_slide{i + 1}.jpg")
+        ids = [s["foto"] for s in r["slides"]] + [r["slides"][0]["foto"]]
+        media = [InputMediaDocument(media=b, filename=f"Carousel{n}_slide{i + 1}_{kode_foto(ids[i])}.jpg")
                  for i, b in enumerate(p["gambar"])]
         await _kirim(bot.send_media_group, chat_id=chat_id, message_thread_id=thread_id, media=media)
         teks = (f"🎠 CAROUSEL {n}: {r.get('judul_konten', '')}\n"

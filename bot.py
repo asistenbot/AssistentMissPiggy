@@ -1191,6 +1191,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /konten [ide] — carousel IG/TikTok siap posting dari foto Drive\n"
         "- /katalogfoto — cek foto baru di Drive & kasih label (sekali per foto)\n"
         "- /katalogfoto ulang — cek ulang semua foto (habis ubah tab Panduan Foto)\n"
+        "- /hold — tahan foto produk yang belum siap dijual (reply ke file fotonya / kata kunci)\n"
+        "- /lepas — lepas foto dari HOLD\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1923,6 +1925,59 @@ async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error)
     else:
         await _info_pindah_grup(update, chat_id)
+
+
+async def _ubah_hold(update: Update, context: ContextTypes.DEFAULT_TYPE, hold: bool):
+    """/hold atau /lepas: reply ke file foto dari bot, ATAU ketik kata kunci
+    (misal: /hold roti panjang keju)."""
+    perintah = "/hold" if hold else "/lepas"
+    kata = " ".join(context.args).strip()
+    kode = None
+    balas = update.message.reply_to_message
+    if balas and balas.document and balas.document.file_name:
+        m = re.search(r"_([A-Za-z0-9_-]{8})\.jpg$", balas.document.file_name)
+        if m:
+            kode = m.group(1)
+    if not kode and not kata:
+        await update.message.reply_text(
+            f"Cara pakai:\n- Reply ke file foto dari bot, lalu ketik {perintah}\n"
+            f"- Atau pakai kata kunci: {perintah} roti panjang keju")
+        return
+    sheets = get_sheets_client()
+    try:
+        hasil = await asyncio.wait_for(asyncio.to_thread(konten.cari_foto, sheets, kata, kode), timeout=30)
+    except Exception as e:
+        await update.message.reply_text(f"Gagal baca katalog: {e}")
+        return
+    if not hasil:
+        await update.message.reply_text("Foto nggak ketemu di katalog. Coba kata kunci lain (lihat tab \"Katalog Foto\").")
+        return
+    if len(hasil) > 8 and not kode:
+        await update.message.reply_text(
+            f"Ada {len(hasil)} foto yang cocok dengan \"{kata}\", kebanyakan. Pakai kata kunci yang lebih spesifik, "
+            "atau reply ke file fotonya langsung.")
+        return
+    label_baru = konten.LABEL_HOLD if hold else "roti"
+    jumlah = await asyncio.to_thread(konten.set_label, sheets, [f["id"] for f in hasil], label_baru)
+    daftar = "\n".join(f"- {f['deskripsi'][:90] or f['nama']}" for f in hasil[:8])
+    if hold:
+        await update.message.reply_text(
+            f"⏸️ {jumlah} foto di-HOLD, nggak akan dipakai di carousel & foto mingguan:\n{daftar}\n\n"
+            "Kalau nanti sudah ada nama & harganya, ketik /lepas (reply ke fotonya atau pakai kata kunci yang sama).")
+    else:
+        await update.message.reply_text(
+            f"▶️ {jumlah} foto dilepas dari HOLD dan bisa dipakai lagi:\n{daftar}\n\n"
+            "Labelnya sementara 'roti'. Ganti nama produknya di kolom Label tab \"Katalog Foto\" kalau sudah ada.")
+
+
+@owner_only
+async def hold_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _ubah_hold(update, context, True)
+
+
+@owner_only
+async def lepas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _ubah_hold(update, context, False)
 
 
 @owner_only
@@ -4159,6 +4214,8 @@ def main():
     app.add_handler(CommandHandler("strategi", strategi_cmd))
     app.add_handler(CommandHandler("konten", konten_cmd))
     app.add_handler(CommandHandler("katalogfoto", katalogfoto_cmd))
+    app.add_handler(CommandHandler("hold", hold_cmd))
+    app.add_handler(CommandHandler("lepas", lepas_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --
