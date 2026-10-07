@@ -45,6 +45,15 @@ def setup_scheduler(bot):
         id="foto_mingguan",
         misfire_grace_time=3600,
     )
+    # Daftar pelanggan yang perlu dikabari, Jumat 5 menit setelah foto
+    scheduler.add_job(
+        send_pelanggan_jumat,
+        CronTrigger(day_of_week="fri", hour=int(os.getenv("FOTO_JAM", "17")), minute=5,
+                    timezone=config.TIMEZONE),
+        args=[bot],
+        id="pelanggan_jumat",
+        misfire_grace_time=3600,
+    )
     scheduler.start()
     return scheduler
 def _target_chat_ids():
@@ -98,3 +107,25 @@ async def send_foto_mingguan(bot):
         except Exception:
             logger.exception("Gagal kirim foto mingguan")
         break  # cukup 1x (grup); kalau fallback ke DM admin, kirim ke admin pertama saja
+
+
+async def send_pelanggan_jumat(bot):
+    """Daftar pelanggan yang perlu dikabari pas PO dibuka (Jumat). Dikirim ke
+    grup ADMIN utama (bukan grup Konten) karena ada nomor HP pelanggan."""
+    try:
+        import kantor
+        sheets = get_sheets_client()
+        orders = sheets.get_all_orders_dgn_minggu()
+        pelanggan = documents.ringkas_pelanggan(orders)
+        # Hari Jumat, PO yang sedang berjalan = Kamis berikutnya
+        import foto_mingguan
+        _, kamis = foto_mingguan.tanggal_po_berikut()
+        teks = documents.build_laporan_pelanggan(pelanggan, kamis.strftime("%Y-%m-%d"))
+        teks = "📣 PO baru dibuka! Ini pelanggan yang bisa dikabari:\n\n" + teks
+        kantor.catat("pelanggan", "Kirim daftar pelanggan buat dikabari")
+        for chat_id in _target_chat_ids():
+            for i in range(0, len(teks), 4000):
+                await bot.send_message(chat_id=chat_id, text=teks[i:i + 4000])
+            break
+    except Exception:
+        logger.exception("Gagal kirim daftar pelanggan Jumat")
