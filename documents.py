@@ -639,3 +639,85 @@ def build_laporan_untung(minggu_po: str, hasil: dict, tren: list) -> str:
     teks.append("")
     teks.append("Belum termasuk ongkir, add-on, dan biaya lain (isian, kemasan, gas).")
     return "\n".join(teks)
+
+
+# ---------- PELANGGAN SETIA ----------
+
+def ringkas_pelanggan(orders: list) -> list:
+    """Kelompokkan semua order per pelanggan (by nama). Return list dict
+    {nama, jumlah_po, total, po_terakhir, po_pertama, no_hp}."""
+    pel = {}
+    for o in orders:
+        nama = str(o.get("Nama_Customer", "")).strip()
+        minggu = str(o.get("_minggu", "")).strip()
+        if not nama or not minggu or nama.lower() == "data historis":
+            continue
+        key = " ".join(nama.lower().split())
+        p = pel.setdefault(key, {"nama": nama, "minggu": set(), "total": 0, "no_hp": "", "hp_minggu": ""})
+        p["minggu"].add(minggu)
+        p["total"] += _angka(o.get("Qty")) * _angka(o.get("Harga_Satuan"))
+        hp = str(o.get("No_HP", "")).strip()
+        if hp and hp != "-" and minggu >= p["hp_minggu"]:
+            p["no_hp"], p["hp_minggu"] = hp, minggu
+    hasil = []
+    for p in pel.values():
+        hasil.append({
+            "nama": p["nama"],
+            "jumlah_po": len(p["minggu"]),
+            "total": p["total"],
+            "po_terakhir": max(p["minggu"]),
+            "po_pertama": min(p["minggu"]),
+            "no_hp": p["no_hp"],
+        })
+    return hasil
+
+
+def _format_hp(hp: str) -> str:
+    hp = "".join(ch for ch in hp if ch.isdigit())
+    if not hp:
+        return ""
+    if hp.startswith("62"):
+        hp = "0" + hp[2:]
+    elif not hp.startswith("0"):
+        hp = "0" + hp
+    return hp
+
+
+def build_laporan_pelanggan(pelanggan: list, minggu_po: str, minggu_ke_belakang: int = 3) -> str:
+    if not pelanggan:
+        return "Belum ada data pelanggan di Sheets."
+    po_ini = datetime.datetime.strptime(minggu_po, "%Y-%m-%d").date()
+    batas_lama = po_ini - datetime.timedelta(days=7 * minggu_ke_belakang)
+
+    def tgl(s):
+        return datetime.datetime.strptime(s, "%Y-%m-%d").date()
+
+    setia = sorted(pelanggan, key=lambda p: (p["jumlah_po"], p["total"]), reverse=True)[:10]
+    lama = sorted(
+        [p for p in pelanggan if tgl(p["po_terakhir"]) < batas_lama],
+        key=lambda p: p["total"], reverse=True,
+    )[:15]
+    baru = [p for p in pelanggan if p["po_pertama"] == minggu_po]
+    sudah_order = [p for p in pelanggan if p["po_terakhir"] == minggu_po]
+
+    teks = [f"🧡 PELANGGAN — PO {minggu_po}", ""]
+    teks.append(f"Sudah order PO ini: {len(sudah_order)} (pelanggan baru: {len(baru)})")
+    teks.append(f"Total pelanggan tercatat: {len(pelanggan)}")
+    teks.append("")
+    teks.append("Paling setia (paling sering ikut PO):")
+    for i, p in enumerate(setia, 1):
+        teks.append(f"{i}. {p['nama']} — {p['jumlah_po']}x PO, total {rupiah(p['total'])}")
+
+    teks.append("")
+    if lama:
+        teks.append(f"📣 Perlu dikabari (nggak order {minggu_ke_belakang}+ minggu, urut belanja terbesar):")
+        for p in lama:
+            minggu_lalu = (po_ini - tgl(p["po_terakhir"])).days // 7
+            hp = _format_hp(p["no_hp"])
+            hp_txt = f" — {hp}" if hp else ""
+            teks.append(f"- {p['nama']}: terakhir {minggu_lalu} minggu lalu, total {rupiah(p['total'])}{hp_txt}")
+    else:
+        teks.append(f"📣 Semua pelanggan masih aktif dalam {minggu_ke_belakang} minggu terakhir.")
+    teks.append("")
+    teks.append("Omzet di atas tanpa ongkir. Kabari lewat WA pas PO dibuka.")
+    return "\n".join(teks)

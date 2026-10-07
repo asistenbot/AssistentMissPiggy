@@ -15,6 +15,7 @@ Agent yang ada:
 - "kasir"    = Kasir (invoice, /lunas, /belumbayar)
 - "produksi" = Produksi (rekap, surat jalan, /kirim, laporan bulanan)
 - "keuangan" = Keuangan (/untung)
+- "pelanggan" = Pelanggan Setia (/pelanggan)
 
 Keamanan: halaman & data cuma bisa dibuka pakai token rahasia
 (env KANTOR_TOKEN). Kalau env-nya kosong, fitur ini MATI total (404).
@@ -35,7 +36,7 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 KANTOR_TOKEN = os.getenv("KANTOR_TOKEN", "")
-AGENTS = ("order", "kasir", "produksi", "keuangan")
+AGENTS = ("order", "kasir", "produksi", "keuangan", "pelanggan")
 
 _events = collections.deque(maxlen=100)
 _counter = itertools.count(1)

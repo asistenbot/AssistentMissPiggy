@@ -626,6 +626,16 @@ class SheetsClient:
         minggu = sorted(grup)[-jumlah_minggu:]
         return [(m, grup[m]) for m in minggu]
 
+    def get_all_orders_dgn_minggu(self) -> list:
+        """Semua order + field '_minggu' (Minggu_PO dirapikan jadi
+        YYYY-MM-DD, kosong kalau formatnya nggak kebaca)."""
+        hasil = []
+        for o in self.get_all_orders():
+            d = self._parse_minggu(o.get("Minggu_PO"))
+            o["_minggu"] = d.strftime("%Y-%m-%d") if d else ""
+            hasil.append(o)
+        return hasil
+
     def set_lunas_sebelum(self, minggu_po: str) -> dict:
         """Tandai Lunas SEMUA baris yang Minggu_PO-nya SEBELUM minggu_po dan
         belum Lunas. Dipakai /lunaslama buat beresin order lama sekaligus

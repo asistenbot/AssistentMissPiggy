@@ -1090,6 +1090,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /belumlunas Nama Customer — batalin tanda lunas (kalau salah pencet)\n"
         "- /belumbayar — daftar order yang belum lunas + total uang yang belum masuk\n"
         "- /untung — untung kotor PO terakhir (omzet dikurangi biaya dough) + tren\n"
+        "- /pelanggan — pelanggan paling setia + yang lama nggak order (buat dikabari)\n"
         "- /gabung Nama Customer — gabungin beberapa order yang numpuk (belum di-Simpan) jadi 1\n"
         "- /laporanbulanan — laporan bayar supplier bulan ini\n"
         "- /laporanbulanan 2026-07 — laporan bulan tertentu\n"
@@ -1671,6 +1672,34 @@ async def untung_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hasil = documents.hitung_untung(target[1], dough_map)
     kantor.catat("keuangan", f"Hitung untung PO {target[0]}: {documents.rupiah(hasil['untung'])}")
     await update.message.reply_text(documents.build_laporan_untung(target[0], hasil, tren))
+
+
+@owner_only
+async def pelanggan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pelanggan paling setia + pelanggan yang lama nggak order (buat
+    dikabari pas PO dibuka). /pelanggan 4 = anggap 'lama' kalau 4+ minggu."""
+    minggu_ke_belakang = 3
+    if context.args:
+        if not context.args[0].isdigit() or not (1 <= int(context.args[0]) <= 52):
+            await update.message.reply_text("Format: /pelanggan  atau  /pelanggan 4 (jumlah minggu)")
+            return
+        minggu_ke_belakang = int(context.args[0])
+    sheets = get_sheets_client()
+    try:
+        orders = await asyncio.wait_for(asyncio.to_thread(sheets.get_all_orders_dgn_minggu), timeout=30)
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Timeout pas baca Sheets. Coba lagi.")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Gagal baca Sheets: {e}")
+        return
+    minggu_po = date_helpers.current_po_week_thursday()
+    pelanggan = documents.ringkas_pelanggan(orders)
+    teks = documents.build_laporan_pelanggan(pelanggan, minggu_po, minggu_ke_belakang)
+    kantor.catat("pelanggan", f"Cek {len(pelanggan)} pelanggan, cari yang perlu dikabari")
+    # Telegram batasi 4096 karakter per pesan
+    for i in range(0, len(teks), 4000):
+        await update.message.reply_text(teks[i:i + 4000])
 
 
 @owner_only
@@ -3879,6 +3908,7 @@ def main():
     app.add_handler(CommandHandler("belumbayar", belumbayar_cmd))
     app.add_handler(CommandHandler("lunaslama", lunaslama_cmd))
     app.add_handler(CommandHandler("untung", untung_cmd))
+    app.add_handler(CommandHandler("pelanggan", pelanggan_cmd))
     app.add_handler(CommandHandler("gabung", gabung_cmd))
     app.add_handler(CommandHandler("bundling", bundling_cmd))
     # Pattern-nya "^(confirm_order|cancel_order):" (BUKAN "$" persis lagi) --

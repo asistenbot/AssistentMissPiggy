@@ -86,15 +86,16 @@ const ov=document.getElementById('ov');
 const KEY=new URLSearchParams(location.search).get('k')||'';
 
 const agents=[
-  {id:'order',name:'Pembaca Order',shirt:'#ff8fab',hair:'#3b2416',desk:{x:34,y:70}},
-  {id:'kasir',name:'Kasir',shirt:'#7cc6f2',hair:'#1c1c24',desk:{x:76,y:70}},
-  {id:'produksi',name:'Produksi',shirt:'#e6a95a',hair:'#6b3a1e',desk:{x:118,y:70}},
-  {id:'keuangan',name:'Keuangan',shirt:'#9be08a',hair:'#2a1c12',desk:{x:160,y:70}},
+  {id:'order',name:'Pembaca Order',shirt:'#ff8fab',hair:'#3b2416',desk:{x:30,y:70}},
+  {id:'kasir',name:'Kasir',shirt:'#7cc6f2',hair:'#1c1c24',desk:{x:65,y:70}},
+  {id:'produksi',name:'Produksi',shirt:'#e6a95a',hair:'#6b3a1e',desk:{x:100,y:70}},
+  {id:'keuangan',name:'Keuangan',shirt:'#9be08a',hair:'#2a1c12',desk:{x:135,y:70}},
+  {id:'pelanggan',name:'Pelanggan Setia',shirt:'#c9a0ff',hair:'#4a2a1a',desk:{x:170,y:70}},
 ];
 const byId={};
 agents.forEach((a,i)=>{
   byId[a.id]=a;
-  a.x=40+i*40;a.y=104;a.tx=a.x;a.ty=a.y;a.state='idle';a.timer=1+Math.random()*2;a.queue=[];a.step=0;
+  a.x=30+i*35;a.y=104;a.tx=a.x;a.ty=a.y;a.state='idle';a.timer=1+Math.random()*2;a.queue=[];a.step=0;
   a.bub=document.createElement('div');a.bub.className='bubble';a.bub.hidden=true;ov.appendChild(a.bub);
   a.tag=document.createElement('div');a.tag.className='name';a.tag.style.background=a.shirt;a.tag.textContent=a.name;ov.appendChild(a.tag);
 });
@@ -175,10 +176,10 @@ function room(){
   R(78,8,44,20,'#2b2140');R(80,10,40,16,'#ffd59e');R(99,10,2,16,'#2b2140');R(80,17,40,2,'#2b2140');
   R(0,42,W,H-42,'#8a5a3c');
   for(let y=42;y<H;y+=8){R(0,y,W,1,'#7a4d33');for(let x=((y/8)%2)*12;x<W;x+=24)R(x,y,1,8,'#7a4d33')}
-  R(4,22,22,40,'#5b3a26');
-  for(let i=0;i<4;i++){R(5,26+i*9,20,1,'#3e2718');for(let j=0;j<3;j++)R(7+j*6,22+i*9,5,4,j%2?'#e6a95a':'#c9853f')}
-  R(176,24,20,38,'#6c6f7a');R(178,30,16,14,'#2a2a30');
-  R(180,32,12,10,(Math.sin(tick*3)>0?'#ff7a3d':'#ff9a55'));R(178,48,16,2,'#4c4e57');R(182,54,8,3,'#4c4e57');
+  R(2,20,12,36,'#5b3a26');
+  for(let i=0;i<4;i++){R(3,24+i*9,10,1,'#3e2718');for(let j=0;j<2;j++)R(4+j*5,20+i*9,4,4,j%2?'#e6a95a':'#c9853f')}
+  R(185,22,13,34,'#6c6f7a');R(187,27,9,12,'#2a2a30');
+  R(188,29,7,8,(Math.sin(tick*3)>0?'#ff7a3d':'#ff9a55'));R(187,43,9,2,'#4c4e57');R(189,49,5,3,'#4c4e57');
   R(92,100,16,6,'#5b3a26');R(94,106,2,6,'#3e2718');R(104,106,2,6,'#3e2718');R(96,97,4,3,'#f3e6dc');R(101,97,4,3,'#ff8fab');
   R(8,94,8,8,'#9a5a3a');R(6,84,12,10,'#4e8a5a');R(9,80,6,6,'#5fa36b');
 }
