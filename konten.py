@@ -556,7 +556,8 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
                    "REPLY pesan ini:\n"
                    "• kalau benar semua: ok\n"
                    "• kalau ada yang salah, tulis nomornya, misal:\n  1 roti coklat\n  3 mocha meises\n"
-                   "• foto yang nggak mau dipakai: 2 skip")
+                   "• foto yang nggak mau dipakai: 2 skip\n"
+                   "• nggak mau ide ini: batal")
         pesan = await _kirim(bot.send_photo, chat_id=chat_id, message_thread_id=thread_id,
                              photo=item["gambar"], caption=caption[:1024])
         tanya[str(pesan.message_id)] = {"chat_id": chat_id, "thread_id": thread_id,
@@ -573,6 +574,9 @@ def cek_tanya(sheets, message_id):
 def baca_jawaban(teks, jumlah):
     """'ok' -> {} (semua tebakan benar). '1 roti coklat\n2 skip' -> {1: 'roti coklat', 2: None}."""
     t = teks.strip()
+    if re.search(r"(?i)\b(batal\w*|cancel|ga\s*usah|gak\s*usah|nggak\s*usah|ngga\s*usah|tidak\s*usah|skip\s*semua)\b", t) \
+            and not re.search(r"\d", t):
+        return "batal"
     if re.fullmatch(r"(?i)\s*(ok|oke|okey|okay|ya|yes|sip|betul|bener|benar|udah benar|lanjut|gas)\W*", t):
         return {}
     hasil = {}
@@ -584,9 +588,20 @@ def baca_jawaban(teks, jumlah):
 
 
 TULIS_PROMPT = """Kamu staf Marketing & Konten Miss Piggy (home bakery Bandung, sistem PO mingguan, terbuka NON-HALAL; item (Pork) mengandung babi, jangan pernah klaim halal).
-Tulis ulang isi carousel IG/TikTok. NAMA PRODUK tiap slide SUDAH DIKONFIRMASI pemilik -- pakai PERSIS nama itu, jangan ganti dengan produk lain.
-Aturan: judul slide maksimal 5 kata, teks maksimal 14 kata, bahasa santai. Slide 1 = cover (judul menarik untuk seluruh carousel). Jangan mengarang harga/promo. caption maksimal 600 karakter + 6-10 hashtag.
-Balas HANYA JSON: {"judul_konten": "...", "slides": [{"judul": "...", "teks": "..."}], "caption": "..."} dengan jumlah slides sama persis dengan yang diberikan."""
+Tulis isi carousel IG/TikTok. Daftar FOTO bernomor beserta NAMA PRODUKnya sudah dikonfirmasi pemilik.
+Tulis:
+- "judul_cover": judul menarik untuk slide pertama (maks 5 kata), boleh umum tentang roti Miss Piggy.
+- "deskripsi": untuk SETIAP nomor foto, 1 kalimat singkat (maks 12 kata) yang cocok untuk produk di nomor itu SAJA. Jangan sebut produk lain. Kunci = nomor foto.
+- "caption": maksimal 600 karakter + 6-10 hashtag, sebut produk-produknya sesuai nama dari pemilik.
+Jangan mengarang harga/promo. Bahasa santai.
+Balas HANYA JSON: {"judul_konten": "...", "judul_cover": "...", "deskripsi": {"1": "...", "2": "..."}, "caption": "..."}"""
+
+
+def _rapikan_nama(nama):
+    """'roti ham n cheese' -> 'Roti Ham n Cheese' (kata sambung tetap kecil)."""
+    kecil = {"n", "dan", "&", "isi", "rasa", "with", "and"}
+    kata = str(nama).strip().split()
+    return " ".join(k if (k.lower() in kecil and i > 0) else (k[:1].upper() + k[1:]) for i, k in enumerate(kata))
 
 
 def buat_dari_jawaban(sheets, data, jawaban):
@@ -609,8 +624,8 @@ def buat_dari_jawaban(sheets, data, jawaban):
         menu = sheets.get_pricelist_text().replace("*", "")
     except Exception:
         menu = ""
-    isi = (f"IDE: {data.get('ide', '')}\n\nMENU:\n{menu}\n\nSLIDE (urut):\n" +
-           "\n".join(f"{i}. produk: {s_['produk']}" for i, s_ in enumerate(slides, 1)))
+    isi = (f"IDE: {data.get('ide', '')}\n\nMENU:\n{menu}\n\nFOTO (nomor: nama produk):\n" +
+           "\n".join(f"{i}: {s_['produk']}" for i, s_ in enumerate(slides, 1)))
     resp = client.with_options(timeout=120.0, max_retries=1).messages.create(
         model=config.CLAUDE_MODEL, max_tokens=1500, system=TULIS_PROMPT,
         messages=[{"role": "user", "content": isi}])
@@ -619,11 +634,20 @@ def buat_dari_jawaban(sheets, data, jawaban):
         tulis = next((x for x in tulis if isinstance(x, dict)), None)
     if not isinstance(tulis, dict):
         return {"error": "AI gagal nulis isi carousel. Balas lagi pesan tadi dengan 'ok' buat coba ulang."}
-    tl = tulis.get("slides") or []
-    for i, s_ in enumerate(slides):
-        t = tl[i] if i < len(tl) and isinstance(tl[i], dict) else {}
-        s_["judul"] = t.get("judul") or s_["produk"].title()
-        s_["teks"] = t.get("teks") or ""
+    desk = tulis.get("deskripsi") or {}
+    if isinstance(desk, list):  # jaga-jaga kalau AI balas list
+        desk = {str(i): v for i, v in enumerate(desk, 1)}
+    for i, s_ in enumerate(slides, 1):
+        nama = _rapikan_nama(s_["produk"])
+        teks_ = str(desk.get(str(i)) or "").strip()
+        if i == 1:
+            # cover: judul menarik dari AI, nama produk foto ini di baris bawah
+            s_["judul"] = str(tulis.get("judul_cover") or nama)
+            s_["teks"] = nama + (f" · {teks_}" if teks_ else "")
+        else:
+            # judul = NAMA DARI PEMILIK, persis (nggak bisa bergeser)
+            s_["judul"] = nama
+            s_["teks"] = teks_
     rencana = {"judul_konten": tulis.get("judul_konten") or r.get("judul_konten", ""),
                "slides": slides, "caption": tulis.get("caption") or r.get("caption", "")}
     # ajari katalog: label dari pemilik = paling benar
@@ -643,6 +667,10 @@ async def proses_jawaban(bot, sheets, message_id, teks):
     if not data:
         return None
     jawaban = baca_jawaban(teks, len(data["rencana"]["slides"]))
+    if jawaban == "batal":
+        _TANYA.pop(str(message_id), None)
+        await asyncio.to_thread(_simpan_tanya, sheets)
+        return "🗑️ Oke, ide carousel ini dibatalin."
     if jawaban is None:
         return ("Aku belum ngerti balasannya 🙏 Tulis 'ok' kalau tebakan benar semua, atau per nomor, misal:\n"
                 "1 roti coklat\n2 skip")

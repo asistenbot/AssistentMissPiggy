@@ -1943,7 +1943,8 @@ async def jawaban_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = await asyncio.to_thread(konten.cek_tanya, sheets, msg.reply_to_message.message_id)
     if not data:
         return
-    await msg.reply_text("👌 Siap, Marketing lagi bikin carouselnya...")
+    if konten.baca_jawaban(msg.text or "", 9) != "batal":
+        await msg.reply_text("👌 Siap, Marketing lagi bikin carouselnya...")
     balasan = await konten.proses_jawaban(context.bot, sheets, msg.reply_to_message.message_id, msg.text or "")
     if balasan:
         await msg.reply_text(balasan)
