@@ -65,7 +65,10 @@ def baca_katalog(sheets):
     for r in rows[1:]:
         r = r + [""] * (len(HEADER) - len(r))
         if r[0]:
-            hasil[r[0]] = {"id": r[0], "nama": r[1], "label": r[2], "deskripsi": r[3],
+            label = r[2]
+            if _mode_jawaban(label):  # sisa jawaban lama seperti 'tulisan PO saja' bukan nama produk
+                label = "roti"
+            hasil[r[0]] = {"id": r[0], "nama": r[1], "label": label, "deskripsi": r[3],
                            "kualitas": int(r[4]) if r[4].isdigit() else 3,
                            "cover": r[5].strip().lower() in ("ya", "true", "1"),
                            "yakin": r[7].strip().lower() not in ("tidak", "false", "0")}
@@ -595,6 +598,8 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
                    "• kalau ada yang salah, tulis nomornya, misal:\n  1 roti coklat\n  3 mocha meises\n"
                    "• foto yang nggak mau dipakai: 2 batal (nggak akan dipakai lagi)\n"
                    "• bisa dicampur, misal:\n  1 roti coklat\n  2 batal\n"
+                   "• slide info PO: 5 open PO\n"
+                   "• tulisan bebas tanpa nama roti: 4 bebas\n"
                    "• nggak mau ide ini sama sekali: batal")
         pesan = await _kirim(bot.send_photo, chat_id=chat_id, message_thread_id=thread_id,
                              photo=item["gambar"], caption=caption[:1024])
@@ -632,9 +637,10 @@ Tulis isi carousel IG/TikTok. Daftar FOTO bernomor beserta NAMA PRODUKnya sudah 
 Tulis:
 - "judul_cover": judul menarik untuk slide pertama (maks 5 kata), boleh umum tentang roti Miss Piggy.
 - "deskripsi": untuk SETIAP nomor foto, 1 kalimat singkat (maks 12 kata) yang cocok untuk produk di nomor itu SAJA. Jangan sebut produk lain. Kunci = nomor foto.
+- "judul_umum": untuk nomor yang ditandai UMUM saja, judul maks 5 kata tanpa nama produk. Kunci = nomor foto.
 - "caption": maksimal 600 karakter + 6-10 hashtag, sebut produk-produknya sesuai nama dari pemilik.
 Jangan mengarang harga/promo. Bahasa santai.
-Balas HANYA JSON: {"judul_konten": "...", "judul_cover": "...", "deskripsi": {"1": "...", "2": "..."}, "caption": "..."}"""
+Balas HANYA JSON: {"judul_konten": "...", "judul_cover": "...", "deskripsi": {"1": "...", "2": "..."}, "judul_umum": {"3": "..."}, "caption": "..."}"""
 
 
 def _rapikan_nama(nama):
@@ -642,6 +648,22 @@ def _rapikan_nama(nama):
     kecil = {"n", "dan", "&", "isi", "rasa", "with", "and"}
     kata = str(nama).strip().split()
     return " ".join(k if (k.lower() in kecil and i > 0) else (k[:1].upper() + k[1:]) for i, k in enumerate(kata))
+
+
+_RE_PO = re.compile(r"(?i)^(tulisan\s*|info\s*|kasih\s*)?(open\s*)?(pre[\s-]*order|po)\b.*|.*\b(open\s*po|po\s*(aja|saja|nya)|tulisan\s*po|info\s*po)\b.*")
+_RE_BEBAS = re.compile(r"(?i).*\b(bebas|terserah|tulisan\s*(sendiri|bebas)|kasih\s*tulisan|umum|tanpa\s*nama|apa\s*aja)\b.*")
+
+
+def _mode_jawaban(nama):
+    """'po' = slide info Open PO, 'bebas' = tulisan umum tanpa nama produk,
+    None = nama produk biasa."""
+    if not nama:
+        return None
+    if _RE_PO.fullmatch(nama.strip()):
+        return "po"
+    if _RE_BEBAS.fullmatch(nama.strip()):
+        return "bebas"
+    return None
 
 
 def buat_dari_jawaban(sheets, data, jawaban):
@@ -655,17 +677,24 @@ def buat_dari_jawaban(sheets, data, jawaban):
         nama = jawaban.get(i) or s_.get("tebakan") or "roti"
         if nama == "belum yakin":
             nama = "roti Miss Piggy"
-        if i in jawaban:
+        mode = _mode_jawaban(jawaban.get(i))
+        if i in jawaban and not mode:  # perintah (PO/bebas) jangan disimpan jadi label
             koreksi.setdefault(nama, []).append(s_["foto"])
-        slides.append({"foto": s_["foto"], "produk": nama})
+        slides.append({"foto": s_["foto"], "produk": nama, "mode": mode})
     if len(slides) < 2:
         return {"error": "Fotonya tinggal kurang dari 2, carousel nggak jadi dibuat. Coba /konten lagi."}
     try:
         menu = sheets.get_pricelist_text().replace("*", "")
     except Exception:
         menu = ""
+    def _ket(s_):
+        if s_["mode"] == "po":
+            return "(slide info Open PO, tidak perlu deskripsi)"
+        if s_["mode"] == "bebas":
+            return "UMUM (jangan sebut nama/rasa produk, tulis judul & kalimat umum tentang Miss Piggy)"
+        return s_["produk"]
     isi = (f"IDE: {data.get('ide', '')}\n\nMENU:\n{menu}\n\nFOTO (nomor: nama produk):\n" +
-           "\n".join(f"{i}: {s_['produk']}" for i, s_ in enumerate(slides, 1)))
+           "\n".join(f"{i}: {_ket(s_)}" for i, s_ in enumerate(slides, 1)))
     resp = client.with_options(timeout=120.0, max_retries=1).messages.create(
         model=config.CLAUDE_MODEL, max_tokens=1500, system=TULIS_PROMPT,
         messages=[{"role": "user", "content": isi}])
@@ -677,9 +706,21 @@ def buat_dari_jawaban(sheets, data, jawaban):
     desk = tulis.get("deskripsi") or {}
     if isinstance(desk, list):  # jaga-jaga kalau AI balas list
         desk = {str(i): v for i, v in enumerate(desk, 1)}
+    umum = tulis.get("judul_umum") or {}
+    if isinstance(umum, list):
+        umum = {str(i): v for i, v in enumerate(umum, 1)}
+    tutup, kirim = fm.tanggal_po_berikut()
     for i, s_ in enumerate(slides, 1):
         nama = _rapikan_nama(s_["produk"])
         teks_ = str(desk.get(str(i)) or "").strip()
+        if s_["mode"] == "po":
+            s_["judul"] = "Open PO"
+            s_["teks"] = f"Tutup {fm._tgl(tutup)} · Kirim & ambil {fm._tgl(kirim)}"
+            continue
+        if s_["mode"] == "bebas":
+            s_["judul"] = str(umum.get(str(i)) or ("Lagi Ngidam Roti?" if i == 1 else "Fresh Tiap Minggu"))
+            s_["teks"] = teks_
+            continue
         if i == 1:
             # cover: judul menarik dari AI, nama produk foto ini di baris bawah
             s_["judul"] = str(tulis.get("judul_cover") or nama)
