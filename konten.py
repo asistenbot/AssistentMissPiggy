@@ -81,11 +81,48 @@ def kode_foto(file_id):
     return str(file_id)[:8]
 
 
+PREFIX_TOLAK = "TOLAK - "
+
+
+def diblokir(label):
+    """True kalau foto nggak boleh dipakai: di-HOLD atau ditolak admin."""
+    l = str(label).strip().upper()
+    return l == LABEL_HOLD or l.startswith(PREFIX_TOLAK.strip().upper())
+
+
 def id_hold(sheets):
+    """ID foto yang nggak boleh dipakai (HOLD + TOLAK)."""
     try:
-        return {fid for fid, f in baca_katalog(sheets).items() if f["label"].strip().upper() == LABEL_HOLD}
+        return {fid for fid, f in baca_katalog(sheets).items() if diblokir(f["label"])}
     except Exception:
         return set()
+
+
+def tolak_foto(sheets, file_ids):
+    """Tandai foto TOLAK (label lama disimpan di belakang biar bisa dipulihkan)."""
+    katalog = baca_katalog(sheets)
+    ws = _ws_katalog(sheets)
+    rows = ws.get_all_values()
+    import gspread
+    target = set(file_ids)
+    sel = []
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] in target:
+            lama = katalog.get(r[0], {}).get("label", "roti")
+            if not diblokir(lama):
+                sel.append(gspread.Cell(i, 3, PREFIX_TOLAK + lama))
+    if sel:
+        ws.update_cells(sel)
+    return len(sel)
+
+
+def label_dipulihkan(label):
+    l = str(label)
+    if l.upper().startswith(PREFIX_TOLAK.strip().upper()):
+        return l[len(PREFIX_TOLAK):].strip() or "roti"
+    if l.strip().upper() == LABEL_HOLD:
+        return "roti"
+    return l
 
 
 def cari_foto(sheets, kata=None, kode=None):
@@ -275,7 +312,7 @@ def rencanakan(ide_text, katalog, menu_text, jumlah=2):
     from ai_parser import client, _safe_json_loads
     foto_bagus = sorted(katalog.values(), key=lambda f: -f["kualitas"])
     foto_bagus = [f for f in foto_bagus if f["label"].lower() != "lainnya"
-                  and f["label"].strip().upper() != LABEL_HOLD and f["kualitas"] >= 2][:50]
+                  and not diblokir(f["label"]) and f["kualitas"] >= 2][:50]
     if len(foto_bagus) < 4:
         return {"error": "Foto di katalog masih kurang (minimal 4 foto roti yang jelas)."}
     daftar = "\n".join(
@@ -556,8 +593,9 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
                    "REPLY pesan ini:\n"
                    "• kalau benar semua: ok\n"
                    "• kalau ada yang salah, tulis nomornya, misal:\n  1 roti coklat\n  3 mocha meises\n"
-                   "• foto yang nggak mau dipakai: 2 skip\n"
-                   "• nggak mau ide ini: batal")
+                   "• foto yang nggak mau dipakai: 2 batal (nggak akan dipakai lagi)\n"
+                   "• bisa dicampur, misal:\n  1 roti coklat\n  2 batal\n"
+                   "• nggak mau ide ini sama sekali: batal")
         pesan = await _kirim(bot.send_photo, chat_id=chat_id, message_thread_id=thread_id,
                              photo=item["gambar"], caption=caption[:1024])
         tanya[str(pesan.message_id)] = {"chat_id": chat_id, "thread_id": thread_id,
@@ -583,7 +621,9 @@ def baca_jawaban(teks, jumlah):
     for m_ in re.finditer(r"(?:^|[\n,;])\s*(\d{1,2})\s*[\.\):=\-]?\s*([^\n,;]+)", t):
         no, nama = int(m_.group(1)), m_.group(2).strip()
         if 1 <= no <= jumlah and nama:
-            hasil[no] = None if re.fullmatch(r"(?i)(skip|hapus|jangan|buang|ga usah|gausah|nggak|no)", nama) else nama
+            hasil[no] = None if re.fullmatch(
+                r"(?i)(skip|hapus|jangan( dipakai| pakai)?|buang|batal(in)?|cancel|tolak|"
+                r"ga\s*usah|gak\s*usah|nggak\s*usah|gausah|nggak|no|x)\W*", nama) else nama
     return hasil if hasil else None
 
 
@@ -656,6 +696,12 @@ def buat_dari_jawaban(sheets, data, jawaban):
             set_label(sheets, ids, nama)
         except Exception:
             pass
+    ditolak = [s_["foto"] for i, s_ in enumerate(r["slides"], 1) if i in jawaban and jawaban[i] is None]
+    if ditolak:
+        try:
+            tolak_foto(sheets, ditolak)
+        except Exception:
+            pass
     return {"rencana": rencana, "gambar": render_carousel(sheets, rencana)}
 
 
@@ -668,9 +714,13 @@ async def proses_jawaban(bot, sheets, message_id, teks):
         return None
     jawaban = baca_jawaban(teks, len(data["rencana"]["slides"]))
     if jawaban == "batal":
+        ids = [s_["foto"] for s_ in data["rencana"]["slides"]]
+        n = await asyncio.to_thread(tolak_foto, sheets, ids)
         _TANYA.pop(str(message_id), None)
         await asyncio.to_thread(_simpan_tanya, sheets)
-        return "🗑️ Oke, ide carousel ini dibatalin."
+        return (f"🗑️ Oke, ide ini dibatalin dan {n} fotonya ditandai TOLAK, "
+                "nggak akan dipakai lagi di carousel & foto mingguan.\n"
+                "Kalau berubah pikiran: /lepas + kata kunci fotonya.")
     if jawaban is None:
         return ("Aku belum ngerti balasannya 🙏 Tulis 'ok' kalau tebakan benar semua, atau per nomor, misal:\n"
                 "1 roti coklat\n2 skip")

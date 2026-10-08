@@ -1981,8 +1981,13 @@ async def _ubah_hold(update: Update, context: ContextTypes.DEFAULT_TYPE, hold: b
             f"Ada {len(hasil)} foto yang cocok dengan \"{kata}\", kebanyakan. Pakai kata kunci yang lebih spesifik, "
             "atau reply ke file fotonya langsung.")
         return
-    label_baru = konten.LABEL_HOLD if hold else "roti"
-    jumlah = await asyncio.to_thread(konten.set_label, sheets, [f["id"] for f in hasil], label_baru)
+    if hold:
+        jumlah = await asyncio.to_thread(konten.set_label, sheets, [f["id"] for f in hasil], konten.LABEL_HOLD)
+    else:
+        jumlah = 0
+        for f in hasil:
+            jumlah += await asyncio.to_thread(konten.set_label, sheets, [f["id"]],
+                                              konten.label_dipulihkan(f["label"]))
     daftar = "\n".join(f"- {f['deskripsi'][:90] or f['nama']}" for f in hasil[:8])
     if hold:
         await update.message.reply_text(
@@ -1990,8 +1995,8 @@ async def _ubah_hold(update: Update, context: ContextTypes.DEFAULT_TYPE, hold: b
             "Kalau nanti sudah ada nama & harganya, ketik /lepas (reply ke fotonya atau pakai kata kunci yang sama).")
     else:
         await update.message.reply_text(
-            f"▶️ {jumlah} foto dilepas dari HOLD dan bisa dipakai lagi:\n{daftar}\n\n"
-            "Labelnya sementara 'roti'. Ganti nama produknya di kolom Label tab \"Katalog Foto\" kalau sudah ada.")
+            f"▶️ {jumlah} foto dilepas (dari HOLD/TOLAK) dan bisa dipakai lagi:\n{daftar}\n\n"
+            "Cek kolom Label di tab \"Katalog Foto\" kalau nama produknya perlu diganti.")
 
 
 @owner_only
