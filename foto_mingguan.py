@@ -274,10 +274,40 @@ def _tempel_logo(base_rgba, lebar, pos, jangkar="kiri-atas"):
     base_rgba.alpha_composite(logo, (x, y))
 
 
+LOGO_Y = 40  # logo selalu di tengah atas
+
+
+def tinggi_logo(lebar):
+    try:
+        lg = Image.open(_LOGO_KREM)
+        return int(lg.height * lebar / lg.width)
+    except Exception:
+        return int(lebar * 0.53)
+
+
+def zona_sepi(img, tinggi, atas_mulai, margin=56):
+    """Pilih 'atas' atau 'bawah' untuk menaruh kotak tulisan setinggi `tinggi`:
+    yang isinya paling 'sepi' (sedikit tekstur & warna = latar, bukan roti),
+    biar tulisan nggak nutup produk. Tanpa numpy, cukup Pillow."""
+    from PIL import ImageStat
+    W, H = UKURAN
+    rgb = img.convert("RGB").resize((W // 4, H // 4))
+    tepi = rgb.convert("L").filter(ImageFilter.FIND_EDGES)
+    sat = rgb.convert("HSV").getchannel("S")
+
+    def skor(y0, y1):
+        kotak = (0, max(0, y0 // 4), W // 4, max(1, y1 // 4))
+        return ImageStat.Stat(tepi.crop(kotak)).mean[0] * 1.0 + ImageStat.Stat(sat.crop(kotak)).mean[0] * 0.35
+
+    atas = skor(atas_mulai, atas_mulai + tinggi)
+    bawah = skor(H - margin - tinggi, H - margin)
+    return "atas" if atas < bawah * 0.85 else "bawah"
+
+
 def foto_siap_posting(img):
-    """Foto tanpa tanggal: rapikan + logo bulat kecil di pojok kanan bawah."""
+    """Foto tanpa tanggal: rapikan + logo kecil di tengah atas."""
     base = _rapikan(img).convert("RGBA")
-    _tempel_logo(base, 190, (UKURAN[0] - 44, UKURAN[1] - 40), jangkar="kanan-bawah")
+    _tempel_logo(base, 200, (UKURAN[0] // 2, LOGO_Y), jangkar="tengah-atas")
     return base.convert("RGB")
 
 
@@ -292,58 +322,49 @@ def _teks_pas(draw, teks, path, weight, ukuran, lebar_maks):
 
 
 def poster_open_po(img, tutup, kirim, web="", wa=""):
-    """Poster Open PO: foto tetap jadi bintang utama, info di kartu krem
-    kecil di bawah, logo bulat di pojok kiri atas."""
+    """Poster Open PO: foto tetap jadi bintang utama, logo di tengah atas,
+    info di kartu krem yang ditaruh di bagian foto yang paling 'sepi'
+    (atas atau bawah) biar nggak nutup roti."""
     base = _rapikan(img).convert("RGBA")
     W, H = UKURAN
-
-    # gradasi tipis di bawah biar kartu nyatu sama foto
-    lapis = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
-    dl = ImageDraw.Draw(lapis)
-    for i in range(380):
-        dl.line([(0, H - 380 + i), (W, H - 380 + i)], fill=(30, 20, 15, int(120 * (i / 380) ** 1.6)))
-    base.alpha_composite(lapis)
-
-    # kartu info
     m = 56
-    kartu_h = 352
-    y0 = H - m - kartu_h
-    kartu = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
-    dk = ImageDraw.Draw(kartu)
-    dk.rounded_rectangle([m + 4, y0 + 10, W - m + 4, H - m + 10], radius=34, fill=(0, 0, 0, 70))
-    kartu = kartu.filter(ImageFilter.GaussianBlur(12))
-    base.alpha_composite(kartu)
-    d = ImageDraw.Draw(base)
-    d.rounded_rectangle([m, y0, W - m, H - m], radius=34, fill=(251, 244, 233, 240))
+    lebar_logo = 230
+    logo_bawah = LOGO_Y + tinggi_logo(lebar_logo)
+    kontak = "  ·  ".join(t for t in (web, f"WA {wa}" if wa else "") if t)
+    tinggi_pita = 54 if kontak else 0
+    kartu_h = 250 + tinggi_pita
+    zona = zona_sepi(base, kartu_h, logo_bawah + 28, m)
+    y0 = logo_bawah + 28 if zona == "atas" else H - m - kartu_h
+    y1 = y0 + kartu_h
 
-    x = m + 48
-    lebar = W - 2 * m - 96
-    f_label = _font(_FONT_TEKS, 26, b"ExtraBold")
+    kartu = Image.new("RGBA", UKURAN, (0, 0, 0, 0))
+    ImageDraw.Draw(kartu).rounded_rectangle([m + 4, y0 + 10, W - m + 4, y1 + 10], radius=34, fill=(0, 0, 0, 60))
+    base.alpha_composite(kartu.filter(ImageFilter.GaussianBlur(12)))
+    d = ImageDraw.Draw(base)
+    d.rounded_rectangle([m, y0, W - m, y1], radius=34, fill=(251, 244, 233, 236))
+
+    x = m + 44
+    lebar = W - 2 * m - 88
+    f_label = _font(_FONT_TEKS, 24, b"ExtraBold")
     label = "PRE-ORDER"
     lw = d.textlength(label, font=f_label)
-    d.rounded_rectangle([x, y0 + 38, x + lw + 32, y0 + 78], radius=20, fill=PINK)
-    d.text((x + 16, y0 + 43), label, font=f_label, fill=(255, 255, 255))
-
-    f_judul = _font(_FONT_JUDUL, 92, b"SemiBold")
-    d.text((x, y0 + 84), "Open PO", font=f_judul, fill=COKLAT)
+    d.rounded_rectangle([x, y0 + 32, x + lw + 30, y0 + 70], radius=19, fill=PINK)
+    d.text((x + 15, y0 + 37), label, font=f_label, fill=(255, 255, 255))
+    d.text((x, y0 + 74), "Open PO", font=_font(_FONT_JUDUL, 74, b"SemiBold"), fill=COKLAT)
 
     baris1 = f"Tutup {_tgl(tutup)}"
     baris2 = f"Kirim & ambil {_tgl(kirim)}, {config.DELIVERY_WINDOW.replace(':', '.')}"
-    f1 = _teks_pas(d, baris1, _FONT_TEKS, b"Bold", 34, lebar)
-    f2 = _teks_pas(d, baris2, _FONT_TEKS, b"SemiBold", 30, lebar)
-    d.text((x, y0 + 190), baris1, font=f1, fill=COKLAT)
-    d.text((x, y0 + 232), baris2, font=f2, fill=(120, 86, 60))
+    d.text((x, y0 + 160), baris1, font=_teks_pas(d, baris1, _FONT_TEKS, b"Bold", 30, lebar), fill=COKLAT)
+    d.text((x, y0 + 198), baris2, font=_teks_pas(d, baris2, _FONT_TEKS, b"SemiBold", 27, lebar), fill=(120, 86, 60))
 
-    kontak = "  ·  ".join(t for t in (web, f"WA {wa}" if wa else "") if t)
     if kontak:
-        f3 = _teks_pas(d, kontak, _FONT_TEKS, b"Bold", 26, lebar)
-        tinggi_pita = 54
-        d.rounded_rectangle([m, H - m - tinggi_pita, W - m, H - m], radius=34, fill=(*KARAMEL, 255))
-        d.rectangle([m, H - m - tinggi_pita, W - m, H - m - tinggi_pita + 34], fill=(*KARAMEL, 255))
+        f3 = _teks_pas(d, kontak, _FONT_TEKS, b"Bold", 25, lebar)
+        d.rounded_rectangle([m, y1 - tinggi_pita, W - m, y1], radius=34, fill=(*KARAMEL, 255))
+        d.rectangle([m, y1 - tinggi_pita, W - m, y1 - tinggi_pita + 34], fill=(*KARAMEL, 255))
         tw = d.textlength(kontak, font=f3)
-        d.text(((W - tw) / 2, H - m - tinggi_pita + 12), kontak, font=f3, fill=(255, 250, 242))
+        d.text(((W - tw) / 2, y1 - tinggi_pita + 13), kontak, font=f3, fill=(255, 250, 242))
 
-    _tempel_logo(base, 250, (m, m))
+    _tempel_logo(base, lebar_logo, (W // 2, LOGO_Y), jangkar="tengah-atas")
     return base.convert("RGB")
 
 

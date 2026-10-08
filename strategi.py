@@ -256,8 +256,8 @@ async def kirim_laporan(bot, chat_id, sheets, thread_id=None, catatan="", buat_k
         try:
             import konten
             await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
-                                   text="🎠 Ide kontennya sudah dioper ke Marketing. Carousel siap posting "
-                                        "akan dikirim ke grup Konten (beberapa menit).")
+                                   text="🎠 Ide kontennya sudah dioper ke Marketing. Dia bakal tanya dulu "
+                                        "di grup Konten itu roti apa aja, baru bikin carouselnya.")
             error = await konten.kirim_konten(bot, sheets, _ambil_ide_konten(teks))
             if error:
                 await bot.send_message(chat_id=chat_id, message_thread_id=thread_id,

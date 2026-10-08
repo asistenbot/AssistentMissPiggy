@@ -14,7 +14,7 @@ import uuid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters,
+    ContextTypes, filters, ApplicationHandlerStop,
 )
 
 import config
@@ -1918,7 +1918,7 @@ async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Bebas: pilih 2 ide konten yang paling menarik untuk minggu ini berdasarkan foto yang ada "
         "(misal produk andalan, behind the scene, rasa favorit pelanggan).")
     chat_id, thread_id = _tujuan_marketing(update)
-    await update.message.reply_text("🎠 Marketing lagi milih foto & bikin carousel... (beberapa menit)")
+    await update.message.reply_text("🎠 Marketing lagi milih foto... nanti dia tanya dulu ke kamu itu roti apa aja.")
     error = await konten.kirim_konten(context.bot, get_sheets_client(), ide,
                                       chat_id=chat_id, thread_id=thread_id,
                                       jumlah=1 if context.args else 2)
@@ -1926,6 +1926,28 @@ async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error)
     else:
         await _info_pindah_grup(update, chat_id)
+
+
+async def jawaban_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tangkap REPLY admin ke pertanyaan Marketing ('foto ini roti apa aja?').
+    Jalan sebelum handler teks lain; kalau bukan reply ke pertanyaan konten,
+    dibiarkan lewat ke handler biasa."""
+    msg = update.message
+    if not msg or not msg.reply_to_message or not update.effective_user:
+        return
+    if update.effective_user.id not in config.OWNER_TELEGRAM_IDS:
+        return
+    if not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id != context.bot.id:
+        return
+    sheets = get_sheets_client()
+    data = await asyncio.to_thread(konten.cek_tanya, sheets, msg.reply_to_message.message_id)
+    if not data:
+        return
+    await msg.reply_text("👌 Siap, Marketing lagi bikin carouselnya...")
+    balasan = await konten.proses_jawaban(context.bot, sheets, msg.reply_to_message.message_id, msg.text or "")
+    if balasan:
+        await msg.reply_text(balasan)
+    raise ApplicationHandlerStop
 
 
 async def _ubah_hold(update: Update, context: ContextTypes.DEFAULT_TYPE, hold: bool):
@@ -4260,6 +4282,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(CallbackQueryHandler(handle_produk_baru_confirm, pattern="^(confirm_produk|cancel_produk):"))
     app.add_handler(CallbackQueryHandler(handle_bundle_action_confirm, pattern="^(confirm_bundle|cancel_bundle):"))
+    app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, jawaban_konten), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(global_error_handler)
