@@ -311,6 +311,24 @@ def foto_siap_posting(img):
     return base.convert("RGB")
 
 
+def edit_kiriman(img, logo=True, ukuran=UKURAN):
+    """Foto yang dikirim langsung ke grup Konten: terangin kalau gelap,
+    warna & ketajaman dibagusin, dipotong pas ukuran sosmed, + logo."""
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    img = ImageOps.fit(img, ukuran, Image.LANCZOS, centering=(0.5, 0.5))
+    img = _terang_otomatis(img)
+    img = ImageEnhance.Contrast(img).enhance(1.04)
+    img = ImageEnhance.Color(img).enhance(1.10)
+    img = Image.blend(img, Image.new("RGB", ukuran, (255, 196, 140)), 0.05)
+    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
+    if not logo:
+        return img
+    base = img.convert("RGBA")
+    lebar = int(ukuran[0] * 0.185)
+    _tempel_logo(base, lebar, (ukuran[0] // 2, int(ukuran[1] * 0.03)), jangkar="tengah-atas")
+    return base.convert("RGB")
+
+
 def _teks_pas(draw, teks, path, weight, ukuran, lebar_maks):
     """Kecilkan font sampai teksnya muat di lebar_maks."""
     while ukuran > 18:

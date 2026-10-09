@@ -559,12 +559,14 @@ def siapkan_pertanyaan(sheets, ide_text, jumlah=2):
     return {"daftar": hasil, "foto_baru": baru, "total_katalog": len(katalog)}
 
 
-async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, jumlah=2):
+async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, jumlah=2, format="carousel"):
     """Langkah 1: pilih foto, lalu TANYA admin roti apa saja di foto itu.
-    Carousel baru dibuat setelah admin balas (lihat proses_jawaban)."""
+    Carousel / video baru dibuat setelah admin balas (lihat proses_jawaban).
+    format: "carousel" (slide JPG) atau "video" (MP4 9:16 buat Reels/TikTok)."""
+    video_ = format == "video"
     try:
         import kantor
-        kantor.mulai("marketing", "Pilih foto buat carousel")
+        kantor.mulai("marketing", "Pilih foto buat video" if video_ else "Pilih foto buat carousel")
     except Exception:
         pass
     if chat_id is None:
@@ -591,7 +593,8 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
     for n, item in enumerate(hasil["daftar"], 1):
         r = item["rencana"]
         tebakan = "\n".join(f"{i}. {s_['tebakan']}" for i, s_ in enumerate(r["slides"], 1))
-        caption = (f"🎠 Ide carousel {n}: {r.get('judul_konten', '')}\n\n"
+        label = "🎬 Ide video" if video_ else "🎠 Ide carousel"
+        caption = (f"{label} {n}: {r.get('judul_konten', '')}\n\n"
                    f"Foto ini roti apa aja? Tebakanku:\n{tebakan}\n\n"
                    "REPLY pesan ini:\n"
                    "• kalau benar semua: ok\n"
@@ -604,7 +607,7 @@ async def kirim_konten(bot, sheets, ide_text, chat_id=None, thread_id=None, juml
         pesan = await _kirim(bot.send_photo, chat_id=chat_id, message_thread_id=thread_id,
                              photo=item["gambar"], caption=caption[:1024])
         tanya[str(pesan.message_id)] = {"chat_id": chat_id, "thread_id": thread_id,
-                                        "ide": ide_text[:1500], "rencana": r}
+                                        "ide": ide_text[:1500], "rencana": r, "format": format}
     await asyncio.to_thread(_simpan_tanya, sheets)
     _selesai("Nunggu konfirmasi rasa dari bos")
     return None
@@ -682,7 +685,7 @@ def buat_dari_jawaban(sheets, data, jawaban):
             koreksi.setdefault(nama, []).append(s_["foto"])
         slides.append({"foto": s_["foto"], "produk": nama, "mode": mode})
     if len(slides) < 2:
-        return {"error": "Fotonya tinggal kurang dari 2, carousel nggak jadi dibuat. Coba /konten lagi."}
+        return {"error": "Fotonya tinggal kurang dari 2, jadi nggak dibuat. Coba /konten atau /video lagi."}
     try:
         menu = sheets.get_pricelist_text().replace("*", "")
     except Exception:
@@ -743,7 +746,20 @@ def buat_dari_jawaban(sheets, data, jawaban):
             tolak_foto(sheets, ditolak)
         except Exception:
             pass
+    if data.get("format") == "video":
+        return {"rencana": rencana, "video": render_video(sheets, rencana)}
     return {"rencana": rencana, "gambar": render_carousel(sheets, rencana)}
+
+
+def render_video(sheets, rencana):
+    import video
+    tutup, kirim = fm.tanggal_po_berikut()
+    web = os.getenv("PROMO_WEB", "order.misspiggybdg19.workers.dev")
+    wa = os.getenv("PROMO_WA", "0815-6178-880")
+    slides = rencana["slides"]
+    gambar = [fm.unduh(sheets, s_["foto"]) for s_ in slides]
+    return video.buat_video(gambar, [s_.get("judul", "") for s_ in slides],
+                            [s_.get("teks", "") for s_ in slides], tutup, kirim, web, wa)
 
 
 async def proses_jawaban(bot, sheets, message_id, teks):
@@ -765,32 +781,41 @@ async def proses_jawaban(bot, sheets, message_id, teks):
     if jawaban is None:
         return ("Aku belum ngerti balasannya 🙏 Tulis 'ok' kalau tebakan benar semua, atau per nomor, misal:\n"
                 "1 roti coklat\n2 skip")
+    video_ = data.get("format") == "video"
+    jenis = "video" if video_ else "carousel"
     try:
         import kantor
-        kantor.mulai("marketing", "Desain carousel sesuai rasa dari bos")
+        kantor.mulai("marketing", f"Bikin {jenis} sesuai rasa dari bos")
     except Exception:
         pass
     try:
         hasil = await asyncio.wait_for(asyncio.to_thread(buat_dari_jawaban, sheets, data, jawaban), timeout=600)
     except Exception as e:
-        logger.exception("Gagal bikin carousel dari jawaban")
+        logger.exception(f"Gagal bikin {jenis} dari jawaban")
         _selesai("Gagal")
-        return f"Gagal bikin carousel: {e}"
+        return f"Gagal bikin {jenis}: {e}"
     if "error" in hasil:
         _selesai("Gagal")
         return hasil["error"]
     r = hasil["rencana"]
-    ids = [s_["foto"] for s_ in r["slides"]] + [r["slides"][0]["foto"]]
-    media = [InputMediaDocument(media=b, filename=f"Carousel_slide{i + 1}_{kode_foto(ids[i])}.jpg")
-             for i, b in enumerate(hasil["gambar"])]
     chat_id, thread_id = data["chat_id"], data.get("thread_id")
-    await _kirim(bot.send_media_group, chat_id=chat_id, message_thread_id=thread_id, media=media)
+    if video_:
+        await _kirim(bot.send_document, chat_id=chat_id, message_thread_id=thread_id,
+                     document=hasil["video"], filename="Video_MissPiggy.mp4",
+                     read_timeout=120, write_timeout=120)
+        petunjuk = "Video 9:16 siap buat Reels / TikTok / Story WA. Lagu pilih sendiri di aplikasi."
+    else:
+        ids = [s_["foto"] for s_ in r["slides"]] + [r["slides"][0]["foto"]]
+        media = [InputMediaDocument(media=b, filename=f"Carousel_slide{i + 1}_{kode_foto(ids[i])}.jpg")
+                 for i, b in enumerate(hasil["gambar"])]
+        await _kirim(bot.send_media_group, chat_id=chat_id, message_thread_id=thread_id, media=media)
+        petunjuk = "Posting slide sesuai urutan nomor file. Lagu pilih sendiri di aplikasi."
+    ikon = "🎬" if video_ else "🎠"
     await _kirim(bot.send_message, chat_id=chat_id, message_thread_id=thread_id,
-                 text=(f"🎠 {r['judul_konten']}\n\nCaption siap pakai:\n\n{r['caption']}\n\n"
-                       "Posting slide sesuai urutan nomor file. Lagu pilih sendiri di aplikasi.")[:4000])
+                 text=(f"{ikon} {r['judul_konten']}\n\nCaption siap pakai:\n\n{r['caption']}\n\n{petunjuk}")[:4000])
     _TANYA.pop(str(message_id), None)
     await asyncio.to_thread(_simpan_tanya, sheets)
-    _selesai("Carousel terkirim ke grup Konten")
+    _selesai(f"{jenis.capitalize()} terkirim ke grup Konten")
     return None
 
 

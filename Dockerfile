@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Font buat generate gambar struk surat jalan
-RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

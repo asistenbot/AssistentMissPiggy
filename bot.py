@@ -4,6 +4,7 @@ Jalankan: python bot.py
 """
 
 import asyncio
+import io
 import json
 import logging
 import datetime
@@ -70,7 +71,8 @@ def owner_only(func):
                 pesan = update.message
                 if pesan and pesan.text and pesan.text.startswith("/"):
                     await pesan.reply_text("Perintah ini khusus admin. Tim konten bisa pakai: "
-                                           "/promo /fotopo /konten /katalogfoto /hold /lepas /panduan")
+                                           "/promo /fotopo /konten /video /katalogfoto /hold /lepas /panduan.\n"
+                                           "Kirim foto ke grup Konten = langsung diedit.")
                 return
             await update.message.reply_text("Bot ini khusus admin Miss Piggy.")
             return
@@ -1218,6 +1220,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /fotopo — poster Open PO + 7 foto sosmed dari folder Drive (otomatis tiap Jumat 17.00)\n"
         "- /strategi — ide promo, konten & menu tren dari data + internet (otomatis tiap Senin 09.00)\n"
         "- /konten [ide] — carousel IG/TikTok siap posting dari foto Drive\n"
+        "- /video [ide] — video 9:16 (Reels/TikTok) dari foto Drive, tanpa lagu\n"
+        "- kirim foto ke grup Konten — langsung diedit (terang, warna, 4:5, logo). "
+        "Caption 'story' = 9:16, 'kotak' = 1:1, 'tanpa logo'\n"
         "- /katalogfoto — cek foto baru di Drive & kasih label (sekali per foto)\n"
         "- /katalogfoto ulang — cek ulang semua foto (habis ubah tab Panduan Foto)\n"
         "- /hold — tahan foto produk yang belum siap dijual (reply ke file fotonya / kata kunci)\n"
@@ -1957,6 +1962,65 @@ async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _info_pindah_grup(update, chat_id)
 
 
+@konten_boleh
+async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Marketing: bikin video 9:16 (Reels/TikTok) dari foto di Drive.
+    /video [ide], misal: /video roti-roti favorit minggu ini"""
+    ide = " ".join(context.args).strip() or (
+        "Bebas: 1 video pendek yang menggugah selera, pamerin produk andalan dengan foto paling bagus.")
+    chat_id, thread_id = _tujuan_marketing(update)
+    await update.message.reply_text("🎬 Marketing lagi milih foto buat video... nanti dia tanya dulu ke kamu itu roti apa aja.")
+    error = await konten.kirim_konten(context.bot, get_sheets_client(), ide,
+                                      chat_id=chat_id, thread_id=thread_id, jumlah=1, format="video")
+    if error:
+        await update.message.reply_text(error)
+    else:
+        await _info_pindah_grup(update, chat_id)
+
+
+async def edit_foto_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Di grup Konten: admin / tim konten kirim foto -> dibalas versi yang
+    sudah diedit (diterangin, warna dibagusin, 4:5, logo tengah atas).
+    Caption opsional: 'tanpa logo', 'story' (9:16), 'kotak' (1:1)."""
+    msg = update.message
+    if not msg or not update.effective_user or not _di_grup_konten(update):
+        return
+    uid = update.effective_user.id
+    if uid not in config.OWNER_TELEGRAM_IDS and uid not in config.KONTEN_TELEGRAM_IDS:
+        return
+    cap = (msg.caption or "").lower()
+    ukuran, nama_ukuran = (1080, 1350), "4:5 (feed IG)"
+    if re.search(r"story|9\s*[:x/]\s*16|reels|tiktok", cap):
+        ukuran, nama_ukuran = (1080, 1920), "9:16 (story/reels)"
+    elif re.search(r"kotak|1\s*[:x/]\s*1|square", cap):
+        ukuran, nama_ukuran = (1080, 1080), "1:1 (kotak)"
+    pakai_logo = not re.search(r"tanpa\s*logo|no\s*logo|ga\s*usah\s*logo|gak\s*pake\s*logo", cap)
+    try:
+        import kantor
+        kantor.mulai("marketing", "Edit foto kiriman bos")
+    except Exception:
+        pass
+    try:
+        berkas = await (msg.photo[-1].get_file() if msg.photo else msg.document.get_file())
+        data = bytes(await berkas.download_as_bytearray())
+
+        def _olah():
+            from PIL import Image
+            img = Image.open(io.BytesIO(data))
+            return foto_mingguan.ke_jpeg(foto_mingguan.edit_kiriman(img, logo=pakai_logo, ukuran=ukuran))
+
+        hasil = await asyncio.to_thread(_olah)
+        await msg.reply_document(document=hasil, filename=f"Edit_MissPiggy_{msg.message_id}.jpg",
+                                 caption=f"✨ Udah diedit: {nama_ukuran}{'' if pakai_logo else ', tanpa logo'}.",
+                                 read_timeout=60, write_timeout=60)
+        konten._selesai("Foto selesai diedit")
+    except Exception as e:
+        logger.exception("Gagal edit foto kiriman")
+        konten._selesai("Gagal edit foto")
+        await msg.reply_text(f"Gagal edit foto: {e}")
+    raise ApplicationHandlerStop
+
+
 async def jawaban_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Tangkap REPLY admin ke pertanyaan Marketing ('foto ini roti apa aja?').
     Jalan sebelum handler teks lain; kalau bukan reply ke pertanyaan konten,
@@ -1991,15 +2055,18 @@ async def jawaban_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = await asyncio.to_thread(konten.cek_tanya, sheets, msg.reply_to_message.message_id)
     if not data:
         asal = (msg.reply_to_message.caption or msg.reply_to_message.text or "")
-        if asal.startswith("🎠 Ide carousel"):
+        if asal.startswith(("🎠 Ide carousel", "🎬 Ide video")):
             # Pertanyaan lama yang sudah dijawab/dibatalkan -> jangan sampai
             # balasannya nyasar dibaca sebagai ORDER.
             await msg.reply_text("Pertanyaan ini sudah dijawab atau dibatalkan sebelumnya. "
-                                 "Ketik /konten buat bikin ide carousel baru.")
+                                 "Ketik /konten (carousel) atau /video buat bikin ide baru.")
             raise ApplicationHandlerStop
         return
     if konten.baca_jawaban(msg.text or "", 9) != "batal":
-        await msg.reply_text("👌 Siap, Marketing lagi bikin carouselnya...")
+        if data.get("format") == "video":
+            await msg.reply_text("👌 Siap, Marketing lagi bikin videonya... (±1-2 menit)")
+        else:
+            await msg.reply_text("👌 Siap, Marketing lagi bikin carouselnya...")
     balasan = await konten.proses_jawaban(context.bot, sheets, msg.reply_to_message.message_id, msg.text or "")
     if balasan:
         await msg.reply_text(balasan)
@@ -4338,6 +4405,7 @@ def main():
     app.add_handler(CommandHandler("fotopo", fotopo_cmd))
     app.add_handler(CommandHandler("strategi", strategi_cmd))
     app.add_handler(CommandHandler("konten", konten_cmd))
+    app.add_handler(CommandHandler("video", video_cmd))
     app.add_handler(CommandHandler("katalogfoto", katalogfoto_cmd))
     app.add_handler(CommandHandler("hold", hold_cmd))
     app.add_handler(CommandHandler("panduan", panduan_cmd))
@@ -4356,6 +4424,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_produk_baru_confirm, pattern="^(confirm_produk|cancel_produk):"))
     app.add_handler(CallbackQueryHandler(handle_bundle_action_confirm, pattern="^(confirm_bundle|cancel_bundle):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, jawaban_konten), group=-1)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, edit_foto_konten), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(global_error_handler)
