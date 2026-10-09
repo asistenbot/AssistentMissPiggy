@@ -464,6 +464,14 @@ async def kirim_paket(bot, chat_id, sheets, thread_id=None):
             ))
         await bot.send_media_group(chat_id=chat_id, message_thread_id=thread_id, media=media,
                                    read_timeout=60, write_timeout=60)
+        # ingat urutan 7 foto ini, biar admin bisa kasih nama/coret pakai
+        # daftar bernomor di grup (1 roti keju, 2 batal, ...)
+        try:
+            ws = sheets._get_or_create_pengaturan_ws()
+            await asyncio.to_thread(sheets._write_pengaturan_value, ws, "foto_mingguan_terakhir",
+                                    json.dumps(paket["ids"][1:]))
+        except Exception as e:
+            logger.warning(f"Gagal simpan urutan foto mingguan: {e}")
     if len(paket["foto"]) < JUMLAH_FOTO:
         await bot.send_message(
             chat_id=chat_id, message_thread_id=thread_id,

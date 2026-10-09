@@ -823,3 +823,32 @@ def _progres(teks):
         kantor.progres("marketing", teks)
     except Exception:
         pass
+
+
+# ---------- kasih nama / coret 7 foto mingguan pakai daftar bernomor ----------
+
+def foto_mingguan_terakhir(sheets):
+    try:
+        ws = sheets._get_or_create_pengaturan_ws()
+        return json.loads(sheets._read_pengaturan_value(ws, "foto_mingguan_terakhir") or "[]")
+    except Exception:
+        return []
+
+
+def terapkan_label_mingguan(sheets, jawaban):
+    """jawaban = {nomor: nama atau None(batal)} untuk 7 foto mingguan
+    terakhir. Return (jumlah_dinamai, jumlah_dicoret, jumlah_foto) atau None."""
+    ids = foto_mingguan_terakhir(sheets)
+    if not ids:
+        return None
+    dinamai, dicoret = 0, []
+    for no, nama in jawaban.items():
+        if not 1 <= no <= len(ids):
+            continue
+        if nama is None:
+            dicoret.append(ids[no - 1])
+        elif not _mode_jawaban(nama):
+            dinamai += set_label(sheets, [ids[no - 1]], _rapikan_nama(nama))
+    if dicoret:
+        tolak_foto(sheets, dicoret)
+    return dinamai, len(dicoret), len(ids)

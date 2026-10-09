@@ -1962,16 +1962,41 @@ async def jawaban_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Jalan sebelum handler teks lain; kalau bukan reply ke pertanyaan konten,
     dibiarkan lewat ke handler biasa."""
     msg = update.message
-    if not msg or not msg.reply_to_message or not update.effective_user:
+    if not msg or not update.effective_user:
         return
     uid = update.effective_user.id
     if uid not in config.OWNER_TELEGRAM_IDS and uid not in config.KONTEN_TELEGRAM_IDS:
+        return
+    if not msg.reply_to_message or msg.reply_to_message.document:
+        # Di grup Konten: daftar bernomor (bukan reply ke pertanyaan carousel)
+        # = kasih nama / coret 7 foto mingguan terakhir.
+        if _di_grup_konten(update):
+            jawaban = konten.baca_jawaban(msg.text or "", 7)
+            if isinstance(jawaban, dict) and jawaban:
+                sheets = get_sheets_client()
+                hasil = await asyncio.to_thread(konten.terapkan_label_mingguan, sheets, jawaban)
+                if hasil is None:
+                    await msg.reply_text("Belum ada kiriman 7 foto mingguan yang bisa dikasih nama. "
+                                         "Ketik /fotopo dulu.")
+                else:
+                    dinamai, dicoret, total = hasil
+                    await msg.reply_text(
+                        f"✅ 7 foto mingguan terakhir: {dinamai} foto dikasih nama, {dicoret} foto dicoret "
+                        "(nggak dipakai lagi). Nama ini dipakai buat konten berikutnya.")
+            raise ApplicationHandlerStop
         return
     if not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id != context.bot.id:
         return
     sheets = get_sheets_client()
     data = await asyncio.to_thread(konten.cek_tanya, sheets, msg.reply_to_message.message_id)
     if not data:
+        asal = (msg.reply_to_message.caption or msg.reply_to_message.text or "")
+        if asal.startswith("🎠 Ide carousel"):
+            # Pertanyaan lama yang sudah dijawab/dibatalkan -> jangan sampai
+            # balasannya nyasar dibaca sebagai ORDER.
+            await msg.reply_text("Pertanyaan ini sudah dijawab atau dibatalkan sebelumnya. "
+                                 "Ketik /konten buat bikin ide carousel baru.")
+            raise ApplicationHandlerStop
         return
     if konten.baca_jawaban(msg.text or "", 9) != "batal":
         await msg.reply_text("👌 Siap, Marketing lagi bikin carouselnya...")
@@ -2767,8 +2792,16 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- FREE-TEXT ORDER PARSING ----------------
 
+def _di_grup_konten(update: Update) -> bool:
+    """Grup Konten khusus marketing: chat/foto di sana BUKAN order."""
+    gid = config.GROUP_CHAT_ID_MARKETING
+    return bool(gid) and str(update.effective_chat.id) == str(gid)
+
+
 @owner_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _di_grup_konten(update):
+        return
     # Lagi nunggu admin ngetik nominal ongkir (abis klik "Isi/Ubah Ongkir")?
     # Ini dicek PALING atas, sebelum kemungkinan lain.
     if context.user_data.get("awaiting_ongkir_for"):
@@ -3043,6 +3076,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _di_grup_konten(update):
+        return
     """Admin kirim/forward SCREENSHOT chat order customer (bukan diketik/paste
     teks) -- dibaca pake Claude vision (ai_parser.parse_customer_chat_image)
     trus diperlakukan PERSIS kayak order dari teks: masuk ke pending_orders
@@ -4320,7 +4355,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^(confirm_edit|cancel_edit)$"))
     app.add_handler(CallbackQueryHandler(handle_produk_baru_confirm, pattern="^(confirm_produk|cancel_produk):"))
     app.add_handler(CallbackQueryHandler(handle_bundle_action_confirm, pattern="^(confirm_bundle|cancel_bundle):"))
-    app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, jawaban_konten), group=-1)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, jawaban_konten), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(global_error_handler)
