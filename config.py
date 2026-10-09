@@ -15,6 +15,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # (OWNER_TELEGRAM_ID lama masih didukung buat yang cuma 1 admin)
 _owner_ids_raw = os.getenv("OWNER_TELEGRAM_IDS") or os.getenv("OWNER_TELEGRAM_ID", "0")
 OWNER_TELEGRAM_IDS = [int(x.strip()) for x in _owner_ids_raw.split(",") if x.strip()]
+# Admin tambahan (akses penuh sama kayak OWNER) -- dipisah biar nambah orang
+# nggak perlu ngubah/menimpa OWNER_TELEGRAM_IDS yang lama.
+OWNER_TELEGRAM_IDS += [int(x.strip()) for x in (os.getenv("ADMIN_TAMBAHAN_IDS") or "").split(",")
+                       if x.strip() and int(x.strip()) not in OWNER_TELEGRAM_IDS]
 # Tim KONTEN: cuma boleh pakai fitur Marketing & Konten (/promo, /fotopo,
 # /konten, /katalogfoto, /hold, /lepas, /panduan + jawab pertanyaan
 # carousel). TIDAK bisa lihat order, invoice, pembayaran, atau laporan.
