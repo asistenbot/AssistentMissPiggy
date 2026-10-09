@@ -37,6 +37,9 @@ from ai_parser import (
 from scheduler_jobs import setup_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Sembunyikan log detail httpx/httpcore supaya token bot tidak tercetak di log
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
