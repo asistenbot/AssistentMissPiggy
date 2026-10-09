@@ -15,6 +15,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # (OWNER_TELEGRAM_ID lama masih didukung buat yang cuma 1 admin)
 _owner_ids_raw = os.getenv("OWNER_TELEGRAM_IDS") or os.getenv("OWNER_TELEGRAM_ID", "0")
 OWNER_TELEGRAM_IDS = [int(x.strip()) for x in _owner_ids_raw.split(",") if x.strip()]
+# Tim KONTEN: cuma boleh pakai fitur Marketing & Konten (/promo, /fotopo,
+# /konten, /katalogfoto, /hold, /lepas, /panduan + jawab pertanyaan
+# carousel). TIDAK bisa lihat order, invoice, pembayaran, atau laporan.
+# Isi KONTEN_TELEGRAM_IDS di Railway, dipisah koma.
+KONTEN_TELEGRAM_IDS = [int(x.strip()) for x in (os.getenv("KONTEN_TELEGRAM_IDS") or "").split(",") if x.strip()]
 
 # Opsional: kalau diisi, auto-recap Rabu & laporan bulanan dikirim ke GRUP ini
 # (1x doang, semua admin di grup itu liat bareng), bukan ke tiap admin

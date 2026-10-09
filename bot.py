@@ -40,9 +40,35 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
+def konten_boleh(func):
+    """Admin ATAU tim konten (KONTEN_TELEGRAM_IDS) -- khusus fitur konten."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if uid not in config.OWNER_TELEGRAM_IDS and uid not in config.KONTEN_TELEGRAM_IDS:
+            await update.message.reply_text("Bot ini khusus admin Miss Piggy.")
+            return
+        return await func(update, context)
+    return wrapper
+
+
+async def idku_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Siapa aja boleh: kasih tau ID Telegram sendiri (buat didaftarkan)."""
+    u = update.effective_user
+    await update.message.reply_text(f"ID Telegram kamu: {u.id}\nNama: {u.full_name}")
+
+
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in config.OWNER_TELEGRAM_IDS:
+        uid = update.effective_user.id
+        if uid not in config.OWNER_TELEGRAM_IDS:
+            # Tim konten ngobrol/kirim foto di grup -> diam aja, jangan spam
+            # "khusus admin" dan jangan diproses sebagai order.
+            if uid in config.KONTEN_TELEGRAM_IDS:
+                pesan = update.message
+                if pesan and pesan.text and pesan.text.startswith("/"):
+                    await pesan.reply_text("Perintah ini khusus admin. Tim konten bisa pakai: "
+                                           "/promo /fotopo /konten /katalogfoto /hold /lepas /panduan")
+                return
             await update.message.reply_text("Bot ini khusus admin Miss Piggy.")
             return
         return await func(update, context)
@@ -1824,7 +1850,7 @@ def _tanggal_indo(d: datetime.date) -> str:
     return f"{_HARI[d.weekday()]} {d.day} {_BULAN[d.month - 1]}"
 
 
-@owner_only
+@konten_boleh
 async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Staf Marketing: draf pengumuman PO untuk TikTok, WA, dan IG.
     /promo [catatan bebas], misal: /promo ada rasa baru cranberry cheese"""
@@ -1871,7 +1897,7 @@ async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _info_pindah_grup(update, chat_id)
 
 
-@owner_only
+@konten_boleh
 async def fotopo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bikin poster Open PO + 7 foto sosmed sekarang juga (versi manual dari
     kiriman otomatis tiap Jumat)."""
@@ -1910,7 +1936,7 @@ async def strategi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error)
 
 
-@owner_only
+@konten_boleh
 async def konten_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Marketing: bikin carousel dari ide admin (atau ide bebas).
     /konten [ide], misal: /konten kenalan sama 3 rasa donat favorit"""
@@ -1935,7 +1961,8 @@ async def jawaban_konten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.reply_to_message or not update.effective_user:
         return
-    if update.effective_user.id not in config.OWNER_TELEGRAM_IDS:
+    uid = update.effective_user.id
+    if uid not in config.OWNER_TELEGRAM_IDS and uid not in config.KONTEN_TELEGRAM_IDS:
         return
     if not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id != context.bot.id:
         return
@@ -1999,17 +2026,17 @@ async def _ubah_hold(update: Update, context: ContextTypes.DEFAULT_TYPE, hold: b
             "Cek kolom Label di tab \"Katalog Foto\" kalau nama produknya perlu diganti.")
 
 
-@owner_only
+@konten_boleh
 async def hold_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _ubah_hold(update, context, True)
 
 
-@owner_only
+@konten_boleh
 async def lepas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _ubah_hold(update, context, False)
 
 
-@owner_only
+@konten_boleh
 async def panduan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lihat/ubah ciri-ciri produk untuk AI pengecek foto.
     /panduan                     -> lihat daftar
@@ -2038,7 +2065,7 @@ async def panduan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Habis mengubah, jalankan /katalogfoto ulang biar semua foto dicek pakai panduan baru.")
 
 
-@owner_only
+@konten_boleh
 async def katalogfoto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cek foto baru di folder Drive dan masukkan ke katalog (dilihat AI sekali)."""
     ulang = bool(context.args) and context.args[0].lower() == "ulang"
@@ -3011,6 +3038,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parsed["_preview_msg_id"] = sent.message_id
 
 
+@owner_only
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin kirim/forward SCREENSHOT chat order customer (bukan diketik/paste
     teks) -- dibaca pake Claude vision (ai_parser.parse_customer_chat_image)
@@ -4254,6 +4282,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("groupid", groupid_cmd))
+    app.add_handler(CommandHandler("idku", idku_cmd))
     app.add_handler(CommandHandler("pricelist", pricelist))
     app.add_handler(CommandHandler("rekap", rekap))
     app.add_handler(CommandHandler("invoice", invoice_cmd))
